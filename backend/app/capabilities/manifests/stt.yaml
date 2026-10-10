@@ -1,0 +1,17 @@
+id: stt
+label: Speech-to-text
+description: >-
+  Transcribes audio and videos without captions. Whistle runs on this
+  computer; an endpoint can be used instead.
+kind: bundled_with_endpoint_override
+required: false
+contract: openai_transcriptions
+locality: from_mode
+ui_fields: [mode, base_url, api_key, model]
+health_check: stt_transcribe
+presets:
+  - {id: openai, label: OpenAI, adapter: openai_compatible, base_url: "https://api.openai.com/v1", needs_api_key: true}
+  - {id: custom, label: Other OpenAI-compatible, adapter: openai_compatible, base_url: null, needs_api_key: false}
+field_overrides:
+  model:
+    placeholder: whisper-1

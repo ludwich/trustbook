@@ -1,0 +1,12 @@
+id: gate
+label: Gate model
+description: >-
+  Makes quick routing decisions with a fixed set of choices. It can share the
+  chat model or use a smaller, faster one.
+kind: endpoint
+required: false
+contract: openai_chat
+locality: from_endpoint
+ui_fields: [use_chat, preset, base_url, api_key, model, api_version]
+health_check: chat_ping
+presets_from: chat
