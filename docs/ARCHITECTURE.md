@@ -422,10 +422,30 @@ The eval runner reads it for threshold tuning; the UI ignores it.
 
 ### Gate router and log (SPEC §5, §6)
 - The `gate` capability (default: the chat endpoint) classifies each chat question with a fixed-choice JSON output
-  `{"decision": "sources"|"brainstorm"|"chitchat", "confidence": 0..1}` before retrieval. It never changes the
-  grounded pipeline. `brainstorm` adds a hint pointing to the Ideation tab to the answer. `chitchat` gets a short
-  fixed reply ("I answer questions from your sources…") without an LLM answer. Every decision is written to
-  `gate_log`.
-- `POST /api/spaces/{sid}/gate-log/{id}/correct` body `{"decision": str}` stores the user's correction ("That's
-  not right" in the UI). `GET /api/spaces/{sid}/gate-log?limit=` lists the log (Settings → Gate log).
-- The gate disabled, not configured, or failing → decision `sources`, logged with `confidence: null`.
+  `{"decision": "sources"|"brainstorm"|"chitchat", "confidence": 0..1}` before retrieval (temperature 0, only the
+  question is sent, at most 5 s; the request log attributes the call to `gate` and the space). It never changes the
+  grounded pipeline and never opens an ungrounded answer path. Every decision is written to `gate_log`.
+- `sources`: the grounded pipeline as usual.
+- `brainstorm`: the grounded pipeline as usual, plus `content.hint: "ideation"` on the assistant message (answer or
+  refusal), so the UI can point to the Ideation tab.
+- `chitchat`: no answer call. The fixed reply "I answer questions from the sources in this space. Ask about
+  something in them." is stored as `content.text` with `badge: null` and sent only in `done` (no `sentence` or
+  `refused` events; the stream is `status` `retrieving` → `done`).
+- The gate disabled, not configured, or failing (error, unusable reply, over 5 s) → decision `sources`, logged with
+  `confidence: null`.
+- `Message` gains `"gate_log_id": int|null` (top level): the gate decision behind an assistant message, so the UI
+  can offer "That's not right" on it. `null` on user messages.
+- `GET /api/spaces/{sid}/gate-log?limit=` (1–1000, default 100) → `GateLogEntry[]`, a bare list, newest first.
+- `POST /api/spaces/{sid}/gate-log/{id}/correct` body `{"decision": "sources"|"brainstorm"|"chitchat"|null}` →
+  `GateLogEntry`. Stores the user's correction ("That's not right"); `null` clears it. Unknown id → `404`,
+  other values → `422`.
+
+```
+GateLogEntry = {"id": int, "created": str, "input": str,          // input = the question
+                "decision": "sources"|"brainstorm"|"chitchat", "confidence": float|null,
+                "user_correction": "sources"|"brainstorm"|"chitchat"|null}
+```
+
+Contract additions summarised: `refused.reason` gains `"unsupported"` (layers 4–5: more than half of the
+sentences, or the first one, not supported; message "Not in your sources" with the usual suggestion);
+`Message.content` gains `"hint"?: "ideation"`; `Message` gains `diagnostics` (above) and `gate_log_id`.

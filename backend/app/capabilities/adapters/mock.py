@@ -4,7 +4,9 @@ For grounded prompts (a JSON schema with ``sentences``) it answers like a carefu
 it reads the numbered chunks back out of the prompt, quotes the chunk sentence(s) that share the
 most meaningful words with the question and cites them. When no chunk shares a meaningful word
 with the question it returns ``{"sentences": []}``. Overview prompts (schema with ``questions``)
-get summary sentences citing chunks plus exactly three questions.
+get summary sentences citing chunks plus exactly three questions. Gate prompts (schema with
+``decision``) are classified by keywords: greetings and thanks → ``chitchat``; "brainstorm",
+"ideas for", "what if" → ``brainstorm``; everything else → ``sources``.
 """
 
 from __future__ import annotations
@@ -58,6 +60,24 @@ def grounded_answer(chunks: Sequence[PromptChunk], question: str) -> dict[str, A
     return {"sentences": sentences}
 
 
+_GREETING_WORDS = frozenset(
+    "hi hello hey hiya thanks thank you thx cheers ok okay good morning afternoon evening bye "
+    "goodbye great nice there".split()
+)
+_BRAINSTORM_PHRASES = ("brainstorm", "ideas for", "what if")
+
+
+def gate_decision(message: str) -> dict[str, Any]:
+    """Deterministic gate classification of ``message``."""
+    lowered = " ".join(message.lower().split())
+    words = re.findall(r"[a-z']+", lowered)
+    if words and all(w in _GREETING_WORDS for w in words):
+        return {"decision": "chitchat", "confidence": 0.9}
+    if any(phrase in lowered for phrase in _BRAINSTORM_PHRASES):
+        return {"decision": "brainstorm", "confidence": 0.8}
+    return {"decision": "sources", "confidence": 0.7}
+
+
 def grounded_overview(chunks: Sequence[PromptChunk]) -> dict[str, Any]:
     """Up to three summary sentences (one per source first) and exactly three questions."""
     picked: list[PromptChunk] = []
@@ -108,6 +128,9 @@ class MockChatAdapter:
         last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
         prompt_tokens = sum(len(m["content"].split()) for m in messages)
         properties = (json_schema or {}).get("properties")
+        if isinstance(properties, dict) and "decision" in properties:
+            text = json.dumps(gate_decision(last_user))
+            return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
         if isinstance(properties, dict) and "sentences" in properties:
             # The prompt with the chunks is the first user message (a retry appends more).
             prompt = next((m["content"] for m in messages if m["role"] == "user"), "")

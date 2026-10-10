@@ -7,11 +7,12 @@ import json
 import re
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated, Any, BinaryIO
+from typing import Annotated, Any, BinaryIO, Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from app.api.deps import ServicesDep
 from app.capabilities.adapters.factory import build_search_adapter
@@ -20,6 +21,13 @@ from app.db.models import Chunk, Source
 from app.ingest import errors
 from app.ingest.browse_root import BrowsePathError, BrowseRootMissingError, resolve_in_root
 from app.ingest.errors import IngestError, fail
+from app.ingest.estimate import (
+    Workload,
+    estimate,
+    folder_workload,
+    item_workload,
+    upload_workload,
+)
 from app.ingest.folder import SECRETS_REPORT
 from app.ingest.readers import UPLOAD_EXTENSIONS, extension, original_file
 from app.ingest.service import RefreshNotAllowedError
@@ -211,11 +219,10 @@ def add_from_search(
     ]
 
 
-@router.post("/spaces/{space_id}/sources/folder", status_code=status.HTTP_201_CREATED)
-def add_folder(space_id: str, body: FolderCreate, services: ServicesDep) -> SourceOut:
-    services.spaces.get(space_id)
+def _linked_folder(services: ServicesDep, path: str) -> tuple[Path, str]:
+    """(absolute folder, relative path) for a folder to link, or the HTTP error why not."""
     try:
-        resolved, relative = resolve_in_root(services.paths.browse_root, body.path)
+        resolved, relative = resolve_in_root(services.paths.browse_root, path)
     except BrowseRootMissingError as exc:
         raise HTTPException(status_code=404, detail=_ROOT_MISSING) from exc
     except BrowsePathError as exc:
@@ -226,6 +233,13 @@ def add_folder(space_id: str, body: FolderCreate, services: ServicesDep) -> Sour
         raise HTTPException(status_code=400, detail="Choose a folder inside your home folder.")
     if not resolved.is_dir():
         raise HTTPException(status_code=400, detail="This is a file, not a folder.")
+    return resolved, relative
+
+
+@router.post("/spaces/{space_id}/sources/folder", status_code=status.HTTP_201_CREATED)
+def add_folder(space_id: str, body: FolderCreate, services: ServicesDep) -> SourceOut:
+    services.spaces.get(space_id)
+    _resolved, relative = _linked_folder(services, body.path)
     source = services.ingest.create(
         space_id,
         type="folder",
@@ -239,6 +253,76 @@ def add_folder(space_id: str, body: FolderCreate, services: ServicesDep) -> Sour
 _ROOT_MISSING = (
     "Your home folder is not available to Trustbook. Check TRUSTBOOK_BROWSE_ROOT in the .env file."
 )
+
+
+# --- estimates (SPEC §11) --------------------------------------------------------------------
+
+
+class EstimateFolder(BaseModel):
+    kind: Literal["folder"]
+    path: str
+
+
+class EstimateFile(BaseModel):
+    name: str = Field(max_length=1_000)
+    bytes: int = Field(ge=0)
+
+
+class EstimateUpload(BaseModel):
+    kind: Literal["upload"]
+    files: list[EstimateFile] = Field(min_length=1, max_length=10_000)
+
+
+class EstimateItems(BaseModel):
+    kind: Literal["url", "youtube", "paste"]
+    count: int = Field(default=1, ge=1, le=10_000)
+
+
+EstimateItem = Annotated[
+    EstimateFolder | EstimateUpload | EstimateItems, Field(discriminator="kind")
+]
+
+
+class EstimateRequest(BaseModel):
+    items: list[EstimateItem] = Field(min_length=1, max_length=100)
+
+
+class EstimateOut(BaseModel):
+    seconds: int
+    files: int | None
+    summary: str
+    confirm: bool
+
+
+def _item_workload(services: ServicesDep, item: EstimateItem) -> Workload:
+    if isinstance(item, EstimateFolder):
+        root, _relative = _linked_folder(services, item.path)
+        try:
+            return folder_workload(root)
+        except IngestError as exc:  # more files than the folder limit
+            detail = f"{exc.reason} {exc.next_step}" if exc.next_step else exc.reason
+            raise HTTPException(status_code=422, detail=detail) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=404, detail=errors.FOLDER_MISSING[0]) from exc
+    if isinstance(item, EstimateUpload):
+        work = Workload()
+        for file in item.files:
+            work += upload_workload(re.split(r"[\\/]", file.name)[-1], file.bytes)
+        return work
+    return item_workload(item.kind, item.count)
+
+
+@router.post("/spaces/{space_id}/sources/estimate")
+def estimate_sources(space_id: str, body: EstimateRequest, services: ServicesDep) -> EstimateOut:
+    """How long adding these sources takes on this computer; ``confirm`` above 2 minutes."""
+    services.spaces.get(space_id)
+    work = Workload()
+    for item in body.items:
+        work += _item_workload(services, item)
+    result = estimate(work, services.calibration.read())
+    return EstimateOut(
+        seconds=result.seconds, files=result.files, summary=result.summary, confirm=result.confirm
+    )
 
 
 @router.post("/spaces/{space_id}/web-search")

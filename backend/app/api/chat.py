@@ -14,10 +14,12 @@ from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
 from app.api.deps import ServicesDep
-from app.capabilities.adapters.base import AdapterError
+from app.capabilities.adapters.base import AdapterError, ChatAdapter
+from app.capabilities.adapters.factory import build_chat_adapter
 from app.capabilities.bundled import ProviderUnavailableError
 from app.capabilities.http import space_context
 from app.capabilities.registry import ConfigError
+from app.chat.gate import GATE_TIMEOUT_S, Gate, GateLogStore
 from app.chat.repository import ChatStore, ConversationNotFoundError
 from app.chat.schemas import (
     ChatStatusOut,
@@ -28,6 +30,7 @@ from app.chat.schemas import (
 )
 from app.chat.service import ChatService, EventSink
 from app.db.engine import get_engine
+from app.grounding.verify import Verifier, build_verifier, checker_scores
 from app.retrieval.service import Retrieval, retrieve
 from app.retrieval.store import source_counts
 from app.services import Services
@@ -90,6 +93,18 @@ def stream_events(run: Callable[[EventSink], None], space: SpaceRecord) -> Itera
         yield item
 
 
+def gate_adapter(services: Services) -> Callable[[], ChatAdapter] | None:
+    """The gate's adapter factory, or None when the gate is not ready (not set up, failing)."""
+    if services.capabilities.get("gate").status != "ready":
+        return None
+
+    def build() -> ChatAdapter:
+        endpoint = services.capabilities.endpoint("gate")
+        return build_chat_adapter(endpoint, services.http, timeout=GATE_TIMEOUT_S)
+
+    return build
+
+
 def chat_service(services: Services, space: SpaceRecord) -> ChatService:
     engine = get_engine(space.db_path)
     index = services.indexes.for_space(space.id)
@@ -99,11 +114,18 @@ def chat_service(services: Services, space: SpaceRecord) -> ChatService:
         with providers.use.shared():  # waits while calibration measures
             return retrieve(engine, index, providers.embedder(), providers.reranker(), question)
 
+    def verifier() -> Verifier:
+        return build_verifier(
+            services.grounding_settings(), checker_scores(services.providers), space.folder
+        )
+
     return ChatService(
         ChatStore(engine),
         retrieve=run_retrieval,
         chat_adapter=services.chat_adapter,
         refuse_threshold=services.settings.load().thresholds.refuse,
+        verifier=verifier,
+        gate=Gate(GateLogStore(engine), adapter=gate_adapter(services)),
     )
 
 

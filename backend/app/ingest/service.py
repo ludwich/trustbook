@@ -28,7 +28,10 @@ from app.index.base import IndexedChunk, IndexRegistry, SpaceIndex
 from app.index.lance import IndexDimensionError
 from app.ingest import errors
 from app.ingest.errors import IngestError, fail
+from app.ingest.estimate import job_seconds
 from app.ingest.readers import IngestTools, read_source
+from app.jobs.calibration import Calibration
+from app.jobs.eta import ESTIMATE_KEY
 from app.jobs.handlers import JobCancelledError, JobContext
 from app.jobs.pool import WorkerPool
 from app.jobs.repository import JobNotFoundError, JobRepository
@@ -82,6 +85,8 @@ class IngestService:
         self.providers = providers
         self.tools = tools
         self.on_ready = on_ready
+        # This computer's measured speed, for job estimates (set by the app; tests: none).
+        self.calibration: Callable[[], Calibration | None] = lambda: None
 
     # --- helpers ---------------------------------------------------------------------------
 
@@ -179,12 +184,25 @@ class IngestService:
                 return self._fail(repo, source, exc)
         return self.enqueue(repo, source) if enqueue else source
 
+    def estimate_seconds(self, repo: SourceRepository, source: Source) -> int | None:
+        """Estimated seconds for indexing ``source`` now (``None``: can't be told)."""
+        try:
+            calibration = self.calibration()
+        except Exception:
+            logger.warning("Could not read the speed test results", exc_info=True)
+            calibration = None
+        return job_seconds(source, repo.folder(source.id), self.tools.browse_root, calibration)
+
     def enqueue(self, repo: SourceRepository, source: Source) -> Source:
+        payload: dict[str, Any] = {"source_id": source.id}
+        seconds = self.estimate_seconds(repo, source)
+        if seconds is not None:
+            payload[ESTIMATE_KEY] = seconds
         job = self.jobs.enqueue(
             INGEST_KIND,
             _title_for_job(source.title),
             space_id=repo.record.id,
-            payload={"source_id": source.id},
+            payload=payload,
         )
         updated = repo.update(
             source.id,

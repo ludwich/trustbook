@@ -35,8 +35,31 @@ class FakeReranker:
 
 
 class FakeGrounding:
+    """Support of ``(premise, hypothesis)``: 1.0 when the hypothesis is quoted from the premise
+    (case and whitespace ignored, a trailing "…" allowed), else the share of its content words
+    found in the premise. ``scores`` pins exact hypotheses to a score. Records every call."""
+
+    def __init__(self, scores: dict[str, float] | None = None) -> None:
+        self.scores = dict(scores or {})
+        self.calls: list[list[tuple[str, str]]] = []
+
     def score(self, pairs: Sequence[tuple[str, str]]) -> list[float]:
-        return [1.0 if p == h else 0.0 for p, h in pairs]
+        self.calls.append(list(pairs))
+        return [self._one(p, h) for p, h in pairs]
+
+    def _one(self, premise: str, hypothesis: str) -> float:
+        from app.chat.text import content_terms
+
+        if hypothesis in self.scores:
+            return self.scores[hypothesis]
+        quoted = " ".join(hypothesis.split()).casefold().rstrip("…").strip()
+        if quoted and quoted in " ".join(premise.split()).casefold():
+            return 1.0
+        terms = content_terms(hypothesis)
+        if not terms:
+            return 0.0
+        found = set(content_terms(premise))
+        return sum(t in found for t in terms) / len(terms)
 
 
 class FakeTranscriber:

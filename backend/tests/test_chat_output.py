@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -11,6 +12,7 @@ from app.chat.output import (
     extract_json,
     parse_answer,
     parse_overview,
+    split_inline_citations,
 )
 from app.retrieval.service import RetrievedChunk
 from tests.chat_helpers import answer_json
@@ -126,3 +128,82 @@ def test_citations_are_numbered_by_first_use() -> None:
     ]
     with pytest.raises(KeyError):
         number_citations([DraftSentence("X.", ("c9",))], chunks)
+
+
+# --- inline citation markers (several sentences packed into one "text") ----------------------
+
+SMOKE_TEXT = (
+    'The example uses a total of 3 and a backoff_factor of 0.1 ["c1", "c2"]. When max_retries is '
+    "left at its default, HTTPAdapter uses the DEFAULT_RETRIES constant, which is set to 0 "
+    '["c9"]. As a result, failed connections are not retried.'
+)
+
+
+def test_packed_sentences_are_split_at_inline_markers() -> None:
+    raw = json.dumps({"sentences": [{"text": SMOKE_TEXT, "chunk_ids": ["c3"]}]})
+    parsed = parse_answer(raw, {"c1", "c2", "c3", "c9"})
+    assert [(s.text, s.chunk_ids) for s in parsed.sentences] == [
+        ("The example uses a total of 3 and a backoff_factor of 0.1.", ("c1", "c2")),
+        (
+            "When max_retries is left at its default, HTTPAdapter uses the DEFAULT_RETRIES "
+            "constant, which is set to 0.",
+            ("c9",),
+        ),
+        ("As a result, failed connections are not retried.", ("c3",)),
+    ]
+    assert parsed.dropped == [] and parsed.returned == 1
+
+
+def test_a_segment_with_an_unknown_marker_id_is_dropped_alone() -> None:
+    raw = json.dumps({"sentences": [{"text": SMOKE_TEXT, "chunk_ids": ["c3"]}]})
+    parsed = parse_answer(raw, {"c1", "c2", "c3"})  # c9 was not in the prompt
+    assert [s.chunk_ids for s in parsed.sentences] == [("c1", "c2"), ("c3",)]
+    assert parsed.dropped == [
+        "When max_retries is left at its default, HTTPAdapter uses the DEFAULT_RETRIES "
+        "constant, which is set to 0."
+    ]
+
+
+def test_trailing_text_without_declared_ids_is_dropped() -> None:
+    raw = json.dumps({"sentences": [{"text": "One [c1]. Two without ids.", "chunk_ids": []}]})
+    parsed = parse_answer(raw, VALID)
+    assert [(s.text, s.chunk_ids) for s in parsed.sentences] == [("One.", ("c1",))]
+    assert parsed.dropped == ["Two without ids."]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "rest"),
+    [
+        ("Alpha [c1]", [("Alpha", ["c1"])], ""),
+        ("Alpha [c1, c2].", [("Alpha.", ["c1", "c2"])], ""),
+        ("Alpha (c2). Beta (C1, c2)!", [("Alpha.", ["c2"]), ("Beta!", ["c1", "c2"])], ""),
+        ("Alpha ['c1'] beta [ \"c2\" ]", [("Alpha", ["c1"]), ("beta", ["c2"])], ""),
+        (
+            "Alpha [c1][c2]. Beta [c1], [c2].",
+            [("Alpha.", ["c1", "c2"]), ("Beta.", ["c1", "c2"])],
+            "",
+        ),
+        ("[c1] Leading marker only", [], "Leading marker only"),
+        ("Uses arr[1] and f(x) [c2].", [("Uses arr[1] and f(x).", ["c2"])], ""),
+        ("No markers  here.", [], "No markers here."),
+    ],
+)
+def test_split_inline_citations(
+    text: str, expected: list[tuple[str, list[str]]], rest: str
+) -> None:
+    assert split_inline_citations(text) == (expected, rest)
+
+
+def test_no_prompt_label_ever_reaches_the_text() -> None:
+    raw = json.dumps(
+        {
+            "sentences": [
+                {"text": 'A ["c1"]. B [c2, c1]; C (c2). D', "chunk_ids": ["c1"]},
+                {"text": "E [c7]. F", "chunk_ids": ["c2"]},
+            ]
+        }
+    )
+    parsed = parse_answer(raw, VALID)
+    texts = [s.text for s in parsed.sentences] + parsed.dropped
+    assert texts == ["A.", "B;", "C.", "D", "F", "E."]
+    assert not any(re.search(r"\bc\d+\b", t, re.IGNORECASE) for t in texts)

@@ -128,11 +128,14 @@ def test_grounded_answer_streams_and_is_persisted(env: Env) -> None:
         "citations": [citation],
     }
     message = events[-1][1]["message"]
-    assert message["role"] == "assistant" and message["badge"] is None
+    assert message["role"] == "assistant" and message["badge"] == "verified"
     assert message["content"] == {
         "sentences": [{"text": sentence["text"], "citations": [citation]}],
     }
     assert message["removed_sentences"] == []
+    diagnostics = message["diagnostics"]
+    assert diagnostics["sentence_scores"] == [1.0] and diagnostics["regenerated"] is False
+    assert diagnostics["top_rerank"] > 0
     assert message["sources_used"] == [{"source_id": source, "title": "Requests guide"}]
 
     history = env.client.get(env.url(f"/conversations/{cid}/messages")).json()
@@ -140,7 +143,7 @@ def test_grounded_answer_streams_and_is_persisted(env: Env) -> None:
     assert history[0]["content"]["text"] == question.strip()
     assert history[1] == message
     rows = ChatStore(env.engine).citation_rows(message["id"])
-    assert [(r.sentence_index, r.chunk_id) for r in rows] == [(0, chunk_id)]
+    assert [(r.sentence_index, r.chunk_id, r.verifier_score) for r in rows] == [(0, chunk_id, 1.0)]
 
     title = env.client.get(env.url("/conversations")).json()[0]["title"]
     assert title.startswith("How are proxies configured?") and len(title) <= 60

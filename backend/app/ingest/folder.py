@@ -86,6 +86,7 @@ READ_WORKERS_MAX = 8
 class WalkResult:
     files: list[str] = field(default_factory=list)  # relative paths, sorted
     skipped_large: int = 0
+    sizes: dict[str, int] = field(default_factory=dict)  # bytes per file (for estimates)
 
 
 def _extension(name: str) -> str:
@@ -136,6 +137,7 @@ def walk_folder(root: Path, *, max_files: int = MAX_FILES) -> WalkResult:
             if size == 0:
                 continue
             result.files.append(rel(name))
+            result.sizes[rel(name)] = size
             if len(result.files) > max_files:
                 raise fail(errors.FOLDER_TOO_BIG)
     result.files.sort()
@@ -173,6 +175,18 @@ def _read_text_file(path: Path) -> str | None:
 def looks_generated(text: str) -> bool:
     """A code file with a very long line: minified or generated, not something to read."""
     return any(len(line) > MAX_CODE_LINE_CHARS for line in text.split("\n"))
+
+
+def skipped_when_read(head: bytes, ext: str) -> bool:
+    """Whether a text or code file starting with ``head`` is skipped when read (estimates).
+
+    The same checks as reading the whole file: binary, PDF/PostScript content, or (code only) a
+    line over :data:`MAX_CODE_LINE_CHARS`. A line that long inside ``head`` is at least as long in
+    the whole file, so a head never wrongly marks a file as generated.
+    """
+    if looks_binary(head) or head.lstrip()[:5].startswith(_GENERATED_MAGIC):
+        return True
+    return ext not in TEXT_DOCUMENTS and looks_generated(normalise_text(decode_text(head)))
 
 
 @dataclass

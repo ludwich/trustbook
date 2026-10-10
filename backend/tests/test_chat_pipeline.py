@@ -10,6 +10,7 @@ from app.chat.output import InvalidOutputError, parse_answer
 from app.chat.pipeline import NO_CITED_ANSWER, NOT_IN_SOURCES, Answered, Refused, answer
 from app.chat.prompt import ANSWER_SCHEMA, RETRY_INSTRUCTION, TEMPERATURE
 from app.chat.schemas import Stage
+from app.grounding.verify import Verifier
 from app.retrieval.service import Retrieval, RetrievedChunk
 from tests.chat_helpers import ScriptedChat, answer_json
 
@@ -22,6 +23,11 @@ def chunk(cid: str, score: float, source: str = "s1") -> RetrievedChunk:
 
 def retrieval(*chunks: RetrievedChunk) -> Retrieval:
     return Retrieval(chunks=list(chunks), ranked=list(chunks), source_ids=["s1"])
+
+
+def pass_all() -> Verifier:
+    """Layers 4-5 that pass every sentence (these tests are about layers 2-3)."""
+    return Verifier(lambda pairs: [1.0] * len(pairs), threshold=0.5)
 
 
 def run(
@@ -40,6 +46,7 @@ def run(
         retrieve=lambda _q: found,
         chat_adapter=factory,
         refuse_threshold=threshold,
+        verifier=pass_all(),
         on_stage=stages.append,
     )
     return outcome, stages, built
