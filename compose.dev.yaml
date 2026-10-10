@@ -1,0 +1,50 @@
+# Trustbook - local development build. Same topology as compose.yaml, but the app image is built
+# from this checkout.
+#
+#   docker compose -f compose.dev.yaml up --build
+#   BAKE_MODELS=0 docker compose -f compose.dev.yaml up --build    # fast build, no bundled models
+#
+# Reads the same .env as compose.yaml (GITHUB_OWNER and TRUSTBOOK_IMAGE_TAG are not used here).
+
+x-app-build: &app-build
+  context: .
+  dockerfile: docker/app.Dockerfile
+  args:
+    BAKE_MODELS: ${BAKE_MODELS:-1}
+    TRUSTBOOK_VERSION: dev
+
+services:
+  app:
+    image: trustbook:dev
+    build: *app-build
+    ports: ["${TRUSTBOOK_PORT:-8484}:8484"]
+    volumes:
+      - ${TRUSTBOOK_BROWSE_ROOT:?set TRUSTBOOK_BROWSE_ROOT in .env}:/host:ro
+      - ${TRUSTBOOK_DATA:?set TRUSTBOOK_DATA in .env}:/data
+    environment:
+      - TRUSTBOOK_SEARXNG_URL=http://searxng:8080
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: [searxng]
+    restart: unless-stopped
+
+  searxng-init:
+    image: trustbook:dev
+    build: *app-build
+    command: ["python", "-m", "app.searxng_init"]
+    environment:
+      - TRUSTBOOK_SEARXNG_CONFIG_DIR=/etc/searxng
+    volumes:
+      - searxng-config:/etc/searxng
+    restart: "no"
+
+  searxng:
+    image: docker.io/searxng/searxng:2026.10.9-f4822b3fc@sha256:85492ba800a861e3e8ff6014c430e81369fe6ca766a9990595f616d1ce95b272
+    volumes:
+      - searxng-config:/etc/searxng
+    depends_on:
+      searxng-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  searxng-config:

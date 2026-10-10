@@ -1,0 +1,38 @@
+# Build context is the repo root; send only what docker/app.Dockerfile needs.
+.git
+.github
+.claude
+**/.DS_Store
+**/*.swp
+
+# Local config, secrets and data
+.env
+.env.*
+!.env.example
+data/
+Trustbook/
+**/settings.json
+
+# Python
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/htmlcov
+backend/tests
+
+# Node / frontend build output
+**/node_modules
+frontend/dist
+**/coverage
+**/playwright-report
+**/test-results
+**/.vite
+
+# Models and eval data are fetched/handled at build time, never copied from the host
+models/
+eval/
+docs/

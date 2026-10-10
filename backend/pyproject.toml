@@ -1,0 +1,87 @@
+[project]
+name = "trustbook"
+version = "0.0.0"
+description = "Trustbook - trust your notebook. Local-first grounded research notebook."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2",
+    "sqlmodel",
+    "httpx",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+# Verified together on CPU, offline (docs/DECISIONS.md D-011). Bump only with a re-run of
+# `python -m app.capabilities.bundled_check` against the baked models.
+ml = [
+    "torch==2.14.1",
+    "torchvision==0.29.1",  # EmbeddingGemma 2's processor imports it even for text-only use
+    "pillow==12.3.0",
+    "transformers==5.19.0",
+    "sentence-transformers==6.1.0",
+    "tokenizers==0.23.3",
+    "huggingface-hub==1.33.0",
+    "safetensors==0.8.0",
+    "numpy==2.5.3",
+    "cactus-needle==3.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "mypy",
+    "pytest",
+    "types-PyYAML",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S", "PTH", "N"]
+ignore = [
+    "S101",   # assert is fine in tests
+    "S104",   # binding 0.0.0.0 is intended inside the container
+    "S311",   # random is not used for security
+    "S608",   # SQL is built only from internal constants
+    "SIM114", # separate branches read better for field rules
+    "SIM905", # word lists are clearer as one string
+    "RUF001", "RUF002", "RUF003",  # the ellipsis character is intended in user-facing text
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108", "PTH"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["torch", "torch.*", "sentence_transformers", "sentence_transformers.*", "transformers", "transformers.*", "needle", "needle.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "error::pytest.PytestUnraisableExceptionWarning",
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]

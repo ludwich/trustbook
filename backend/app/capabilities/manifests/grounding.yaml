@@ -1,0 +1,15 @@
+id: grounding
+label: Grounding checker
+description: >-
+  Checks every sentence of an answer against the passages it cites and removes
+  sentences your sources do not support. Runs on this computer.
+kind: bundled
+required: false
+contract: grounding_checker
+locality: local
+ui_fields: [enabled]
+health_check: bundled_grounding
+field_overrides:
+  enabled:
+    label: Check every sentence against its sources
+    help: When off, answers are marked Unverified.

@@ -1,0 +1,46 @@
+# Trustbook - user install (SPEC §4). Pulls published images; nothing is built locally.
+#
+#   1. Copy .env.example to .env next to this file and set the paths.
+#   2. docker compose pull
+#   3. docker compose up -d
+#   4. Open http://localhost:8484
+#
+# Works on Docker Engine, Docker Desktop, Rancher Desktop and Podman (podman compose).
+
+services:
+  app:
+    image: ghcr.io/${GITHUB_OWNER:?set GITHUB_OWNER in .env}/trustbook:${TRUSTBOOK_IMAGE_TAG:-latest}
+    ports: ["${TRUSTBOOK_PORT:-8484}:8484"]
+    volumes:
+      - ${TRUSTBOOK_BROWSE_ROOT:?set TRUSTBOOK_BROWSE_ROOT in .env}:/host:ro
+      - ${TRUSTBOOK_DATA:?set TRUSTBOOK_DATA in .env}:/data
+    environment:
+      - TRUSTBOOK_SEARXNG_URL=http://searxng:8080
+    # Lets the Ollama / llama-server / LM Studio presets (host.docker.internal) work on Linux too.
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: [searxng]
+    restart: unless-stopped
+
+  # One-shot: writes SearXNG's settings.yml (with a fresh secret_key) into the shared volume if it
+  # is missing, so this file works when downloaded alone (DECISIONS D-004).
+  searxng-init:
+    image: ghcr.io/${GITHUB_OWNER:?set GITHUB_OWNER in .env}/trustbook:${TRUSTBOOK_IMAGE_TAG:-latest}
+    command: ["python", "-m", "app.searxng_init"]
+    environment:
+      - TRUSTBOOK_SEARXNG_CONFIG_DIR=/etc/searxng
+    volumes:
+      - searxng-config:/etc/searxng
+    restart: "no"
+
+  # Unmodified upstream SearXNG (AGPL-3.0), pinned by tag and digest. Reachable only by the app.
+  searxng:
+    image: docker.io/searxng/searxng:2026.10.9-f4822b3fc@sha256:85492ba800a861e3e8ff6014c430e81369fe6ca766a9990595f616d1ce95b272
+    volumes:
+      - searxng-config:/etc/searxng
+    depends_on:
+      searxng-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  searxng-config:

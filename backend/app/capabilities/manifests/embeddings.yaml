@@ -1,0 +1,11 @@
+id: embeddings
+label: Embeddings
+description: >-
+  Turns passages into vectors for search. Runs on this computer. Changing it
+  means re-indexing every space, so it never changes automatically.
+kind: bundled
+required: true
+contract: embedder
+locality: local
+ui_fields: []
+health_check: bundled_embed

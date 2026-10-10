@@ -1,0 +1,9 @@
+id: reranker
+label: Reranker
+description: Picks the most relevant passages for each question. Runs on this computer.
+kind: bundled
+required: true
+contract: reranker
+locality: local
+ui_fields: []
+health_check: bundled_rerank

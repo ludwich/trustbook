@@ -1,0 +1,21 @@
+id: chat
+label: Chat model
+description: >-
+  Writes answers, overviews and suggestions. Only the most relevant passages
+  from your sources are sent to it.
+kind: endpoint
+required: true
+contract: openai_chat
+locality: from_endpoint
+ui_fields: [preset, base_url, api_key, model, api_version]
+health_check: chat_ping
+presets:
+  - {id: openai, label: OpenAI, adapter: openai_compatible, base_url: "https://api.openai.com/v1", needs_api_key: true}
+  - {id: azure_openai, label: Azure OpenAI, adapter: azure_openai, base_url: null, needs_api_key: true}
+  - {id: anthropic, label: Anthropic, adapter: anthropic, base_url: "https://api.anthropic.com", needs_api_key: true}
+  - {id: ollama, label: Ollama, adapter: openai_compatible, base_url: "http://host.docker.internal:11434/v1", needs_api_key: false}
+  - {id: llama_server, label: llama.cpp server, adapter: openai_compatible, base_url: "http://host.docker.internal:8080/v1", needs_api_key: false}
+  - {id: lm_studio, label: LM Studio, adapter: openai_compatible, base_url: "http://host.docker.internal:1234/v1", needs_api_key: false}
+  - {id: vllm, label: vLLM, adapter: openai_compatible, base_url: "http://host.docker.internal:8000/v1", needs_api_key: false}
+  - {id: custom, label: Other OpenAI-compatible, adapter: openai_compatible, base_url: null, needs_api_key: false}
+  - {id: mock, label: Mock (tests only), adapter: mock, base_url: null, needs_api_key: false, mock_only: true}

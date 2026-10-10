@@ -1,0 +1,14 @@
+id: web_search
+label: Web search
+description: >-
+  Finds web pages to add as sources. Chat answers never search the web.
+kind: bundled_with_endpoint_override
+required: false
+contract: web_search
+locality: from_provider
+ui_fields: [provider, base_url, api_key]
+health_check: search_query
+providers:
+  - {value: searxng, label: SearXNG (built in)}
+  - {value: brave, label: Brave Search}
+  - {value: tavily, label: Tavily}
