@@ -385,3 +385,47 @@ ChunkContext = {"chunk": {...as GET /chunks/{id}...}, "source_type": str, "view"
   base URL for Session calls”, then ask again.` (no keyword lists).
 - Web search via SearXNG sends `language=en`. Results whose URL has no path (bare homepages) move below
   results with a path when the query has three or more words.
+
+### Grounding layers 4–5, badges (SPEC §8)
+
+Pipeline after layer 3 (forced citations), per answer and per overview:
+
+1. **Layer 4: verification.** For each sentence, score `(premise = cited chunk text, hypothesis = sentence)` with
+   the grounding checker for every cited chunk; the sentence score is the maximum. Pass if
+   ≥ `thresholds.verify` (0.5).
+2. **Layer 5: code checks.** For sentences citing code chunks (locator has `file`): every `` `identifier` `` in the
+   sentence must occur verbatim in at least one cited chunk; every cited chunk's `file` and line range must
+   exist in the indexed snapshot. A failure fails the sentence.
+3. If more than half the sentences fail, regenerate **once** (same chunks, plus a note that only statements the
+   chunks support are allowed) and verify again.
+4. **Refusal rule:** refuse if more than 50% of the sentences fail or the first sentence fails
+   (`refused`, reason `unsupported`, message "Not in your sources", the usual suggestion).
+5. Otherwise failing sentences are removed. Badge: `verified` (none removed) or `partially_verified`
+   (`removed_sentences` holds their text). The UI shows them in a collapsed drawer: "Unverified, not from your
+   sources".
+6. Grounding checker disabled → no layer 4 (layer 5 still runs); badge `unverified`.
+
+Sentences stream only after they pass (SSE `status` stage `checking` while verifying). Citations store
+`verifier_score`. Refusal reasons gain `unsupported`.
+
+`Message` gains `"diagnostics": {"top_rerank": float|null, "sentence_scores": [float|null], "regenerated": bool}`.
+The eval runner reads it for threshold tuning; the UI ignores it.
+
+### Estimates and queue (SPEC §11)
+- `POST /api/spaces/{sid}/sources/estimate` body `{"items": [{"kind": "folder", "path": str} | {"kind": "upload",
+  "files": [{"name": str, "bytes": int}]} | {"kind": "url"|"youtube"|"paste", "count": int}]}` →
+  `{"seconds": int, "files": int|null, "summary": str, "confirm": bool}`. `confirm` is true above 120 s.
+  The summary reads like "About 4,200 files, roughly 25 min on this PC". It is based on calibration
+  (code/prose chunk rates, parse pages/s, STT RTF, embedding streams).
+- Ingest jobs store their estimate. `QueueSummary.eta_seconds` = the remaining estimate of queued and running jobs,
+  divided across workers. The header shows "about M min left".
+
+### Gate router and log (SPEC §5, §6)
+- The `gate` capability (default: the chat endpoint) classifies each chat question with a fixed-choice JSON output
+  `{"decision": "sources"|"brainstorm"|"chitchat", "confidence": 0..1}` before retrieval. It never changes the
+  grounded pipeline. `brainstorm` adds a hint pointing to the Ideation tab to the answer. `chitchat` gets a short
+  fixed reply ("I answer questions from your sources…") without an LLM answer. Every decision is written to
+  `gate_log`.
+- `POST /api/spaces/{sid}/gate-log/{id}/correct` body `{"decision": str}` stores the user's correction ("That's
+  not right" in the UI). `GET /api/spaces/{sid}/gate-log?limit=` lists the log (Settings → Gate log).
+- The gate disabled, not configured, or failing → decision `sources`, logged with `confidence: null`.
