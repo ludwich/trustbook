@@ -22,6 +22,15 @@ async function ok(res: Awaited<ReturnType<APIRequestContext["get"]>>, what: stri
 }
 
 test.beforeAll(async ({ request }) => {
+  // A fresh install calibrates first and holds the models meanwhile (DECISIONS D-030).
+  test.setTimeout(600_000);
+  await expect
+    .poll(async () => (await (await request.get("/api/calibration")).json()).status, {
+      timeout: 540_000,
+      intervals: [3_000],
+    })
+    .toBe("done");
+
   // Use the deterministic mock chat model (only offered when TRUSTBOOK_MOCK_LLM=1).
   await ok(
     await request.put("/api/capabilities/chat", { data: { preset: "mock" } }),
