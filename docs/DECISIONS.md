@@ -238,3 +238,20 @@ grounding correctness > data safety > simplicity > performance > features.
 - **Bundle size:** the size warning limit is 800 kB (561 kB bundle, served from localhost only).
 - New runtime dependency `@radix-ui/react-dropdown-menu` (MIT, accessible menus). New dev dependency
   `@playwright/test` (Apache-2.0).
+
+### D-029 Grounded chat choices (Phase 1)
+- A sentence that cites any chunk id not given in the prompt is dropped, even if its other ids are valid
+  (stricter than SPEC §8 layer 3; grounding first).
+- A reply that is unusable twice, or whose sentences all lack valid ids, is refused as "No answer with
+  citations" (`invalid_output`). An empty `sentences` list is "Not in your sources".
+- Token budget: the top chunk is always kept; chunks that don't fit are skipped and smaller ones still tried.
+- If full-text search fails, retrieval falls back to vector hits, still filtered and reranked, and still
+  subject to the refusal threshold.
+- Overview: a generic "main topics" query plus each source's first chunk, reranked, then chosen
+  round-robin across sources within 8 chunks / 6,000 tokens. Citations are forced. It is stale when the set of
+  enabled, ready sources (or their snapshot times) changes.
+- **The overview is generated automatically only when the chat endpoint is local.** When it is remote, the
+  card shows the token estimate and waits for "Write overview" (SPEC §11: estimates before the overview when
+  the endpoint is remote). It is never refreshed automatically.
+- Layer 1 is enforced by a test that follows every import reachable from `app/chat` and `app/retrieval` and
+  fails on any ingestion, parsing, search, fetching or socket code.
