@@ -180,3 +180,16 @@ grounding correctness > data safety > simplicity > performance > features.
 ### D-022 Speech-to-text shown as "N× faster than real time" (Gate 0 finding F2)
 - **Decision:** the stored value stays the real-time factor (processing seconds per audio second). The UI
   shows 1/factor as "N× faster than real time", or "N× slower than real time" when the factor is above 1.
+
+### D-023 Linked folders index code with the fallback chunker until Phase 3
+- **Decision:** in Phase 1, code files in a linked folder are chunked with the generic chunker from SPEC §7.3
+  (blank-line blocks, target 400, max 800 tokens; locator = file + lines). Phase 3 adds tree-sitter for
+  C#, TypeScript, JavaScript and Python.
+- **Reason:** Gate 1 runs the smoke set, which includes 5 code questions about `psf/requests`. The §7.3
+  chunker is already specified, and its locators are file + line ranges, as the later code checks need.
+
+### D-024 Secret scanning of linked folders starts in Phase 1
+- **Decision:** run `gitleaks detect --no-git` on every linked folder before indexing (SPEC §7.4), from
+  Phase 1 instead of Phase 3. Files with findings are skipped and reported by file, line and rule ID only.
+- **Reason:** data safety ranks above features. Without the scan, a secret in a linked folder could end up
+  in a chunk sent to a remote chat endpoint. The gitleaks binary is MIT and small.
