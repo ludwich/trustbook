@@ -26,11 +26,12 @@ from app.db.models import Job
 from app.fsutil import atomic_write_json
 from app.jobs.handlers import JobContext
 from app.jobs.repository import JobRepository
+from app.parse.sample_pdf import sample_pdf
 from app.timeutil import utc_now_iso
 
 logger = logging.getLogger("trustbook.calibration")
 
-CALIBRATION_VERSION = 3  # 2: real speech for STT, usable CPUs; 3: tuned threads + BF16
+CALIBRATION_VERSION = 4  # 2: real speech STT, usable CPUs; 3: tuned threads + BF16; 4: parsing
 CALIBRATE_KIND = "calibrate"
 CALIBRATE_TITLE = "Measure this computer's speed"
 EMBED_CHUNKS = 64
@@ -38,7 +39,7 @@ SPEECH_SAMPLE = "calibration.wav"  # public-domain speech, see docker/download_m
 RERANK_PAIRS = 32
 TUNE_CHUNKS = 12
 STT_SECONDS = 10.0
-PARSE_NOTE = "Document parser arrives in Phase 1."
+PARSE_PAGES = 6
 
 _WORDS: tuple[str, ...] = tuple(
     "audit contract customer delivery evidence finding invoice ledger meeting migration "
@@ -98,6 +99,9 @@ class CalibrationService:
         self._providers = providers
         self._jobs = jobs
         self._clock = clock
+        # Set once the ingestion tools exist: parses a PDF the way uploads are parsed.
+        self.parse_pdf: Callable[[Path], Any] | None = None
+        self.parser_name: Callable[[], str] = lambda: "Docling"
 
     def read(self) -> Calibration | None:
         path = self._paths.calibration_file
@@ -150,14 +154,15 @@ class CalibrationService:
         ctx.progress(0.6)
         stt = self._guard("Speech-to-text speed", lambda: self._measure_stt(notes), notes)
         ctx.check_cancelled()
-        notes.append(PARSE_NOTE)
+        ctx.progress(0.9)
+        parse = self._guard("Document reading speed", lambda: self._measure_parse(notes), notes)
         result = Calibration(
             version=CALIBRATION_VERSION,
             measured_at=utc_now_iso(),
             cpu_count=cpu.usable,
             embedding_chunks_per_s=embed,
             rerank_pairs_per_s=rerank,
-            parse_pages_per_s=None,
+            parse_pages_per_s=parse,
             stt_realtime_factor=stt,
             notes=notes,
             cpu=cpu,
@@ -212,6 +217,22 @@ class CalibrationService:
         docs = synthetic_chunks(RERANK_PAIRS)
         query = "Which supplier risks were found in the audit?"
         return RERANK_PAIRS / self._timed(lambda: reranker.score(query, docs))
+
+    def _measure_parse(self, notes: list[str]) -> float:
+        if self.parse_pdf is None:
+            raise ProviderUnavailableError("The document parser is not set up.")
+        parse = self.parse_pdf
+        with tempfile.TemporaryDirectory(prefix="trustbook-calibrate-") as folder:
+            warm = Path(folder) / "warm.pdf"
+            warm.write_bytes(sample_pdf(1))
+            parse(warm)  # loading the layout and table models is not part of the speed
+            sample = Path(folder) / "sample.pdf"
+            sample.write_bytes(sample_pdf(PARSE_PAGES))
+            elapsed = self._timed(lambda: parse(sample))
+        name = self.parser_name()
+        if name != "Docling":
+            notes.append(f"Document reading speed measured with {name}.")
+        return PARSE_PAGES / elapsed
 
     def _measure_stt(self, notes: list[str]) -> float:
         transcriber = self._providers.transcriber()

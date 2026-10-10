@@ -121,6 +121,9 @@ def build_services(
         on_ready=on_source_ready,
     )
     handlers.register(INGEST_KIND, ingest.handler)
+    documents = ingest.tools.documents
+    calibration.parse_pdf = lambda path: documents.parse(path, "pdf")
+    calibration.parser_name = lambda: "Docling" if documents.docling else "the basic PDF reader"
     overview = OverviewService(
         spaces=spaces,
         jobs=jobs,
