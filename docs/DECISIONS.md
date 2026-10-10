@@ -446,3 +446,38 @@ grounding correctness > data safety > simplicity > performance > features.
   score low. HHEM cannot read `b64encode(b":".join(...))`. Such answers stay refused or partially verified
   (grounding before usefulness). Code-aware verification is a Phase 3 item (see docs/BACKLOG.md).
 - Thresholds stay at refuse 0.15 / verify 0.5. The sweep showed no gain from moving them.
+
+## 2026-10-11 — Phase 3
+
+### D-047 Code chunking with tree-sitter
+- Official per-language MIT wheels: tree-sitter 0.26.0, tree-sitter-python 0.25.0, tree-sitter-javascript
+  0.25.0, tree-sitter-typescript 0.23.2 (TS and TSX), tree-sitter-c-sharp 0.23.5. tree-sitter-languages was
+  rejected because it is unmaintained.
+- **What makes a chunk:**
+  - A class chunk holds what isn't a method or nested class, in contiguous runs. Its symbol is the class name;
+    methods are `Class.method`.
+  - Decorators, attributes and adjacent comments belong to their definition.
+  - A C# property gets its own chunk only if its accessors have code.
+  - Namespaces add no symbol.
+  - Module code is grouped up to 500 tokens, and a single statement is split above 800. Symbols are split above
+    1,500 tokens at statement boundaries.
+  - A file with any syntax error uses the SPEC §7.3 fallback.
+- On `requests`: 554 → 993 chunks (code 425 → 864), mean 379 → 227 tokens, max 1,492. No file falls back.
+  Chunks are whole lines, never overlap, and lose nothing but brace-only lines.
+
+### D-048 Incremental refresh
+- Per file: SHA-256 of the raw bytes, kind, chunker version, its offsets in `snapshot.md`, and its chunk ids
+  (space migration 004).
+- Unchanged files are neither decoded nor re-parsed (Docling is skipped too). Their text and map segments are
+  copied into the rebuilt snapshot, and their chunks keep ids, text and vectors; only offsets move, so old
+  citations still resolve.
+- Changed, new and removed files are re-indexed or deleted.
+- Records are trusted only if their chunks still exist and match. A failed run forces a full re-index next time.
+  `CHUNKER_VERSION` forces re-chunking whenever chunk output changes.
+- **Known gaps:** refresh estimates still assume a full re-read, and a reused PDF loses its OCR quality warning.
+
+### D-049 Commits ahead without the git binary
+- dulwich 1.2.17 under its Apache-2.0 option; its count matches `git rev-list --count old..new`.
+- `commits_ahead` is null when a commit is missing (shallow clone), the history is unreadable, or the count
+  exceeds 10,000. HEAD is cached for 5 s per folder, counts per commit pair.
+- `ahead` is shown only for ready folder sources whose HEAD differs from the indexed commit.
