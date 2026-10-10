@@ -15,3 +15,14 @@ model is locked per space when the space is created (`space.json` already record
 changing it still means re-indexing. The Test button reports passages per second. This would let AMD, Intel
 and Apple GPUs (via LM Studio or Ollama) speed up indexing without a CUDA image. Remote endpoints follow the
 usual locality and request-log rules.
+
+## From Phase 2 tuning (2026-10-10)
+
+### Code-aware answer verification (candidate for Phase 3)
+The bundled grounding checker (HHEM, a prose NLI model) cannot judge claims that describe what code does.
+D-044 restates simple facts (assignments, defaults) so those verify, but process claims are still refused.
+Options to evaluate in Phase 3:
+- tree-sitter-derived facts (return values, raised exceptions, calls in a function);
+- a code-tuned entailment model with a permissive license;
+- an optional "verify with the chat model" setting for code citations, off by default and badged
+  differently, sending only the cited chunks.

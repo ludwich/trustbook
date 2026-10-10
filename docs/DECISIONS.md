@@ -429,4 +429,16 @@ grounding correctness > data safety > simplicity > performance > features.
     against a `False` premise, so this deterministic check covers it.
 - The two other false refusals were the model itself answering "not in the chunks" (one with a top rerank
   score of 0.14), a retrieval matter, not verification.
+- **Code facts (second iteration):** on live data the focused window still missed the line that gives the
+  value, and HHEM rated even the right raw lines borderline (0.48). The window now leads with plain
+  restatements of the simple facts the cited code states, followed by the best-matching lines:
+  - `NAME = value` becomes "NAME is value."
+  - A parameter line `name: type = DEFAULT,` becomes "name defaults to DEFAULT, which is 10." (the constant
+    is resolved only if its definition is also cited).
+  - Only literals, constant names and empty calls are restated.
+- Offline, restated facts scored 0.88 for true claims and 0.03 for false ones. On Ludwig's data, the HTTPAdapter
+  defaults answer went from refused to three verified sentences at 0.95–0.97.
+- **Known limit:** claims describing what code does ("joins the username and password with a colon") still
+  score low. HHEM cannot read `b64encode(b":".join(...))`. Such answers stay refused or partially verified
+  (grounding before usefulness). Code-aware verification is a Phase 3 item (see docs/BACKLOG.md).
 - Thresholds stay at refuse 0.15 / verify 0.5. The sweep showed no gain from moving them.

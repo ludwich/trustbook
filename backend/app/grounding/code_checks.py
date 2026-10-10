@@ -158,37 +158,86 @@ def _terms(text: str) -> set[str]:
     return {w.lower() for w in _WORD.findall(text) if w.lower() not in _STOPWORDS and len(w) > 1}
 
 
+_ASSIGN = re.compile(
+    r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[^=]+?)?\s*=\s*"
+    r"(?P<value>[^#]+?)\s*,?\s*(?:#.*)?$"
+)
+_SIMPLE_VALUE = re.compile(
+    r"""^(?:-?\d+(?:\.\d+)?|True|False|None|[A-Z][A-Z0-9_]+|[A-Za-z_][A-Za-z0-9_.]*\(\s*\)|"""
+    r"""b?"[^"]{0,60}"|b?'[^']{0,60}')$"""
+)
+
+
+def code_facts(chunk_texts: Sequence[str]) -> list[str]:
+    """Plain statements for the simple facts the cited code states (D-044).
+
+    ``NAME = value`` → "NAME is value."; a parameter line ``name: type = DEFAULT,`` → "name defaults
+    to DEFAULT, which is 10." when ``DEFAULT = 10`` is in the cited code too. Only literals,
+    constant names and empty calls are restated; nothing is inferred beyond what the lines say.
+    """
+    constants: dict[str, str] = {}
+    found: list[tuple[str, str, bool]] = []  # (name, value, is_parameter)
+    for text in chunk_texts:
+        if not text.startswith("File: "):
+            continue
+        for line in text.splitlines()[1:]:
+            match = _ASSIGN.match(line)
+            if not match or match.group("name") in {"self", "cls"}:
+                continue
+            value = match.group("value").strip()
+            if not _SIMPLE_VALUE.match(value):
+                continue
+            name = match.group("name")
+            parameter = line.rstrip().endswith(",") or "self." in line
+            if not line.startswith((" ", "\t")) and name.isupper():
+                constants[name] = value
+            found.append((name, value, parameter))
+    facts: list[str] = []
+    for name, value, parameter in found:
+        resolved = constants.get(value)
+        tail = f", which is {resolved}" if resolved is not None and resolved != value else ""
+        verb = "defaults to" if parameter else "is"
+        facts.append(f"{name} {verb} {value}{tail}.")
+    return list(dict.fromkeys(facts))
+
+
 def focus_premise(
     sentence: str, chunk_texts: Sequence[str], max_chars: int = FOCUS_MAX_CHARS
 ) -> str:
-    """The lines (code) or sentences (prose) of the cited chunks that share terms with ``sentence``.
+    """Restated code facts, lines (code) and sentences (prose) of the cited chunks that share terms
+    with ``sentence``, at most ``max_chars``.
 
-    Each matching unit comes with its neighbours, in original order, at most ``max_chars``. The
-    grounding checker was trained on short prose; a 900-token chunk drowns the few lines that state
-    the claim, so true and false claims about code both scored near 0 (D-044). The window is cut
-    only from cited text, so it adds nothing the model was not shown.
+    The grounding checker was trained on short prose; a 900-token chunk drowns the few lines that
+    state a claim, so true and false claims about code both scored near 0 (D-044). Everything in
+    the window comes from cited text: lines verbatim, or simple facts restated by
+    :func:`code_facts`.
     """
     wanted = _terms(sentence)
     if not wanted:
         return ""
-    units: list[str] = []
+    units: list[tuple[str, bool]] = [(f, False) for f in code_facts(chunk_texts)]
     for text in chunk_texts:
-        code_like = "\n" in text and text.startswith("File: ")
-        parts = text.splitlines() if code_like else _PROSE_SPLIT.split(" ".join(text.split()))
-        units.extend(p for p in parts if p.strip())
-        units.append("")  # chunk boundary
-    scores = [len(_terms(u) & wanted) for u in units]
-    ranked = sorted((i for i, s in enumerate(scores) if s > 0), key=lambda i: (-scores[i], i))
-    chosen: set[int] = set()
+        code_like = text.startswith("File: ")
+        flat = " ".join(text.split())
+        parts = text.splitlines()[1:] if code_like else _PROSE_SPLIT.split(flat)
+        units.extend((p.strip(), not code_like) for p in parts if p.strip())
+    scores = [len(_terms(u) & wanted) for u, _ in units]
+    best = max(scores, default=0)
+    if best == 0:
+        return ""
+    # The best-matching units first, then the rest that share at least two terms (or the only one).
+    order = sorted(
+        (i for i, s in enumerate(scores) if s == best or s >= 2), key=lambda i: (-scores[i], i)
+    )
+    chosen: list[str] = []
     size = 0
-    for i in ranked:
-        for j in (i - 1, i, i + 1):
-            if 0 <= j < len(units) and j not in chosen and units[j]:
-                if size + len(units[j]) + 1 > max_chars:
-                    continue
-                chosen.add(j)
-                size += len(units[j]) + 1
-    return "\n".join(units[i] for i in sorted(chosen))
+    for i in order:
+        unit = units[i][0]
+        if unit in chosen or size + len(unit) + 1 > max_chars:
+            continue
+        chosen.append(unit)
+        size += len(unit) + 1
+    return "\n".join(chosen)
 
 
 def missing_literals(text: str, chunk_texts: Iterable[str]) -> list[str]:

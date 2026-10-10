@@ -282,7 +282,10 @@ def test_focus_premise_keeps_only_cited_lines_that_share_terms() -> None:
     window = focus_premise("DEFAULT_POOLSIZE is set to 10.", [code])
     assert "DEFAULT_POOLSIZE = 10" in window
     assert "x3 = 3" not in window  # unrelated lines are left out
-    assert all(line in code for line in window.splitlines())  # only cited text
+    from app.grounding.code_checks import code_facts
+
+    facts = set(code_facts([code]))
+    assert all(line in code or line in facts for line in window.splitlines())  # only cited text
     assert focus_premise("the a of", [code]) == ""  # nothing to match on
 
 
@@ -307,3 +310,39 @@ def test_code_sentence_with_a_literal_not_in_the_code_fails_layer_5() -> None:
     )
     assert not checked.checks[0].passed
     assert "True is not in the cited code" in checked.checks[0].problems
+
+
+def test_code_facts_restate_assignments_and_defaults_from_cited_code_only() -> None:
+    from app.grounding.code_checks import code_facts
+
+    signature = (
+        "File: src/requests/adapters.py (lines 201-205)\n"
+        "    def __init__(\n        self,\n"
+        "        pool_connections: int = DEFAULT_POOLSIZE,\n"
+        "        pool_block: bool = DEFAULT_POOLBLOCK,\n    ) -> None:"
+    )
+    constants = (
+        "File: src/requests/adapters.py (lines 36-38)\n"
+        "DEFAULT_POOLBLOCK = False\nDEFAULT_POOLSIZE = 10\nlogger = logging.getLogger(__name__)"
+    )
+    assert code_facts([signature, constants]) == [
+        "pool_connections defaults to DEFAULT_POOLSIZE, which is 10.",
+        "pool_block defaults to DEFAULT_POOLBLOCK, which is False.",
+        "DEFAULT_POOLBLOCK is False.",
+        "DEFAULT_POOLSIZE is 10.",
+    ]
+    # Without the constants chunk nothing is resolved; prose chunks are never restated.
+    assert code_facts([signature]) == [
+        "pool_connections defaults to DEFAULT_POOLSIZE.",
+        "pool_block defaults to DEFAULT_POOLBLOCK.",
+    ]
+    assert code_facts(["A = 1 is written in the docs."]) == []
+
+
+def test_focus_window_leads_with_the_matching_fact() -> None:
+    from app.grounding.code_checks import focus_premise
+
+    signature = "File: a.py (lines 1-3)\n    def f(\n        pool_size: int = DEFAULT_SIZE,\n    ):"
+    constants = "File: a.py (lines 9-9)\nDEFAULT_SIZE = 10"
+    window = focus_premise("pool_size defaults to 10.", [signature, constants])
+    assert window.splitlines()[0] == "pool_size defaults to DEFAULT_SIZE, which is 10."
