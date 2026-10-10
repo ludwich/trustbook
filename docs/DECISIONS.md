@@ -49,3 +49,38 @@ grounding correctness > data safety > simplicity > performance > features.
 
 ### D-007 Playwright e2e test lands in Phase 1
 - **Decision:** the SPEC e2e scenario (paste text → cited answer) needs Phase 1 features; Playwright is set up then.
+
+### D-008 Whistle STT runs pinned, offline and with telemetry off
+- **Decision:** bake the Whistle weights (`Cactus-Compute/whistle@ca5287601bef`) and the Needle engine
+  (`libneedle3.so` extracted from `Cactus-Compute/needle3@8354babbfb92`, wheel `cactus_needle-3.3.0`) into the
+  image. Load them with `needle.Whistle(weights=<path>)` and `NEEDLE3_LIB_PATH`. Set `NEEDLE_TELEMETRY=0`
+  and `DO_NOT_TRACK=1` in the image.
+- **Reason:** by default `cactus-needle` downloads the engine and weights unpinned from `main` and re-fetches a
+  `config.json` (a download counter) on every load. Its module-level `needle.transcribe` also sends telemetry
+  to a third-party endpoint. SPEC forbids telemetry and network calls the user did not configure. The
+  `Whistle` class methods never call telemetry; offline use was verified with no network namespace.
+- **Also:** Whistle is not thread-safe, so STT calls are serialised behind a lock. On non-speech audio it can
+  invent a short phrase ("Thank you."), so Phase 1 adds a voice-activity check before STT.
+
+### D-009 Licenses of transitive dependencies
+- **Decision:** direct dependencies must be MIT, Apache-2.0, BSD or Unlicense. Transitive dependencies with
+  equivalent permissive licenses (ISC, PSF-2.0, HPND/MIT-CMU, 0BSD) or file-level weak copyleft used
+  unmodified (MPL-2.0, e.g. `certifi`) are accepted and listed in `THIRD_PARTY_LICENSES.md`.
+- **Reason:** `transformers`/`sentence-transformers` cannot load EmbeddingGemma 2 without Pillow (HPND) and
+  torchvision, and `httpx` needs `certifi` (MPL-2.0). There is no allowlisted alternative, and these
+  licenses impose no obligations beyond attribution for unmodified use.
+- **Alternatives:** dropping to the fallback embedding model would not remove Pillow/certifi.
+
+### D-010 Embeddings run in FP32 by default
+- **Decision:** FP32 everywhere (never FP16). BF16 is ~2.7× faster on CPUs with native BF16, but most laptops
+  lack it. It may become an opt-in setting later.
+- **Model notes:** text-only load (`vision_config`/`audio_config` = None, 271M params). The full 1.49 GB
+  weights file must still be downloaded because it is a single unsharded file. Reranker scores are already
+  0..1 (sentence-transformers applies a sigmoid). HHEM's tokenizer comes from a pinned, tokenizer-only copy of
+  `google/flan-t5-base`, because its remote code otherwise fetches it unpinned.
+
+### D-011 Pinned ML runtime set
+- `torch 2.14.1+cpu`, `torchvision 0.29.1+cpu`, `transformers 5.19.0`, `sentence-transformers 6.1.0`,
+  `tokenizers 0.23.3`, `huggingface-hub 1.33.0`, `safetensors 0.8.0`, `numpy 2.5.3`, `pillow 12.3.0`,
+  `cactus-needle 3.2.0`. All four models were verified together in one process with no network access
+  (RSS ~2.7 GB, so the app container needs at least 4 GB RAM).
