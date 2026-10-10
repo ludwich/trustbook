@@ -22,6 +22,8 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     sourcemap: false,
+    // Served from localhost by the app container, so one ~560 kB bundle loads instantly.
+    chunkSizeWarningLimit: 800,
   },
   test: {
     environment: "jsdom",

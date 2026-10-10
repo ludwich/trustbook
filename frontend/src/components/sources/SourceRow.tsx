@@ -1,0 +1,184 @@
+import {
+  IconAlertCircle,
+  IconAlertTriangle,
+  IconGitCommit,
+  IconLock,
+  IconRefresh,
+  IconTrash,
+} from "@tabler/icons-react";
+import { useState } from "react";
+import { isSourceBusy, useDeleteSource, useRefreshSource } from "@/api/queries";
+import type { Source } from "@/api/types";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Progress } from "@/components/ui/progress";
+import { formatDate, plural } from "@/lib/format";
+import { cn, errorMessage } from "@/lib/utils";
+import { canRefresh, isWebSnapshot, STATUS_TEXT, statsLine, TYPE_LABELS } from "./sourceMeta";
+import { SourceTypeIcon } from "./SourceTypeIcon";
+
+export function SourceRow({
+  spaceId,
+  source,
+  onToggle,
+}: {
+  spaceId: string;
+  source: Source;
+  onToggle: (enabled: boolean) => void;
+}) {
+  const refresh = useRefreshSource(spaceId);
+  const remove = useDeleteSource(spaceId);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const busy = isSourceBusy(source);
+  const failed = source.status === "failed";
+  const stats = source.status === "ready" ? statsLine(source) : "";
+  const skipped = source.stats.skipped_secrets ?? 0;
+  const actionError = refresh.error ?? remove.error;
+  const snapshot =
+    isWebSnapshot(source) && source.snapshot_at ? `Snapshot ${formatDate(source.snapshot_at)}` : "";
+  const meta = [stats, snapshot].filter(Boolean).join(" · ");
+
+  return (
+    <li
+      className="group/row relative rounded-md px-2 py-1.5 hover:bg-accent/50"
+      data-source-status={source.status}
+      data-testid={`source-${source.id}`}
+    >
+      <div className="flex items-start gap-2">
+        <Checkbox
+          checked={source.enabled}
+          onChange={(e) => onToggle(e.target.checked)}
+          aria-label={`Use ${source.title}`}
+          className="mt-0.5"
+        />
+        <SourceTypeIcon source={source} className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <p
+            className={cn(
+              "truncate text-sm leading-snug",
+              !source.enabled && "text-muted-foreground",
+            )}
+            title={source.origin ? `${source.title}\n${source.origin}` : source.title}
+          >
+            <span className="sr-only">{TYPE_LABELS[source.type]}: </span>
+            {source.title}
+          </p>
+
+          {busy && (
+            <div className="mt-1 grid gap-1">
+              <span className="text-xs text-muted-foreground">
+                {source.status === "queued"
+                  ? "Waiting in the queue"
+                  : `${STATUS_TEXT[source.status]}…`}
+              </span>
+              {source.status !== "queued" && (
+                <Progress
+                  value={source.progress}
+                  label={`${STATUS_TEXT[source.status]} ${source.title}`}
+                />
+              )}
+            </div>
+          )}
+
+          {failed && (
+            <div className="mt-1 grid gap-0.5 text-xs">
+              <p className="flex items-start gap-1 text-destructive">
+                <IconAlertCircle className="mt-px size-3.5 shrink-0" aria-hidden />
+                <span>{source.failure_reason ?? "Trustbook could not read this source."}</span>
+              </p>
+              {source.failure_next_step && (
+                <p className="pl-4.5 text-muted-foreground">{source.failure_next_step}</p>
+              )}
+            </div>
+          )}
+
+          {source.quality_warning && (
+            <p className="mt-1 flex items-start gap-1 text-xs text-warning">
+              <IconAlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
+              <span>{source.quality_warning}</span>
+            </p>
+          )}
+
+          {skipped > 0 && (
+            <p className="mt-1 flex items-start gap-1 text-xs text-warning">
+              <IconLock className="mt-px size-3.5 shrink-0" aria-hidden />
+              <span>{plural(skipped, "file")} skipped: possible secrets</span>
+            </p>
+          )}
+
+          {(meta || source.commit_hash) && (
+            <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
+              {meta && <span>{meta}</span>}
+              {source.commit_hash && (
+                <span className="inline-flex items-center gap-0.5 font-mono">
+                  <IconGitCommit className="size-3" aria-label="Commit" />
+                  {source.commit_hash.slice(0, 7)}
+                </span>
+              )}
+            </p>
+          )}
+
+          {actionError && (
+            <p role="alert" className="mt-1 text-xs text-destructive">
+              {errorMessage(actionError)}
+            </p>
+          )}
+        </div>
+
+        {/* Overlaid on hover/focus so the text can use the full width. */}
+        <div className="absolute top-1 right-1 flex items-center rounded-md border bg-popover opacity-0 shadow-xs transition-opacity group-focus-within/row:opacity-100 group-hover/row:opacity-100">
+          {canRefresh(source) && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label={`Refresh ${source.title}`}
+              title="Read it again from the original"
+              disabled={busy || refresh.isPending}
+              onClick={() => refresh.mutate(source.id)}
+            >
+              <IconRefresh aria-hidden />
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={`Remove ${source.title}`}
+            title="Remove"
+            onClick={() => setConfirmOpen(true)}
+          >
+            <IconTrash aria-hidden />
+          </Button>
+        </div>
+      </div>
+
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove “{source.title}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Its text and search index are deleted from this space
+              {source.type === "upload" ? ", with the uploaded copy" : ""}. Files on your computer
+              and web pages are not touched.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={() => remove.mutate(source.id)}>
+              Remove source
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </li>
+  );
+}

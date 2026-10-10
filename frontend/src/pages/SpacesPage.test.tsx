@@ -75,8 +75,8 @@ describe("spaces list", () => {
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/spaces/sp_new"));
     expect(state.created).toEqual([{ name: "Globex migration", description: "Cloud move" }]);
     expect(await screen.findByRole("heading", { name: "Globex migration" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add source" })).toBeDisabled();
-    expect(screen.getByText("Coming in the next phase.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add source" })).toBeEnabled();
+    expect(await screen.findByText("No sources yet")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "Ideation" })).toBeInTheDocument();
     await waitFor(() => expect(state.active).toEqual([{ space_id: "sp_new" }]));

@@ -1,4 +1,19 @@
-import type { Capability, CapabilityConfig, Field, Job, JobList, Preset, Space } from "@/api/types";
+import type {
+  Capability,
+  CapabilityConfig,
+  Chunk,
+  Citation,
+  Conversation,
+  Field,
+  Job,
+  JobList,
+  Message,
+  Overview,
+  Preset,
+  Settings,
+  Source,
+  Space,
+} from "@/api/types";
 
 export const CHAT_PRESETS: Preset[] = [
   {
@@ -299,5 +314,109 @@ export function jobList(jobs: Job[] = [], over: Partial<JobList["summary"]> = {}
       workers: 2,
       ...over,
     },
+  };
+}
+
+// ---- Phase 1 ----------------------------------------------------------------
+
+export function settings(over: Partial<Settings> = {}): Settings {
+  return {
+    power: "normal",
+    setup_completed: true,
+    workers: 2,
+    thresholds: { refuse: 0.15, verify: 0.5 },
+    hints_dismissed: [],
+    ...over,
+  };
+}
+
+export function source(over: Partial<Source> & Pick<Source, "id">): Source {
+  return {
+    type: "upload",
+    title: `${over.id}.pdf`,
+    origin: null,
+    group: "documents",
+    status: "ready",
+    progress: null,
+    failure_reason: null,
+    failure_next_step: null,
+    quality_warning: null,
+    enabled: true,
+    snapshot_at: null,
+    commit_hash: null,
+    stats: {},
+    created_at: "2026-10-10T08:00:00Z",
+    job_id: null,
+    ...over,
+  };
+}
+
+export function citation(over: Partial<Citation> & Pick<Citation, "n">): Citation {
+  return {
+    chunk_id: `ch_${over.n}`,
+    source_id: "src_report",
+    source_title: "Annual report.pdf",
+    locator: { pages: [3, 4] },
+    ...over,
+  };
+}
+
+export function conversation(over: Partial<Conversation> = {}): Conversation {
+  return {
+    id: "cv_1",
+    title: "Revenue questions",
+    created_at: "2026-10-10T09:00:00Z",
+    updated_at: "2026-10-10T09:00:00Z",
+    ...over,
+  };
+}
+
+export function userMessage(text: string, id = "m_user"): Message {
+  return {
+    id,
+    role: "user",
+    created_at: "2026-10-10T09:00:00Z",
+    content: { text },
+    badge: null,
+    removed_sentences: [],
+    sources_used: [],
+  };
+}
+
+export function assistantMessage(over: Partial<Message> = {}): Message {
+  return {
+    id: "m_answer",
+    role: "assistant",
+    created_at: "2026-10-10T09:00:05Z",
+    content: { sentences: [] },
+    badge: null,
+    removed_sentences: [],
+    sources_used: [],
+    ...over,
+  };
+}
+
+export function overview(over: Partial<Overview> = {}): Overview {
+  return {
+    enabled: true,
+    status: "none",
+    sentences: [],
+    questions: [],
+    generated_at: null,
+    stale: false,
+    estimate: null,
+    ...over,
+  };
+}
+
+export function chunk(over: Partial<Chunk> & Pick<Chunk, "id">): Chunk {
+  return {
+    source_id: "src_report",
+    source_title: "Annual report.pdf",
+    text: "",
+    start_offset: 0,
+    end_offset: 0,
+    locator: {},
+    ...over,
   };
 }

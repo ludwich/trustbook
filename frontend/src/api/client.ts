@@ -15,7 +15,25 @@ import type {
   SpaceCreate,
   SpaceUpdate,
   TestResult,
+  BrowseListing,
+  ChatStage,
+  ChatStatus,
+  ChatStreamEvent,
+  Chunk,
+  Citation,
+  Conversation,
+  ConversationCreate,
+  Message,
+  Overview,
+  PasteSourceCreate,
+  RefusalReason,
+  SearchItem,
+  Snapshot,
+  Source,
+  SourceUpdate,
+  WebSearchResponse,
 } from "./types";
+import { readSse, type SseEvent } from "@/lib/sse";
 
 /** Error thrown for any non-2xx response. `message` is plain English, safe to show. */
 export class ApiError extends Error {
@@ -65,20 +83,14 @@ function statusFallback(status: number): string {
   return `Request failed (${status}).`;
 }
 
-export async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
-  const init: RequestInit = { method, headers: { Accept: "application/json" } };
-  if (body !== undefined) {
-    init.headers = { ...init.headers, "Content-Type": "application/json" };
-    init.body = JSON.stringify(body);
-  }
-
+async function send(path: string, init: RequestInit): Promise<Response> {
   let res: Response;
   try {
     res = await fetch(new URL(path, baseUrl()), init);
-  } catch {
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
     throw new ApiError(0, "Can't reach Trustbook. Is the app running?");
   }
-
   if (!res.ok) {
     let detail: unknown = undefined;
     try {
@@ -88,13 +100,101 @@ export async function request<T>(method: Method, path: string, body?: unknown): 
     }
     throw new ApiError(res.status, detailToMessage(detail, statusFallback(res.status)));
   }
+  return res;
+}
 
+async function parseJson<T>(res: Response): Promise<T> {
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
-const enc = encodeURIComponent;
+export async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
+  const init: RequestInit = { method, headers: { Accept: "application/json" } };
+  if (body !== undefined) {
+    init.headers = { ...init.headers, "Content-Type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  return parseJson<T>(await send(path, init));
+}
+
+/** POST multipart/form-data (the browser sets the boundary header). */
+async function postForm<T>(path: string, form: FormData): Promise<T> {
+  return parseJson<T>(
+    await send(path, { method: "POST", headers: { Accept: "application/json" }, body: form }),
+  );
+}
+
+function parseEventData(data: string): Record<string, unknown> | null {
+  try {
+    const v: unknown = JSON.parse(data);
+    return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Maps one SSE event of the answer stream to a typed event. Unknown or malformed → null. */
+export function toChatEvent(ev: SseEvent): ChatStreamEvent | null {
+  const d = parseEventData(ev.data);
+  if (!d) return null;
+  switch (ev.event) {
+    case "status":
+      return { type: "status", stage: d.stage as ChatStage };
+    case "sentence":
+      return {
+        type: "sentence",
+        index: typeof d.index === "number" ? d.index : 0,
+        text: String(d.text ?? ""),
+        citations: Array.isArray(d.citations) ? (d.citations as Citation[]) : [],
+      };
+    case "refused":
+      return {
+        type: "refused",
+        reason: (d.reason as RefusalReason) ?? "not_in_sources",
+        message: String(d.message ?? ""),
+        suggestion: typeof d.suggestion === "string" ? d.suggestion : null,
+      };
+    case "done":
+      return d.message && typeof d.message === "object"
+        ? { type: "done", message: d.message as Message }
+        : null;
+    case "error":
+      return { type: "error", message: String(d.message ?? "") };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Sends a question and yields the answer stream's events.
+ * Throws ApiError if the request is refused (non-2xx) before streaming starts.
+ */
+export async function* streamMessage(
+  spaceId: string,
+  conversationId: string,
+  content: string,
+  signal?: AbortSignal,
+): AsyncGenerator<ChatStreamEvent> {
+  const res = await send(
+    `/api/spaces/${enc(spaceId)}/conversations/${enc(conversationId)}/messages`,
+    {
+      method: "POST",
+      headers: { Accept: "text/event-stream", "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+      signal,
+    },
+  );
+  if (!res.body) throw new ApiError(0, "The answer could not be read.");
+  for await (const ev of readSse(res.body, signal)) {
+    const typed = toChatEvent(ev);
+    if (typed) yield typed;
+  }
+}
+
+function enc(v: string): string {
+  return encodeURIComponent(v);
+}
 
 export const api = {
   // Health and setup
@@ -147,6 +247,66 @@ export const api = {
   // Calibration
   getCalibration: () => request<CalibrationState>("GET", "/api/calibration"),
   runCalibration: () => request<Job>("POST", "/api/calibration/run"),
+
+  // Sources
+  listSources: (sid: string) => request<Source[]>("GET", `/api/spaces/${enc(sid)}/sources`),
+  addPaste: (sid: string, body: PasteSourceCreate) =>
+    request<Source>("POST", `/api/spaces/${enc(sid)}/sources/paste`, body),
+  uploadFiles: (sid: string, files: File[]) => {
+    const form = new FormData();
+    for (const f of files) form.append("files", f, f.name);
+    return postForm<Source[]>(`/api/spaces/${enc(sid)}/sources/upload`, form);
+  },
+  addUrl: (sid: string, url: string) =>
+    request<Source>("POST", `/api/spaces/${enc(sid)}/sources/url`, { url }),
+  addFolder: (sid: string, path: string) =>
+    request<Source>("POST", `/api/spaces/${enc(sid)}/sources/folder`, { path }),
+  webSearch: (sid: string, query: string, limit?: number) =>
+    request<WebSearchResponse>(
+      "POST",
+      `/api/spaces/${enc(sid)}/web-search`,
+      limit === undefined ? { query } : { query, limit },
+    ),
+  addFromSearch: (sid: string, items: SearchItem[]) =>
+    request<Source[]>("POST", `/api/spaces/${enc(sid)}/sources/from-search`, { items }),
+  updateSource: (sid: string, sourceId: string, body: SourceUpdate) =>
+    request<Source>("PATCH", `/api/spaces/${enc(sid)}/sources/${enc(sourceId)}`, body),
+  setSourcesEnabled: (sid: string, sourceIds: string[], enabled: boolean) =>
+    request<Source[]>("PUT", `/api/spaces/${enc(sid)}/sources/enabled`, {
+      source_ids: sourceIds,
+      enabled,
+    }),
+  refreshSource: (sid: string, sourceId: string) =>
+    request<Source>("POST", `/api/spaces/${enc(sid)}/sources/${enc(sourceId)}/refresh`),
+  deleteSource: (sid: string, sourceId: string) =>
+    request<void>("DELETE", `/api/spaces/${enc(sid)}/sources/${enc(sourceId)}`),
+  getSnapshot: (sid: string, sourceId: string) =>
+    request<Snapshot>("GET", `/api/spaces/${enc(sid)}/sources/${enc(sourceId)}/snapshot`),
+  /** URL of an uploaded original (for links; not fetched as JSON). */
+  originalUrl: (sid: string, sourceId: string) =>
+    `/api/spaces/${enc(sid)}/sources/${enc(sourceId)}/original`,
+  getChunk: (sid: string, chunkId: string) =>
+    request<Chunk>("GET", `/api/spaces/${enc(sid)}/chunks/${enc(chunkId)}`),
+  browse: (path: string) => request<BrowseListing>("GET", `/api/browse?path=${enc(path)}`),
+
+  // Chat
+  getChatStatus: (sid: string) => request<ChatStatus>("GET", `/api/spaces/${enc(sid)}/chat/status`),
+  listConversations: (sid: string) =>
+    request<Conversation[]>("GET", `/api/spaces/${enc(sid)}/conversations`),
+  createConversation: (sid: string, body: ConversationCreate = {}) =>
+    request<Conversation>("POST", `/api/spaces/${enc(sid)}/conversations`, body),
+  deleteConversation: (sid: string, cid: string) =>
+    request<void>("DELETE", `/api/spaces/${enc(sid)}/conversations/${enc(cid)}`),
+  listMessages: (sid: string, cid: string) =>
+    request<Message[]>("GET", `/api/spaces/${enc(sid)}/conversations/${enc(cid)}/messages`),
+  streamMessage,
+
+  // Overview
+  getOverview: (sid: string) => request<Overview>("GET", `/api/spaces/${enc(sid)}/overview`),
+  refreshOverview: (sid: string) =>
+    request<Job>("POST", `/api/spaces/${enc(sid)}/overview/refresh`),
+  setOverviewEnabled: (sid: string, enabled: boolean) =>
+    request<Overview>("PUT", `/api/spaces/${enc(sid)}/overview`, { enabled }),
 };
 
 export type Api = typeof api;
