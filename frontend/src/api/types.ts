@@ -44,7 +44,8 @@ export type CapabilityStatus = "ready" | "not_configured" | "error" | "disabled"
 export type Locality = "local" | "remote";
 export type FieldType = "text" | "url" | "password" | "select" | "toggle";
 export type AdapterId = "openai_compatible" | "azure_openai" | "anthropic" | "mock";
-export type SearchProvider = "searxng" | "brave" | "tavily";
+/** "mock" is offered only when the backend runs with TRUSTBOOK_MOCK_LLM=1 (tests). */
+export type SearchProvider = "searxng" | "brave" | "tavily" | "mock";
 export type SttMode = "bundled" | "endpoint";
 
 export interface Option {
@@ -85,6 +86,11 @@ export interface CapabilityConfig {
   provider: SearchProvider | null;
   /** stt only. */
   mode: SttMode | null;
+  /**
+   * grounding only (Phase 3): a code sentence the checker can't confirm gets a second check by the
+   * chat model. Default on; absent on older backends.
+   */
+  code_judge?: boolean | null;
 }
 
 export interface CapabilityConfigUpdate {
@@ -98,6 +104,7 @@ export interface CapabilityConfigUpdate {
   use_chat?: boolean | null;
   provider?: SearchProvider | null;
   mode?: SttMode | null;
+  code_judge?: boolean;
 }
 
 export interface TestResult {
@@ -276,6 +283,18 @@ export interface SourceStats {
   chars?: number;
   /** Files left out of a linked folder because gitleaks found possible secrets. */
   skipped_secrets?: number;
+  /** Folder sources, last refresh (Phase 3): files re-indexed because their content changed. */
+  changed_files?: number;
+  /** Folder sources, last refresh (Phase 3): files kept as they were. */
+  unchanged_files?: number;
+}
+
+/** A linked folder whose HEAD moved past the indexed commit (Phase 3, SPEC §7.5). */
+export interface SourceAhead {
+  indexed_commit: string;
+  head_commit: string;
+  /** null when the commit graph can't tell how many (the UI then says "has new commits"). */
+  commits_ahead: number | null;
 }
 
 export interface Source {
@@ -293,6 +312,8 @@ export interface Source {
   snapshot_at: string | null;
   commit_hash: string | null;
   stats: SourceStats;
+  /** Folder sources only; null (or absent on older backends) when HEAD is the indexed commit. */
+  ahead?: SourceAhead | null;
   created_at: string;
   job_id: string | null;
 }

@@ -26,8 +26,10 @@ import { formatDate, plural } from "@/lib/format";
 import { cn, errorMessage } from "@/lib/utils";
 import { SecretsDialog } from "./SecretsDialog";
 import {
+  aheadText,
   canRefresh,
   isWebSnapshot,
+  refreshStatsText,
   STATUS_TEXT,
   statsLine,
   TYPE_LABELS,
@@ -59,6 +61,10 @@ export function SourceRow({
   const snapshot =
     isWebSnapshot(source) && source.snapshot_at ? `Snapshot ${formatDate(source.snapshot_at)}` : "";
   const meta = [stats, snapshot].filter(Boolean).join(" · ");
+  const ready = source.status === "ready";
+  // Linked folder whose HEAD moved past the indexed commit (SPEC §7.5).
+  const ahead = ready ? aheadText(source) : null;
+  const lastRefresh = ready ? refreshStatsText(source) : null;
 
   return (
     <li
@@ -148,6 +154,38 @@ export function SourceRow({
                   {source.commit_hash.slice(0, 7)}
                 </span>
               )}
+            </p>
+          )}
+
+          {lastRefresh && (
+            <p
+              className="mt-0.5 flex items-start gap-1 text-xs text-muted-foreground"
+              data-testid="source-refresh-stats"
+            >
+              <IconRefresh className="mt-px size-3.5 shrink-0" aria-hidden />
+              <span>
+                <span className="sr-only">Last refresh: </span>
+                {lastRefresh}
+              </span>
+            </p>
+          )}
+
+          {ahead && (
+            <p
+              className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-md bg-info-soft px-1.5 py-1 text-xs text-foreground"
+              data-testid="source-ahead"
+            >
+              <IconGitCommit className="size-3.5 shrink-0" aria-hidden />
+              <span>{ahead}</span>
+              <button
+                type="button"
+                onClick={() => refresh.mutate(source.id)}
+                disabled={refresh.isPending}
+                title="Index the new commits (only changed files are read again)"
+                className="rounded-sm font-medium text-primary underline-offset-2 hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-50"
+              >
+                Refresh?
+              </button>
             </p>
           )}
 

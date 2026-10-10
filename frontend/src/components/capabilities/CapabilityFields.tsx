@@ -7,7 +7,13 @@ import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { fieldOptions, visibleFields, type CapabilityDraftApi } from "./draft";
+import {
+  fieldHelp,
+  fieldOptions,
+  isFieldDisabled,
+  visibleFields,
+  type CapabilityDraftApi,
+} from "./draft";
 
 export interface ModelSuggestions {
   models: string[];
@@ -56,7 +62,7 @@ export function CapabilityFields({
           invalid={showErrors && form.missing.includes(field.name)}
           optionLabels={optionLabels?.[field.name]}
           models={field.name === "model" ? models : undefined}
-          disabled={disabled}
+          disabled={disabled || isFieldDisabled(capability, field, form.draft.values)}
         />
       ))}
     </div>
@@ -83,13 +89,14 @@ function FieldRow({
   disabled: boolean;
 }) {
   const value = form.draft.values[field.name];
-  const helpId = field.help ? `${id}-help` : undefined;
+  const helpText = fieldHelp(field);
+  const helpId = helpText ? `${id}-help` : undefined;
   const errorId = invalid ? `${id}-error` : undefined;
   const describedBy = [helpId, errorId].filter(Boolean).join(" ") || undefined;
 
-  const help = field.help ? (
+  const help = helpText ? (
     <p id={helpId} className="text-xs text-muted-foreground">
-      {field.help}
+      {helpText}
     </p>
   ) : null;
   const error = invalid ? (

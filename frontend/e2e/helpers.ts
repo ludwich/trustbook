@@ -1,3 +1,5 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { expect, type APIRequestContext, type APIResponse, type Page } from "@playwright/test";
 
 /**
@@ -106,4 +108,89 @@ export function citationsTo(answer: ReturnType<Page["locator"]>, sourceTitle: st
 
 export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// ---- Phase 3: shared helpers for the Gate 2 UI checks ---------------------------------------
+
+export async function getJson<T>(request: APIRequestContext, url: string): Promise<T> {
+  const res = await request.get(url);
+  await ok(res, `GET ${url}`);
+  return (await res.json()) as T;
+}
+
+export interface CapabilityConfigLike {
+  enabled: boolean;
+  provider: string | null;
+  base_url: string | null;
+  code_judge?: boolean | null;
+}
+
+export async function capabilityConfig(
+  request: APIRequestContext,
+  id: string,
+): Promise<CapabilityConfigLike> {
+  return (await getJson<{ config: CapabilityConfigLike }>(request, `/api/capabilities/${id}`))
+    .config;
+}
+
+export async function putCapability(
+  request: APIRequestContext,
+  id: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  await ok(await request.put(`/api/capabilities/${id}`, { data }), `update ${id}`);
+}
+
+/**
+ * The host folder the container sees as its browse root (/host). The release workflow exports it;
+ * specs that need files on disk skip without it. Playwright runs on the host, so it can write
+ * there before linking a folder.
+ */
+export const BROWSE_ROOT = process.env.E2E_BROWSE_ROOT ?? "";
+export const NO_BROWSE_ROOT = "E2E_BROWSE_ROOT is not set (host folder mounted at /host)";
+
+export interface HostFolder {
+  /** Path relative to the browse root, as the API and the folder picker use it. */
+  rel: string;
+  /** Absolute path on the host. */
+  abs: string;
+}
+
+/** Writes `files` (relative path → content) into a new, uniquely named folder under the root. */
+export function writeHostFolder(prefix: string, files: Record<string, string>): HostFolder {
+  const rel = `${prefix}-${Date.now()}`;
+  const folder = { rel, abs: path.join(BROWSE_ROOT, rel) };
+  addHostFiles(folder, files);
+  return folder;
+}
+
+/** Adds (or overwrites) files in a folder made by `writeHostFolder`. */
+export function addHostFiles(folder: HostFolder, files: Record<string, string>): void {
+  for (const [name, content] of Object.entries(files)) {
+    const file = path.join(folder.abs, name);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, content);
+  }
+}
+
+export function removeHostFolder(folder: HostFolder | null): void {
+  if (folder) rmSync(folder.abs, { recursive: true, force: true });
+}
+
+export async function linkFolder(
+  request: APIRequestContext,
+  spaceId: string,
+  rel: string,
+): Promise<{ id: string; title: string }> {
+  const res = await request.post(`/api/spaces/${encodeURIComponent(spaceId)}/sources/folder`, {
+    data: { path: rel },
+  });
+  await ok(res, `link folder ${rel}`);
+  return (await res.json()) as { id: string; title: string };
+}
+
+/** Opens the "Add source" menu and picks an entry, e.g. "Web page" or "Link folder". */
+export async function openAddSource(page: Page, entry: RegExp): Promise<void> {
+  await page.getByRole("button", { name: "Add source" }).click();
+  await page.getByRole("menuitem", { name: entry }).click();
 }

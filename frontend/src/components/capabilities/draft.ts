@@ -17,6 +17,28 @@ export interface Draft {
 /** Fields that only matter when the capability talks to an endpoint. */
 const ENDPOINT_FIELDS = new Set(["preset", "base_url", "api_key", "model", "api_version"]);
 
+/** Toggles that are on when the backend has no saved value yet (Phase 3 `code_judge`: default on). */
+const TOGGLE_DEFAULTS: Record<string, boolean> = { code_judge: true };
+
+/** Help shown when the manifest sends none for a field. */
+const FIELD_HELP: Record<string, string> = {
+  code_judge:
+    "When the checker can't confirm a sentence about code, the chat model compares it with the " +
+    "cited lines. Only those lines and the sentence are sent; the call shows in the request log.",
+};
+
+export function fieldHelp(field: Field): string | undefined {
+  return field.help ?? FIELD_HELP[field.name];
+}
+
+/**
+ * Fields that stay visible but can't be changed right now: the code judge only runs as part of
+ * answer checking, so it is greyed out while the grounding checker is off.
+ */
+export function isFieldDisabled(cap: Capability, field: Field, values: DraftValues): boolean {
+  return field.name === "code_judge" && hasField(cap, "enabled") && values.enabled === false;
+}
+
 export function hasField(cap: Capability, name: string): boolean {
   return cap.fields.some((f) => f.name === name);
 }
@@ -28,7 +50,9 @@ export function draftFromCapability(cap: Capability): Draft {
     if (f.name === "api_key") {
       values[f.name] = "";
     } else if (f.type === "toggle") {
-      values[f.name] = Boolean(cfg[f.name]);
+      const v = cfg[f.name];
+      values[f.name] =
+        v === undefined || v === null ? (TOGGLE_DEFAULTS[f.name] ?? false) : Boolean(v);
     } else {
       const v = cfg[f.name];
       values[f.name] = typeof v === "string" ? v : "";
@@ -76,7 +100,8 @@ export function isFieldVisible(cap: Capability, field: Field, values: DraftValue
   // web_search: built-in SearXNG needs no key; hosted providers need no URL.
   if (hasField(cap, "provider")) {
     const provider = str(values, "provider") || "searxng";
-    if (name === "api_key") return provider !== "searxng";
+    // "mock" (tests only, TRUSTBOOK_MOCK_LLM=1) needs neither a key nor a URL.
+    if (name === "api_key") return provider !== "searxng" && provider !== "mock";
     if (name === "base_url") return provider === "searxng";
   }
 
