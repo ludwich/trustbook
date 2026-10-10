@@ -5,9 +5,9 @@ Gate 1: citation precision ≥ 90% on the smoke set using Ludwig's chat endpoint
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
 ## 0. Gate 0 follow-ups (Ludwig's findings, do first)
-- [ ] F1 Slow bundled models in Docker Desktop/WSL2 (4 chunks/s, 8.9 pairs/s on 32 cores): measure torch thread use inside the container (main vs worker threads), fix, log the cause in DECISIONS.md
-- [ ] F2 Speed test wording: show STT as "N× faster than real time"
-- [ ] F3 Cap "High" power workers at a sensible maximum (RAM per worker)
+- [x] F1 Slow bundled models in Docker Desktop/WSL2 (4 chunks/s, 8.9 pairs/s on 32 cores): measure torch thread use inside the container (main vs worker threads), fix, log the cause in DECISIONS.md
+- [x] F2 Speed test wording: show STT as "N× faster than real time"
+- [x] F3 Cap "High" power workers at a sensible maximum (RAM per worker)
 
 ## 1. Sources and ingestion (SPEC §7.1)
 - [ ] Source model + API: list, add, enable/disable checkbox, groups (documents, transcripts, web, code), delete, refresh

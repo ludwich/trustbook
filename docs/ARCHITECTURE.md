@@ -192,10 +192,15 @@ RequestLogEntry = {"id":int,"timestamp":str,"capability":str,"endpoint_host":str
 - `POST /api/calibration/run` → `202 Job`
 
 ```
-Calibration = {"version":int,"measured_at":str,"cpu_count":int,
+Calibration = {"version":int,"measured_at":str,"cpu_count":int,      // version 3
                "embedding_chunks_per_s":float|null,"rerank_pairs_per_s":float|null,
                "parse_pages_per_s":float|null,"stt_realtime_factor":float|null,
-               "notes":[str]}
+               "notes":[str],
+               "cpu":{"model":str|null,"logical":int,"usable":int,"physical":int|null,"bf16":bool}|null,
+               "runtime":{"torch_threads":int|null,"embedding_dtype":"float32"|"bfloat16",
+                          "reranker_dtype":"float32"|"bfloat16"}|null}
+// stt_realtime_factor = processing seconds per audio second (UI shows "N× faster than real time").
+// runtime is chosen by measurement and applied to the bundled models at startup (DECISIONS D-020).
 ```
 
 ## Frontend (`frontend/`)

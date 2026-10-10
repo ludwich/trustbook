@@ -140,3 +140,43 @@ grounding correctness > data safety > simplicity > performance > features.
   usable). Calibration stores the real RTF, so estimates stay honest. Revisit in Phase 1 when STT is used for
   audio and YouTube: if calibrated RTF > 1.0, prefer the SPEC fallback (`pywhispercpp`, which takes an
   explicit thread count) or a configured STT endpoint.
+
+## 2026-10-10 — Phase 1
+
+### D-020 Bundled models were slow in containers: thread count and FP32 (Gate 0 finding F1)
+- **Finding:** Ludwig's 32-thread laptop (Docker Desktop, WSL2) measured 4 chunks/s and 8.9 pairs/s. That
+  is the same raw throughput as the 8-CPU dev container (~470 GFLOP/s embedding, ~560–620 ranking, at
+  ~117 GFLOP per 450-token chunk). So his container effectively used about 8 cores' worth.
+- **Cause:**
+  1. Trustbook never set a model thread count. Torch picks one once, at import, from the CPU topology the
+     container shows, which inside Docker Desktop/WSL2 or nested containers need not match the CPUs the
+     process may use: here the LXC shows 2 "physical" cores for 8 usable CPUs, and Docker shows 32 CPUs
+     for 8 usable. Jobs call the models from worker threads, and OpenMP/MKL keep their thread settings per
+     calling thread, so even a correct import-time setting is not guaranteed to reach them.
+  2. Everything ran in FP32, although the CPU has native BF16 (AVX-512 BF16).
+- **Decision:**
+  - Calibration (version 3) records the CPU: model, visible CPUs, usable CPUs, physical cores, BF16.
+  - It measures embedding speed at several thread counts (all usable CPUs, physical cores, half) and keeps
+    the fastest.
+  - It compares BF16 against FP32 for embeddings and the reranker. BF16 is kept only if it is ≥ 1.25×
+    faster and gives the same results: every embedding at cosine ≥ 0.99 to its FP32 twin, every reranker
+    score within 0.03.
+  - The chosen thread count is applied in every thread that calls a model. Before calibration, the default
+    is all usable CPUs.
+  - The grounding checker always runs in FP32 (grounding correctness before speed). FP16 is never used.
+- **Result on the dev container:** indexing 2.25 → 11.05 chunks/s, ranking 6.9 → 23.8 pairs/s (7 threads,
+  BF16 for both). Ludwig's machine could not be measured from here. The Speed test now shows
+  "uses U of L CPUs · T model threads · BF16/FP32", so Gate 1 confirms the fix there.
+- **Note:** BF16 and FP32 embeddings of the same text agree at cosine ≥ 0.99, so a space indexed before a
+  recalibration stays usable.
+
+### D-021 "High" power is capped (Gate 0 finding F3)
+- **Decision:** High = max(2, usable CPUs − 2), capped at **8** workers and by memory:
+  (memory − 4 GB) / 1.5 GB, where memory is the cgroup limit or the machine total. It never goes below Normal's 2.
+- **Reason:** 30 workers on a 32-CPU laptop. The models are loaded once per process and shared, but every
+  running job holds its own document and parser state (Docling in Phase 1), and parallel model calls only
+  compete for the same cores.
+
+### D-022 Speech-to-text shown as "N× faster than real time" (Gate 0 finding F2)
+- **Decision:** the stored value stays the real-time factor (processing seconds per audio second). The UI
+  shows 1/factor as "N× faster than real time", or "N× slower than real time" when the factor is above 1.
