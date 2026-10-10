@@ -39,12 +39,12 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] Tune refuse/verify thresholds on the smoke set + public refusal set (sweep: no gain from moving them; Ludwig's private set at the gate); recorded in GATES.md
 
 ## 6. Gate
-- [ ] CI green, PR `phase-2 → main`, `:phase-2-rc` published (e2e gate passes)
+- [x] CI green, PR `phase-2 → main` (#3), `:phase-2-rc` published (e2e gate passes)
 - [x] Smoke + refusal set: refusal 100%, precision 97.4%, false refusals 3/22; GATES.md checklist
-- [ ] `docker image prune -f`; stop and summarise
+- [x] `docker image prune -f`; stop and summarise — **waiting for Ludwig's Gate 2 verdict**
 
 ## Notes for a restarted session
-- Phase 1 merged (`65d07c7`), tagged `phase-1`. Push tags as `refs/tags/phase-N`.
+- Phase 1 merged (`65d07c7`), tagged `phase-1`. Phase 2 PR #3. Push tags as `refs/tags/phase-N`.
 - Never `git commit -a` while agents edit the tree; stage explicit paths.
 - ML work outside CI: use a separate venv (`UV_PROJECT_ENVIRONMENT=<scratch>/mlvenv uv sync --extra ml`) so
   agents' `uv run` doesn't fight over backend/.venv.
