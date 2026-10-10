@@ -84,3 +84,17 @@ grounding correctness > data safety > simplicity > performance > features.
   `tokenizers 0.23.3`, `huggingface-hub 1.33.0`, `safetensors 0.8.0`, `numpy 2.5.3`, `pillow 12.3.0`,
   `cactus-needle 3.2.0`. All four models were verified together in one process with no network access
   (RSS ~2.7 GB, so the app container needs at least 4 GB RAM).
+
+### D-012 Frontend contract interpretations
+- **Decision:** the backend returns every field a capability can have, and the UI hides the ones that don't
+  apply to the unsaved form (API key only when the preset needs one, API version only for Azure, gate endpoint
+  fields only when not reusing chat, and so on). An API key left empty is not sent, so the saved key is kept;
+  "Remove saved key" sends `""`. Pause and cancel apply to queued and running jobs, and reordering applies to
+  queued jobs only. The last opened space stays active, because clearing it on navigation races in StrictMode.
+- **Reason:** switching presets must not need a round trip, and an empty password field must never erase a key.
+
+### D-013 Frontend dependencies
+- **Decision:** icons come from `@tabler/icons-react` (MIT) instead of shadcn's default `lucide-react`
+  (ISC, not on the allowlist). Production dependencies are 48 MIT, 1 Apache-2.0 and 1 0BSD (`tslib`, pulled
+  in by Radix, accepted under D-009). TypeScript is pinned to 6.0.x because typescript-eslint does not yet
+  support 7.
