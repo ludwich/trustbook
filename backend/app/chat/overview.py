@@ -144,10 +144,11 @@ def generate_overview(
     if not source_ids:
         raise OverviewError("There are no ticked, ready sources to summarise.")
     signature = sources_signature(engine) or ""
-    rows = candidates(engine, index, providers.embedder(), OVERVIEW_QUERY, source_ids)
-    seen = {row.chunk_id for row in rows}
-    rows += [row for row in first_chunks(engine, source_ids) if row.chunk_id not in seen]
-    ranked = rerank(OVERVIEW_QUERY, rows, providers.reranker())
+    with providers.use.shared():  # waits while calibration measures
+        rows = candidates(engine, index, providers.embedder(), OVERVIEW_QUERY, source_ids)
+        seen = {row.chunk_id for row in rows}
+        rows += [row for row in first_chunks(engine, source_ids) if row.chunk_id not in seen]
+        ranked = rerank(OVERVIEW_QUERY, rows, providers.reranker())
     chosen = spread_across_sources(ranked)
     if not chosen:
         raise OverviewError("The sources have no text to summarise yet.")

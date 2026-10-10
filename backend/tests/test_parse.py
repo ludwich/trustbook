@@ -389,3 +389,11 @@ def test_parse_json3_skips_empty_events() -> None:
         (61.2, 63.2, "Later line"),
     ]
     assert parse_json3(b"not json") == []
+
+
+def test_page_title_drops_sphinx_pilcrow() -> None:
+    from app.parse.text import html_title, page_title
+
+    html = "<html><head><title>Quickstart¶</title></head><body><h1>Quickstart¶</h1></body></html>"
+    assert page_title(html) == "Quickstart"
+    assert html_title(html) == "Quickstart"

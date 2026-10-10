@@ -15,7 +15,8 @@ import importlib.util
 import json
 import logging
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -191,6 +192,49 @@ def runtime_installed(kind: BundledKind) -> bool:
     return all(importlib.util.find_spec(name) is not None for name in _RUNTIME_MODULES[kind])
 
 
+class ModelUseLock:
+    """Readers-writer lock over the CPU models, preferring the writer.
+
+    Jobs and chat use the models "shared" (many at once). Calibration needs the CPU to itself to
+    measure honestly, so it takes the lock "exclusive": it waits for running users to finish, and
+    new users wait until it is done (DECISIONS D-030).
+    """
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._readers = 0
+        self._writer = False
+        self._writers_waiting = 0
+
+    @contextmanager
+    def shared(self) -> Iterator[None]:
+        with self._cond:
+            while self._writer or self._writers_waiting:
+                self._cond.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._readers -= 1
+                self._cond.notify_all()
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        with self._cond:
+            self._writers_waiting += 1
+            while self._writer or self._readers:
+                self._cond.wait()
+            self._writers_waiting -= 1
+            self._writer = True
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._writer = False
+                self._cond.notify_all()
+
+
 class ProviderRegistry:
     """Lazily loads and caches bundled providers; supports injection for tests."""
 
@@ -205,6 +249,7 @@ class ProviderRegistry:
         self._factories = factories
         self._tuner = tuner
         self._options = RuntimeOptions()
+        self.use = ModelUseLock()
         # Injected factories bring their own runtime; otherwise look for the ml packages.
         self._runtime_check = runtime_check or (
             (lambda _kind: True) if factories is not None else runtime_installed

@@ -96,7 +96,8 @@ def chat_service(services: Services, space: SpaceRecord) -> ChatService:
 
     def run_retrieval(question: str) -> Retrieval:
         providers = services.providers
-        return retrieve(engine, index, providers.embedder(), providers.reranker(), question)
+        with providers.use.shared():  # waits while calibration measures
+            return retrieve(engine, index, providers.embedder(), providers.reranker(), question)
 
     return ChatService(
         ChatStore(engine),

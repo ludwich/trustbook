@@ -46,7 +46,7 @@ def html_title(html: str) -> str | None:
     match = _TITLE.search(html[:200_000])
     if not match:
         return None
-    title = " ".join(match.group(1).split())
+    title = " ".join(_PILCROW.sub(" ", match.group(1)).split())
     return title[:200] or None
 
 
@@ -78,5 +78,7 @@ def page_title(html: str, url: str | None = None) -> str | None:
         metadata = None
     title = getattr(metadata, "title", None) if metadata is not None else None
     if isinstance(title, str) and title.strip():
-        return " ".join(title.split())[:200]
+        cleaned = " ".join(_PILCROW.sub(" ", title).split())[:200]  # Sphinx headings end in ¶
+        if cleaned:
+            return cleaned
     return html_title(html)

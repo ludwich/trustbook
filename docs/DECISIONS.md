@@ -255,3 +255,10 @@ grounding correctness > data safety > simplicity > performance > features.
   the endpoint is remote). It is never refreshed automatically.
 - Layer 1 is enforced by a test that follows every import reachable from `app/chat` and `app/retrieval` and
   fails on any ingestion, parsing, search, fetching or socket code.
+
+### D-030 Calibration gets the CPU to itself
+- **Finding:** on a fresh install, calibration ran while the first sources were being indexed. The contention
+  made BF16 look no faster (so embeddings stayed FP32) and calibrated speeds came out about 3× too low.
+- **Decision:** the bundled models sit behind a writer-preferring readers-writer lock. Parsing, embedding,
+  retrieval and the overview use it shared. Calibration takes it exclusively: it waits for current model work
+  to finish, and new model work waits until calibration is done (about a minute, once).

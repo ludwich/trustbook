@@ -270,7 +270,8 @@ class IngestService:
         for i in range(0, len(texts), EMBED_BATCH):
             ctx.check_cancelled()
             batch = list(texts[i : i + EMBED_BATCH])
-            vectors.extend(embedder.embed_documents(batch))
+            with self.providers.use.shared():  # waits while calibration measures
+                vectors.extend(embedder.embed_documents(batch))
             ctx.progress(0.4 + 0.55 * min(1.0, (i + len(batch)) / len(texts)))
         return vectors
 
@@ -280,13 +281,14 @@ class IngestService:
         ctx.progress(0.0)
         folder = repo.folder(source.id)
         folder.mkdir(parents=True, exist_ok=True)
-        snapshot, snapshot_at = read_source(
-            self.tools,
-            source,
-            folder,
-            lambda f: ctx.progress(0.4 * max(0.0, min(1.0, f))),
-            ctx.check_cancelled,
-        )
+        with self.providers.use.shared():  # parsing (Docling, STT) also uses the CPU models
+            snapshot, snapshot_at = read_source(
+                self.tools,
+                source,
+                folder,
+                lambda f: ctx.progress(0.4 * max(0.0, min(1.0, f))),
+                ctx.check_cancelled,
+            )
         ctx.check_cancelled()
         write_snapshot(folder, snapshot)
         repo.update(source.id, status="indexing")

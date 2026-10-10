@@ -168,7 +168,8 @@ class CalibrationService:
         return result
 
     def handler(self, ctx: JobContext) -> None:
-        self.run(ctx)
+        with self._providers.use.exclusive():  # measure on an otherwise idle CPU
+            self.run(ctx)
 
     # --- measurements ----------------------------------------------------------------------
 
