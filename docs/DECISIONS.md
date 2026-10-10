@@ -400,3 +400,13 @@ grounding correctness > data safety > simplicity > performance > features.
   - A backticked span passes layer 5 if it occurs verbatim in a cited chunk, or if every identifier and
     number in it occurs there as a whole word (exact, case-sensitive). A span without identifiers, such as a
     quoted literal, must still occur verbatim.
+
+### D-043 The gate asks reasoning models not to think
+- **Finding:** with Ludwig's llama-server (Qwen3.6, a reasoning model), every gate call failed. The 200-token
+  limit ran out while the model was still thinking, so the reply was empty, and each failed call kept the
+  server busy while the real answer waited. With 1,024 tokens it worked but took 15 s.
+- **Decision:** chat adapters take `think`. With `think=False` the OpenAI-compatible adapter sends
+  `chat_template_kwargs: {"enable_thinking": false}` (honoured by llama-server, vLLM and LM Studio). If the
+  endpoint answers 400, the field is dropped and the request is sent again, before any other fallback; OpenAI
+  rejects unknown fields. Only the gate uses `think=False`. Answers keep thinking. Measured: 0.6–1.0 s per gate
+  call, correct decisions for a question, a greeting and a brainstorming request.

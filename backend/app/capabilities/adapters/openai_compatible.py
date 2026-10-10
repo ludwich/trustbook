@@ -89,18 +89,26 @@ class OpenAICompatibleAdapter:
         temperature: float = 0.2,
         max_tokens: int = 1024,
         json_schema: dict[str, Any] | None = None,
+        think: bool = True,
     ) -> ChatResult:
         """Send a chat completion.
 
         With ``json_schema`` the structured-output mode falls back from ``json_schema`` to
         ``json_object`` to a prompt-only instruction when the endpoint rejects it (400).
+        ``think=False`` asks local servers (llama-server, vLLM, LM Studio) to skip a reasoning
+        model's thinking via ``chat_template_kwargs``; endpoints that reject the field get the
+        request again without it (D-043).
         """
+        extra = {} if think else {"chat_template_kwargs": {"enable_thinking": False}}
         if json_schema is None:
-            return self._complete(self._body(messages, temperature, max_tokens))
+            return self._complete({**self._body(messages, temperature, max_tokens), **extra})
         start = _JSON_MODES.index(self._json_mode)
         last_error: AdapterError | None = None
         for mode in _JSON_MODES[start:]:
-            body = self._json_body(messages, temperature, max_tokens, json_schema, mode)
+            body = {
+                **self._json_body(messages, temperature, max_tokens, json_schema, mode),
+                **extra,
+            }
             try:
                 result = self._complete(body)
             except AdapterError as exc:
@@ -204,6 +212,10 @@ def _compat_adjust(body: dict[str, Any], exc: AdapterError) -> dict[str, Any] | 
     """Adjust the body for endpoints that reject a parameter (e.g. newer OpenAI models)."""
     if exc.kind != "bad_request":
         return None
+    if "chat_template_kwargs" in body:  # an optional hint; endpoints may reject unknown fields
+        adjusted = dict(body)
+        del adjusted["chat_template_kwargs"]
+        return adjusted
     reason = exc.message.lower()
     if "max_completion_tokens" in reason and "max_tokens" in body:
         adjusted = dict(body)

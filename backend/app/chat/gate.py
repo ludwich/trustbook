@@ -112,6 +112,7 @@ def classify(
                 temperature=GATE_TEMPERATURE,
                 max_tokens=GATE_MAX_TOKENS,
                 json_schema=GATE_SCHEMA,
+                think=False,  # a router; a reasoning model would spend its tokens thinking
             )
             results.put(parse_gate(reply.text))
         except BaseException as exc:  # reported to the caller below

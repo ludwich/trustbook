@@ -67,6 +67,7 @@ def test_classify_makes_one_fixed_choice_call_at_temperature_zero() -> None:
     assert len(chat.calls) == 1
     assert chat.calls[0]["temperature"] == 0.0
     assert chat.calls[0]["schema"] == GATE_SCHEMA
+    assert chat.calls[0]["think"] is False  # reasoning models must not think for a router
 
 
 class Slow:

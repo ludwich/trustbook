@@ -123,6 +123,7 @@ class MockChatAdapter:
         temperature: float = 0.2,
         max_tokens: int = 1024,
         json_schema: dict[str, Any] | None = None,
+        think: bool = True,
     ) -> ChatResult:
         self.calls.append(list(messages))
         last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
