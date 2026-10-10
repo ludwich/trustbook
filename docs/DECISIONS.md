@@ -98,3 +98,8 @@ grounding correctness > data safety > simplicity > performance > features.
   (ISC, not on the allowlist). Production dependencies are 48 MIT, 1 Apache-2.0 and 1 0BSD (`tslib`, pulled
   in by Radix, accepted under D-009). TypeScript is pinned to 6.0.x because typescript-eslint does not yet
   support 7.
+
+### D-014 FastAPI's OpenTelemetry dependency stays inert
+- **Decision:** accept `opentelemetry-api`, which FastAPI's core now requires. Never install
+  `fastapi[standard]` or any OpenTelemetry SDK or exporter. The image also sets `OTEL_SDK_DISABLED=true`.
+- **Reason:** the API package on its own is a no-op that cannot export anything. SPEC requires no telemetry.
