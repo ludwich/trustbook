@@ -3,9 +3,11 @@ import type {
   BrowseListing,
   ChatStatus,
   Chunk,
+  ChunkContext,
   Conversation,
   Message,
   Overview,
+  SecretsReport,
   Settings,
   Snapshot,
   Source,
@@ -46,6 +48,10 @@ export interface SpaceBackendOptions {
   searchResults?: WebSearchResult[];
   chunks?: Record<string, Chunk>;
   snapshots?: Record<string, Snapshot>;
+  /** GET …/chunks/{id}/context by chunk id (404 when missing). */
+  contexts?: Record<string, ChunkContext>;
+  /** GET …/sources/{id}/secrets by source id (404 when missing). */
+  secrets?: Record<string, SecretsReport>;
   stream?: StreamHandler;
 }
 
@@ -72,6 +78,8 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
       refresh: [] as string[],
       deleted: [] as string[],
       browse: [] as string[],
+      secrets: [] as string[],
+      contexts: [] as string[],
       settings: [] as unknown[],
       overviewPut: [] as unknown[],
       overviewRefresh: 0,
@@ -171,6 +179,9 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
     http.put("*/api/spaces/:sid/sources/enabled", async ({ request }) => {
       const body = (await request.json()) as { source_ids: string[]; enabled: boolean };
       state.calls.enabled.push(body);
+      if (state.sources.some((s) => body.source_ids.includes(s.id) && s.status === "failed")) {
+        return HttpResponse.json({ detail: "A failed source can't be ticked." }, { status: 409 });
+      }
       state.sources = state.sources.map((s) =>
         body.source_ids.includes(s.id) ? { ...s, enabled: body.enabled } : s,
       );
@@ -179,6 +190,10 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
     http.patch("*/api/spaces/:sid/sources/:id", async ({ params, request }) => {
       const body = (await request.json()) as Partial<Source>;
       state.calls.patch.push({ id: String(params.id), body });
+      const target = state.sources.find((s) => s.id === params.id);
+      if (target?.status === "failed" && "enabled" in body) {
+        return HttpResponse.json({ detail: "A failed source can't be ticked." }, { status: 409 });
+      }
       state.sources = state.sources.map((s) => (s.id === params.id ? { ...s, ...body } : s));
       return HttpResponse.json(state.sources.find((s) => s.id === params.id));
     }),
@@ -199,6 +214,20 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
       return snap
         ? HttpResponse.json(snap)
         : HttpResponse.json({ detail: "No snapshot." }, { status: 404 });
+    }),
+    http.get("*/api/spaces/:sid/sources/:id/secrets", ({ params }) => {
+      state.calls.secrets.push(String(params.id));
+      const report = opts.secrets?.[String(params.id)];
+      return report
+        ? HttpResponse.json(report)
+        : HttpResponse.json({ detail: "No secrets report." }, { status: 404 });
+    }),
+    http.get("*/api/spaces/:sid/chunks/:id/context", ({ params }) => {
+      state.calls.contexts.push(String(params.id));
+      const c = opts.contexts?.[String(params.id)];
+      return c
+        ? HttpResponse.json(c)
+        : HttpResponse.json({ detail: "Passage not found." }, { status: 404 });
     }),
     http.get("*/api/spaces/:sid/chunks/:id", ({ params }) => {
       const c = opts.chunks?.[String(params.id)];

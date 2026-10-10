@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { Message } from "@/api/types";
 import {
   assistantMessage,
@@ -141,13 +141,11 @@ describe("chat", () => {
   });
 
   it("shows a calm refusal card with a suggestion and a Refused badge", async () => {
+    const suggestion = "Add sources that cover “what the office lease costs”, then ask again.";
     const refused = assistantMessage({
       id: "m_r",
       badge: "refused",
-      content: {
-        text: "Your sources don't cover this.",
-        suggestion: "Add sources about office leases.",
-      },
+      content: { text: "Not in your sources", suggestion },
     });
     const { persist } = spaceBackend({
       sources: READY_SOURCES,
@@ -157,8 +155,8 @@ describe("chat", () => {
           sseEvent("status", { stage: "retrieving" }),
           sseEvent("refused", {
             reason: "not_in_sources",
-            message: "Your sources don't cover this.",
-            suggestion: "Add sources about office leases.",
+            message: "Not in your sources",
+            suggestion,
           }),
           sseEvent("done", { message: refused }),
         ]);
@@ -168,9 +166,11 @@ describe("chat", () => {
     await ask("What does the office lease cost?");
 
     const card = await screen.findByTestId("refusal-card");
-    expect(within(card).getByText("Not in your sources")).toBeInTheDocument();
-    expect(within(card).getByText("Your sources don't cover this.")).toBeInTheDocument();
-    expect(within(card).getByText("Add sources about office leases.")).toBeInTheDocument();
+    // G5: the title appears once; the subtitle is the suggestion only.
+    expect(within(card).getAllByText("Not in your sources")).toHaveLength(1);
+    expect(within(card).getByTestId("refusal-title")).toHaveTextContent("Not in your sources");
+    expect(within(card).getByTestId("refusal-suggestion")).toHaveTextContent(suggestion);
+    expect(card.querySelectorAll("p")).toHaveLength(2);
     expect(screen.getByTestId("answer-badge")).toHaveTextContent("Refused");
     expect(screen.queryByRole("button", { name: /show sources used/i })).not.toBeInTheDocument();
   });
@@ -182,7 +182,7 @@ describe("chat", () => {
         sseResponse([
           sseEvent("refused", {
             reason: "no_sources",
-            message: "No ticked sources.",
+            message: "Not in your sources",
             suggestion: null,
           }),
         ]),
@@ -190,7 +190,9 @@ describe("chat", () => {
     renderApp(SPACE);
     await ask("Anything?");
     const card = await screen.findByTestId("refusal-card");
-    expect(within(card).getByText("No ticked sources.")).toBeInTheDocument();
+    expect(within(card).getByTestId("refusal-title")).toHaveTextContent("Not in your sources");
+    // No suggestion → no subtitle at all.
+    expect(within(card).queryByTestId("refusal-suggestion")).not.toBeInTheDocument();
     // Still there after the messages refetch.
     await new Promise((r) => setTimeout(r, 50));
     expect(screen.getByTestId("refusal-card")).toBeInTheDocument();
@@ -214,24 +216,27 @@ describe("chat", () => {
   });
 
   it("opens the source viewer at the highlighted passage when a citation is clicked", async () => {
-    const scrollSpy = vi.spyOn(Element.prototype, "scrollIntoView");
-    spaceBackend({
+    const { state } = spaceBackend({
       sources: READY_SOURCES,
       conversations: [conversation()],
       messages: { cv_1: [userMessage("How did revenue develop?"), answer()] },
-      chunks: {
-        ch_1: chunk({
-          id: "ch_1",
-          text: PASSAGE,
-          start_offset: PASSAGE_START,
-          end_offset: PASSAGE_START + PASSAGE.length,
-          locator: { pages: [3, 4] },
-        }),
-      },
-      snapshots: {
-        src_report: {
-          markdown: SNAPSHOT_TEXT,
-          map: { version: 1, kind: "pages", segments: [] },
+      contexts: {
+        ch_1: {
+          chunk: chunk({
+            id: "ch_1",
+            text: PASSAGE,
+            start_offset: PASSAGE_START,
+            end_offset: PASSAGE_START + PASSAGE.length,
+            locator: { pages: [3, 4] },
+          }),
+          source_type: "upload",
+          view: "text",
+          text: {
+            label: "Pages 3–4",
+            before: "Introduction.\n\n",
+            highlight: PASSAGE,
+            after: "\n\nOutlook follows.",
+          },
         },
       },
     });
@@ -245,14 +250,15 @@ describe("chat", () => {
 
     const viewer = await screen.findByRole("dialog", { name: "Annual report.pdf" });
     expect(within(viewer).getByText("Citation [1]")).toBeInTheDocument();
-    expect(within(viewer).getByText("· Pages 3–4")).toBeInTheDocument();
     const mark = await within(viewer).findByTestId("cited-passage");
+    expect(within(viewer).getByTestId("viewer-label")).toHaveTextContent("· Pages 3–4");
     expect(mark.tagName).toBe("MARK");
+    // The highlight is exactly the backend's string; no client-side offset slicing.
     expect(mark).toHaveTextContent(PASSAGE, { normalizeWhitespace: false });
     expect(within(viewer).getByTestId("snapshot-text")).toHaveTextContent(
       /Introduction\..*Outlook follows\./s,
     );
-    expect(scrollSpy.mock.contexts).toContain(mark);
+    expect(state.calls.contexts).toEqual(["ch_1"]);
     expect(within(viewer).getByRole("link", { name: /open the original file/i })).toHaveAttribute(
       "href",
       "/api/spaces/sp_1/sources/src_report/original",

@@ -21,6 +21,8 @@ export interface Settings {
   setup_completed: boolean;
   /** Effective worker count for the current power setting. */
   workers: number;
+  /** Real (capped) worker count per power level. Phase 2; absent on older backends. */
+  workers_by_power?: Record<Power, number>;
   thresholds: { refuse: number; verify: number };
   /** One-time hints the user has dismissed, e.g. "chat_grounding". */
   hints_dismissed: string[];
@@ -354,6 +356,48 @@ export interface SnapshotMap {
 export interface Snapshot {
   markdown: string;
   map: SnapshotMap;
+}
+
+/** One gitleaks finding. Never contains the secret value. */
+export interface SecretFinding {
+  file: string;
+  line: number;
+  rule_id: string;
+}
+
+/** GET …/sources/{id}/secrets (404 when the source has no report). */
+export interface SecretsReport {
+  files_skipped: number;
+  findings: SecretFinding[];
+}
+
+export interface CodeContext {
+  file: string;
+  commit: string | null;
+  language: string | null;
+  /** 1-based line number of `lines[0]`. */
+  first_line: number;
+  /** The whole file, or a window around the cited lines for long files. */
+  lines: string[];
+  /** Inclusive 1-based line range of the cited chunk. */
+  highlight: [number, number];
+}
+
+export interface TextContext {
+  /** "Page 3", "Pages 3–4", "Section: Install", "01:02–01:45". */
+  label: string | null;
+  before: string;
+  highlight: string;
+  after: string;
+}
+
+/** GET …/chunks/{id}/context: everything the source viewer shows. */
+export interface ChunkContext {
+  chunk: Chunk;
+  source_type: string;
+  view: "code" | "text";
+  code?: CodeContext;
+  text?: TextContext;
 }
 
 export interface BrowseEntry {

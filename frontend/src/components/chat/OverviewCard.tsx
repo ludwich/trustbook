@@ -110,6 +110,7 @@ export function OverviewCard({
                     <button
                       type="button"
                       disabled={!canAsk}
+                      data-testid="suggested-question"
                       onClick={() => onAsk(q)}
                       className="rounded-full border bg-background px-3 py-1 text-left text-sm transition-colors hover:border-primary/50 hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                     >

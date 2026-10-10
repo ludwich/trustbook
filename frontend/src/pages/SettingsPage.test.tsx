@@ -52,18 +52,34 @@ describe("settings", () => {
         return HttpResponse.json({
           power: "high",
           setup_completed: true,
-          workers: 10,
+          workers: 8,
+          workers_by_power: { low: 1, normal: 2, high: 8 },
           thresholds: { refuse: 0.15, verify: 0.5 },
+          hints_dismissed: [],
         });
       }),
+      http.get("*/api/settings", () =>
+        HttpResponse.json({
+          power: "normal",
+          setup_completed: true,
+          workers: 2,
+          workers_by_power: { low: 1, normal: 2, high: 8 },
+          thresholds: { refuse: 0.15, verify: 0.5 },
+          hints_dismissed: [],
+        }),
+      ),
     );
     renderApp("/settings");
     const power = await screen.findByRole("radiogroup", { name: "Processing power" });
     expect(within(power).getByRole("radio", { name: /normal/i })).toBeChecked();
-    await waitFor(() => expect(within(power).getByText(/10 workers/)).toBeInTheDocument());
+    // G1: labels come from workers_by_power (capped), not from the CPU count (12 − 2 = 10).
+    expect(screen.getByTestId("power-workers-low")).toHaveTextContent("1 worker");
+    expect(screen.getByTestId("power-workers-normal")).toHaveTextContent("2 workers");
+    expect(screen.getByTestId("power-workers-high")).toHaveTextContent("8 workers");
+    expect(within(power).queryByText(/10 workers/)).not.toBeInTheDocument();
     await user.click(within(power).getByRole("radio", { name: /high/i }));
     await waitFor(() => expect(body).toEqual({ power: "high" }));
-    expect(await screen.findByText("Now using 10 workers.")).toBeInTheDocument();
+    expect(await screen.findByText("Now using 8 workers.")).toBeInTheDocument();
 
     // Calibration results.
     expect(screen.getByText("41.5 chunks per second")).toBeInTheDocument();

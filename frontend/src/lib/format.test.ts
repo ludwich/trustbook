@@ -34,12 +34,33 @@ describe("helpers", () => {
     expect(localityOfUrl("not a url")).toBeNull();
   });
 
-  it("describes worker counts per power level", () => {
-    expect(workersFor("low", 8)).toBe("1 worker");
-    expect(workersFor("normal", 8)).toBe("2 workers");
-    expect(workersFor("high", 8)).toBe("6 workers");
-    expect(workersFor("high", 2)).toBe("2 workers");
-    expect(workersFor("high", null)).toBe("most CPU cores");
+  it("labels power levels with the backend's real (capped) worker counts", () => {
+    const s = {
+      power: "normal" as const,
+      workers: 2,
+      workers_by_power: { low: 1, normal: 2, high: 8 },
+    };
+    expect(workersFor("low", s)).toBe("1 worker");
+    expect(workersFor("normal", s)).toBe("2 workers");
+    // G1: 30 cores but capped at 8 → the label says 8, not 30 − 2.
+    expect(workersFor("high", s)).toBe("8 workers");
+  });
+
+  it("falls back gracefully when workers_by_power is absent", () => {
+    expect(workersFor("low", { power: "normal", workers: 2 })).toBe("1 worker");
+    expect(workersFor("normal", { power: "normal", workers: 2 })).toBe("2 workers");
+    // High's cap is only known by the backend: no made-up number…
+    expect(workersFor("high", { power: "normal", workers: 2 })).toBe("most CPU cores");
+    // …unless it is the current level, whose effective count is `workers`.
+    expect(workersFor("high", { power: "high", workers: 8 })).toBe("8 workers");
+    // A zero or missing entry is ignored.
+    expect(
+      workersFor("high", {
+        power: "low",
+        workers: 1,
+        workers_by_power: { low: 1, normal: 2, high: 0 },
+      }),
+    ).toBe("most CPU cores");
   });
 });
 

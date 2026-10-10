@@ -83,7 +83,13 @@ export function AnswerBadge({ badge, removed = 0 }: { badge: MessageBadge; remov
   );
 }
 
-/** Calm card for "the sources don't answer this". */
+export const NOT_IN_SOURCES = "Not in your sources";
+
+/**
+ * Calm card for "the sources don't answer this" (G5). The title is the refusal message
+ * ("Not in your sources", or e.g. "No answer with citations" for unusable model output); the only
+ * subtitle is the suggestion, and nothing repeats the title. No suggestion → no subtitle.
+ */
 export function RefusalCard({
   message,
   suggestion,
@@ -91,16 +97,31 @@ export function RefusalCard({
   message: string | null | undefined;
   suggestion: string | null | undefined;
 }) {
+  const title = message?.trim() || NOT_IN_SOURCES;
+  const sub = suggestion?.trim();
+  const showSub = Boolean(sub) && !sameText(sub, title);
   return (
     <div className="grid gap-1 rounded-lg border bg-muted/50 px-4 py-3" data-testid="refusal-card">
-      <p className="flex items-center gap-1.5 font-medium">
+      <p className="flex items-center gap-1.5 font-medium" data-testid="refusal-title">
         <IconFileSearch className="size-4 text-muted-foreground" aria-hidden />
-        Not in your sources
+        {title}
       </p>
-      {message && <p className="text-sm text-muted-foreground">{message}</p>}
-      {suggestion && <p className="text-sm">{suggestion}</p>}
+      {showSub && (
+        <p className="text-sm text-muted-foreground" data-testid="refusal-suggestion">
+          {sub}
+        </p>
+      )}
     </div>
   );
+}
+
+function sameText(a: string | undefined, b: string): boolean {
+  const norm = (t: string) =>
+    t
+      .toLowerCase()
+      .replace(/[.!\s]+$/u, "")
+      .trim();
+  return a !== undefined && norm(a) === norm(b);
 }
 
 /** Collapsed list of statements removed because they could not be checked (Phase 2 fills it). */

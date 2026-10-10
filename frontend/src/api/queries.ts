@@ -27,6 +27,10 @@ export const queryKeys = {
   snapshot: (sid: string, sourceId: string) =>
     ["spaces", sid, "sources", sourceId, "snapshot"] as const,
   chunk: (sid: string, chunkId: string) => ["spaces", sid, "chunks", chunkId] as const,
+  chunkContext: (sid: string, chunkId: string) =>
+    ["spaces", sid, "chunks", chunkId, "context"] as const,
+  secrets: (sid: string, sourceId: string) =>
+    ["spaces", sid, "sources", sourceId, "secrets"] as const,
   chatStatus: (sid: string) => ["spaces", sid, "chat-status"] as const,
   conversations: (sid: string) => ["spaces", sid, "conversations"] as const,
   messages: (sid: string, cid: string) =>
@@ -354,6 +358,26 @@ export function useChunk(sid: string, chunkId: string | null) {
     queryFn: () => api.getChunk(sid, chunkId as string),
     enabled: chunkId !== null,
     staleTime: Infinity,
+  });
+}
+
+/** What the source viewer shows for a cited chunk (code lines or text with context). */
+export function useChunkContext(sid: string, chunkId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.chunkContext(sid, chunkId ?? ""),
+    queryFn: () => api.getChunkContext(sid, chunkId as string),
+    enabled: chunkId !== null,
+    staleTime: 60_000,
+  });
+}
+
+/** The skipped-secrets report of a source; fetched only while the dialog is open. */
+export function useSecretsReport(sid: string, sourceId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.secrets(sid, sourceId),
+    queryFn: () => api.getSecrets(sid, sourceId),
+    enabled,
+    staleTime: 60_000,
   });
 }
 

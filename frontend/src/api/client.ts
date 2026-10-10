@@ -20,6 +20,7 @@ import type {
   ChatStatus,
   ChatStreamEvent,
   Chunk,
+  ChunkContext,
   Citation,
   Conversation,
   ConversationCreate,
@@ -28,6 +29,7 @@ import type {
   PasteSourceCreate,
   RefusalReason,
   SearchItem,
+  SecretsReport,
   Snapshot,
   Source,
   SourceUpdate,
@@ -287,6 +289,11 @@ export const api = {
     `/api/spaces/${enc(sid)}/sources/${enc(sourceId)}/original`,
   getChunk: (sid: string, chunkId: string) =>
     request<Chunk>("GET", `/api/spaces/${enc(sid)}/chunks/${enc(chunkId)}`),
+  getChunkContext: (sid: string, chunkId: string) =>
+    request<ChunkContext>("GET", `/api/spaces/${enc(sid)}/chunks/${enc(chunkId)}/context`),
+  /** Gitleaks report of a linked folder: file, line and rule ID only. */
+  getSecrets: (sid: string, sourceId: string) =>
+    request<SecretsReport>("GET", `/api/spaces/${enc(sid)}/sources/${enc(sourceId)}/secrets`),
   browse: (path: string) => request<BrowseListing>("GET", `/api/browse?path=${enc(path)}`),
 
   // Chat

@@ -11,7 +11,11 @@ export function GroundingHint() {
   if (!settings.data) return null;
   if ((settings.data.hints_dismissed ?? []).includes(CHAT_GROUNDING_HINT)) return null;
   return (
-    <div role="note" className="flex items-start gap-2 rounded-lg bg-info-soft px-3 py-2 text-sm">
+    <div
+      role="note"
+      data-testid="grounding-hint"
+      className="flex items-start gap-2 rounded-lg bg-info-soft px-3 py-2 text-sm"
+    >
       <IconInfoCircle className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
       <p className="flex-1">
         Answers only come from your ticked sources. Ideas and brainstorming live in the Ideation
