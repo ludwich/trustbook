@@ -335,3 +335,53 @@ grounding correctness > data safety > simplicity > performance > features.
   concurrent loads produced broken BF16 replicas.
 - **Result (8 CPUs):** 300 real code chunks went from 5.69 to 10.24 chunks/s (4 streams × 2 threads, cores busy
   4.0 → 7.3). The whole `requests` folder went from 19 min to 79 s.
+
+## 2026-10-10 — Phase 2 (core)
+
+### D-039 Answer verification (grounding layers 4–5)
+- The premise for each check is the cited chunk exactly as the model saw it, including a code chunk's
+  `File: … (lines a-b)` header, so claims about file names can be checked. A sentence's score is the maximum
+  over its cited chunks; it passes at ≥ `thresholds.verify` (0.5).
+- **The backticked-name check applies to every sentence**, not only those citing code (stricter than the
+  contract; follows SPEC §8). The only allowance is a trailing `()`. A source without a readable `map.json`
+  fails all its file and line citations.
+- More than half failing → one regeneration with an extra instruction → the refusal rule (> 50% fail or the
+  first fails → `unsupported`). If the regeneration is unusable, the answer is refused. Removed sentences go
+  to `removed_sentences` and the UI's collapsed drawer. Citations are renumbered over the kept sentences.
+- "Checker off" means the grounding capability is disabled (badge `unverified`; layer 5 still runs). If it is
+  enabled but the model is unavailable, the answer ends in an error, never an unverified answer.
+- `diagnostics` records the top rerank score, each sentence's score (0.0 for a code-check failure, `null` when
+  the checker is off) and whether the answer was regenerated. The eval sidecar holds only ids and numbers,
+  never question text.
+- **Inline citation markers:** models sometimes pack several sentences into one `text` with markers like
+  `["c1", "c2"]`. Text is split at each marker; each part cites its own marker's ids, trailing text uses the
+  declared ids, and markers never reach stored text.
+- **Answer prompt:** one rule added: "Be specific: give the exact values, names and conditions the chunks state,
+  not general descriptions." Answers had dropped details such as `raise_for_status` or latin-1. No grounding
+  rule was changed.
+
+### D-040 Gate router
+- The gate (default: the chat endpoint, temperature 0, 5 s limit, only the question is sent) classifies each
+  question as `sources`, `brainstorm` or `chitchat`, and every decision is logged to `gate_log`. It never
+  produces an ungrounded answer:
+  - `chitchat` gets a fixed reply without an answer call.
+  - `brainstorm` runs the normal grounded answer plus an "Open Ideation" hint.
+  - A gate that is not ready, fails or times out counts as `sources`, with `confidence: null`.
+- Corrections are made in the space's gate log dialog. `{"decision": null}` clears one. The answer carries
+  `gate_log_id` for a later inline "That's not right" button.
+- The eval runner counts the chitchat reply as a refusal (reason `chitchat`).
+
+### D-041 Estimates and queue ETA
+- Estimates come from calibration rates converted to tokens per second and back, because calibration chunks
+  (686 tokens for code, 351 for prose) differ from real chunks. The real sizes were measured on `requests` with
+  the production tokenizer: code 1,125 bytes / 360 tokens per chunk, text 1,400 bytes / 445 tokens.
+- **Heuristics:**
+  - Documents: pages from bytes by type (pdf 25 KB, docx 20 KB, pptx 60 KB, xlsx 50 KB per page).
+  - Audio: duration from bytes and typical bitrates.
+  - Fixed costs: url 8 s, youtube 15 s, folder 15 s + 0.02 s per file.
+  - Without calibration: about 700 tokens/s, labelled "rough estimate (speed test not run yet)".
+- The folder walk is the ingestion walker itself, and only sniffs the first 64 KB of large files.
+  `requests` is predicted at 80 s against a real 79 s.
+- Estimates are stored in the job payload (`estimate_s`). Queue ETA = the sum of remaining estimates divided
+  by min(workers, jobs), but never less than the longest single remaining job. Jobs report `eta_seconds`.
+- The UI asks to confirm adds above 2 minutes. If the estimate call itself fails, the add goes ahead.
