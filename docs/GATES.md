@@ -221,3 +221,70 @@ Other checks:
   call. p50 is about 20 s and p95 about 45 s on the workbench with your server.
 - A web-page chunk's heading label is the heading where the chunk starts. A citation can therefore show the
   previous section's heading (seen once in run E).
+
+---
+
+## Gate 3 — Code
+
+**Image:** `ghcr.io/ludwich/trustbook:phase-3-rc` · **PR:** `phase-3 → main`
+
+**Criteria:**
+- **SPEC §14:** on the `requests` repo, 100% of cited file/line ranges exist at the indexed commit, and the
+  secrets scan skips a planted fake secret in a test folder.
+- **Added by Ludwig at Gate 2:** at most **1 false refusal across all answerable code questions** (smoke +
+  refusal sets), with correct refusals ≥ 95% and citation precision ≥ 90%.
+- **Tracked:** false refusals per category, and p95 latency (flagged above 60 s).
+
+### Setup
+1. In `.env` set `TRUSTBOOK_IMAGE_TAG=phase-3-rc`, then `docker compose pull` and `docker compose up -d`. Let the
+   speed test finish.
+2. **Delete the `Smoke` space** so the runner re-indexes `requests` with the new code chunker (tree-sitter).
+
+### Checklist
+
+| # | Check | How to verify | Expected |
+|---|---|---|---|
+| 1 | **Gate command** | `docker compose exec app python /app/eval/runner.py --base-url http://127.0.0.1:8484 --space Smoke --setup /app/eval/smoke/corpus.yaml --questions /app/eval/smoke/questions.yaml --questions /app/eval/smoke/refusal.yaml --code-root /host/trustbook-eval/requests --report /data/gate3-report.md --min-precision 0.9 --min-refusal 0.95 --max-false-refusals-code 1 --min-ranges-valid 1.0 --max-p95 60` (add `--questions /data/eval-private` for your set) | Exit code 0. In `Trustbook/gate3-report.md`: cited ranges valid 100%, false refusals on code questions ≤ 1, refusals ≥ 95%, precision ≥ 90%, p95 ≤ 60 s, plus the per-category false refusal rows |
+| 2 | Planted secret (SPEC Gate 3) | Make a folder under your home folder, e.g. `trustbook-eval/secrets-test/`, with a file `deploy.pem` containing a private-key block (`-----BEGIN RSA PRIVATE KEY-----` / any base64 line / `-----END RSA PRIVATE KEY-----`) and a normal `README.md`. Link the folder | Source ready with "1 file skipped: possible secrets". The report shows `deploy.pem`, the line and `private-key`, but no key text. Asking about the key is refused |
+| 3 | Code chunks | Ask in `Smoke`: "What does `should_strip_auth` check?" and open a citation | The viewer header shows the file, the symbol (e.g. `SessionRedirectMixin.should_strip_auth`) and the exact lines |
+| 4 | Code claims | Ask: "How does requests encode the username and password for Basic auth?" | A verified (or partially verified) answer naming the colon join and base64, citing `src/requests/auth.py` |
+| 5 | Commits ahead | `git -C <your home>/trustbook-eval/requests commit --allow-empty -m test` (or pull new commits) | Within seconds the `requests` source shows "Indexed at 6e83187, folder is 1 commits ahead. Refresh?"; Refresh → "0 files changed, N unchanged", much faster than the first index |
+| 6 | Code judge setting | Settings → Grounding checker → "Check code claims with the chat model" | On by default; switching it off makes code answers stricter (more refusals) |
+| 7 | Gate 2 UI items #3–#12 | Already covered by end-to-end tests, run against this image before it was published (`frontend/e2e/gate2-*.spec.ts`) | Spot-check any you like |
+
+Undo #5 with `git -C …/requests reset --hard HEAD~1`.
+
+### Builder results (dev workbench, 8 CPUs, before handing over)
+
+Chat endpoint: Ludwig's llama-server, `Qwen3.6-35B-A3B-UD-Q4_K_XL`. 45 questions (15 smoke + 30 refusal set). Fresh
+`Smoke` space, re-indexed in 80 s (tree-sitter: 993 chunks).
+
+| Run | Change | Precision | Refusals | Code false refusals | p95 |
+|---|---|---|---|---|---|
+| Gate 2 (Ludwig) | Phase 2 | 100% | 23/23 | 4/13 | 51 s |
+| 3a | code judge + agreement guard + tree-sitter | 86.4% | 23/23 | 1/13 | 60.7 s |
+| 3b | + fused-top guard, FTS without line numbers, citation pruning, section labels | crashed: out of memory (fixed, D-054) | | | |
+| **3c** | + replicas released after indexing, small checker batches | **92.3% (36/39)** | **23/23** | **1/13** | **41.0 s** |
+
+**Run 3c in detail:**
+- False refusals: docs 0/10, code 1/10, multi 0/2.
+- The one false refusal is ref-near-10 (`codes.too_many_requests`): the model said the cited chunks don't name
+  429. The 747-token status table is one chunk.
+- Cited ranges valid: 25/25 (100%).
+- Wrong citations (3): two over-citations on docs-04 (Quickstart chunks that mention `.netrc` in passing) and a
+  test chunk on code-05 that calls `_basic_auth_str`. All three support their sentence, but not the question.
+
+Other checks:
+
+| Check | Result |
+|---|---|
+| 18/18 end-to-end specs on the release image, incl. every Gate 2 UI item #3–#12, the planted secret (#7), the code viewer (#6) and the code-judge toggle | pass (3.2 min) |
+| Planted secrets (AWS-key shape + private key, built at runtime) with real gitleaks 8.30.1 | skipped; report has file, line and rule only; the secret never appears in snapshot, chunks, API, report or logs |
+| Code claims (code judge, real model) | 17/18 as expected; all 9 false claims failed (semicolon, SHA-1, pool_block True, …) |
+| Memory during the run | 6.3 GB, no OOM |
+| CI on `phase-3` | see PR checks |
+
+### Known limits
+- Big data tables (e.g. `status_codes.py`) are single chunks, and answers about one entry can be missed
+  (ref-near-10).
+- Refresh time estimates still assume a full re-read (incremental refresh is much faster).
