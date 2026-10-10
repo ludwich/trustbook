@@ -14,8 +14,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 ## 1. Model + license verification
 - [x] Verify licenses on model cards (embeddings, reranker, grounding, STT) and record revisions
 - [x] Prove each default loads on CPU with pinned package versions (or switch to fallback)
-- [~] `docker/download_models.py` pins exact revisions, downloads into the image
-- [ ] `THIRD_PARTY_LICENSES.md`
+- [x] `docker/download_models.py` pins exact revisions, downloads into the image
+- [x] `THIRD_PARTY_LICENSES.md`
 
 ## 2. Backend (`backend/`)
 - [x] `pyproject.toml` (uv), ruff, mypy --strict, pytest config
@@ -46,19 +46,23 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] Saved API key never follows a changed host/provider (data safety fix)
 
 ## 4. Containers
-- [ ] `docker/app.Dockerfile`: frontend build → Python runtime + baked models, non-root when possible
-- [ ] `docker/searxng/settings.yml` (json on, limiter off, safe engines) + init step that writes it when missing
-- [ ] `compose.yaml` (GHCR, SearXNG pinned by digest), `compose.dev.yaml`, `.env.example`
-- [ ] Local smoke: `docker compose -f compose.dev.yaml up --build`, wizard Test against llama-server
+- [x] `docker/app.Dockerfile`: frontend build → Python runtime + baked models, non-root when possible
+- [x] `docker/searxng/settings.yml` (json on, limiter off, safe engines) + init step that writes it when missing
+- [x] `compose.yaml` (GHCR, SearXNG pinned by digest), `compose.dev.yaml`, `.env.example`
+- [x] Local smoke: `docker compose -f compose.dev.yaml up --build`, wizard Test against llama-server
 
 ## 5. CI / release
-- [ ] `.github/workflows/ci.yml`: ruff, mypy, pytest, ESLint, typecheck, Vitest, Docker build check
-- [ ] `.github/workflows/release.yml`: branch `phase-N` → `:phase-N-rc`; tag `phase-N` → `:phase-N` + `:latest`
-- [ ] CI green on `phase-0`, image `ghcr.io/ludwich/trustbook:phase-0-rc` published and pullable
+- [x] `.github/workflows/ci.yml`: ruff, mypy, pytest, ESLint, typecheck, Vitest, Docker build check
+- [x] `.github/workflows/release.yml`: branch `phase-N` → `:phase-N-rc`; tag `phase-N` → `:phase-N` + `:latest`
+- [~] CI green on `phase-0`, image `ghcr.io/ludwich/trustbook:phase-0-rc` published and pullable
 
 ## 6. Gate
-- [~] README (install, `.env`, gate command, grill-me credit placeholder)
-- [ ] `docs/GATES.md` Gate 0 checklist + how to verify
+- [x] README (install, `.env`, gate command, grill-me credit placeholder)
+- [x] `docs/GATES.md` Gate 0 checklist + how to verify
 - [ ] PR `phase-0 → main`
 - [ ] `docker image prune -f`
 - [ ] Stop and summarise
+
+## Notes for a restarted session
+- Gate 0 handover: docs/GATES.md. Known issues: D-019 (Whistle threads), D-015 (search rate limits).
+- After Ludwig passes Gate 0: squash-merge PR, tag `phase-0` on main, branch `phase-1`, bump `CALIBRATION_VERSION` when Docling lands.
