@@ -449,3 +449,51 @@ GateLogEntry = {"id": int, "created": str, "input": str,          // input = the
 Contract additions summarised: `refused.reason` gains `"unsupported"` (layers 4–5: more than half of the
 sentences, or the first one, not supported; message "Not in your sources" with the usual suggestion);
 `Message.content` gains `"hint"?: "ideation"`; `Message` gains `diagnostics` (above) and `gate_log_id`.
+
+## Phase 3: code
+
+### Code claim verification (layer 4 for code, D-045)
+A sentence citing at least one code chunk that fails the grounding checker gets a second chance, and passes
+only if **all** of the following hold:
+1. **Code judge:** one chat-model call per answer for all such sentences (temperature 0, `think=False`,
+   JSON schema). The judge sees only the cited code chunks with line numbers and the sentences, and returns
+   `{"verdicts": [{"index": int, "supported": bool, "evidence": [{"chunk": "c1", "start_line": int,
+   "end_line": int}]}]}`.
+2. **Evidence anchoring:** every evidence range lies inside a chunk the sentence cites.
+3. **Symbol/literal matching:** every code anchor in the sentence occurs as a whole word in the evidence lines.
+   Anchors are backticked spans, identifiers (snake_case, camelCase, UPPER_CASE, dotted), numbers, quoted
+   strings, and `True`/`False`/`None` in value claims. A sentence without anchors needs at least half of its
+   content words in the evidence lines, with identifiers split into words (`b64encode` → b64, encode).
+4. Layer 5 checks still pass.
+
+The setting `grounding.code_judge` (default on) lives in the grounding capability card ("Check code claims
+with the chat model"). Off → checker only (Phase 2 behaviour). `diagnostics.sentence_methods` records
+`"checker" | "code_judge" | null` per sentence. The judge call is logged in the request log like every
+chat call.
+
+### Retrieval agreement guard (D-046)
+After reranking, a chunk ranked in the top 3 of **both** the vector and the full-text lists is kept in the
+context even if the reranker dropped it. It replaces the lowest-ranked kept chunk and still respects the
+token budget. The refusal threshold still uses rerank scores.
+
+### Code chunking (SPEC §7.2) and commits (SPEC §7.5)
+- tree-sitter for C#, TypeScript/TSX, JavaScript/JSX and Python: one chunk per function, method or class
+  (prefixed `File: path · symbol` plus a line range); symbols over 1,500 tokens are split at statement
+  boundaries; module-level code is grouped up to 500 tokens; `locator.symbol` is filled. Other languages use the
+  SPEC §7.3 fallback chunker.
+- `Source` gains `"ahead": {"indexed_commit": str, "head_commit": str, "commits_ahead": int}|null`, filled when
+  the linked folder's HEAD differs from the indexed commit. Commits are counted from the commit graph with a
+  permissively licensed library (no GPL `git` binary). The UI shows "Indexed at <short>, folder is N commits
+  ahead. Refresh?".
+- Refresh of a folder source re-indexes only files whose content hash changed. Removed files drop their chunks.
+  `stats` gains `"changed_files"` and `"unchanged_files"` for the last refresh.
+
+### Test hooks (only with `TRUSTBOOK_MOCK_LLM=1`, never in compose)
+- **Mock chat:**
+  - A question containing `TB-UNSUPPORTED` gets one extra sentence, "This also requires a licence key from
+    the vendor.", citing c1. It fails verification, so the answer is `partially_verified`.
+  - The mock code judge supports a sentence when it shares at least two content words with the cited lines,
+    and names those lines as evidence.
+- **Mock web search:** a `mock` web-search provider returns fixed results for any query, including bare
+  homepages (`https://www.example.com/sv-se/`, `https://example.org/`) and specific pages
+  (`https://docs.example.com/certificates/ab-731`, `https://learn.example.com/exams/ab-731`).
