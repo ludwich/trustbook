@@ -311,3 +311,27 @@ grounding correctness > data safety > simplicity > performance > features.
 - SearXNG queries carry `language=en` (a request parameter; SearXNG stays unmodified). For queries of three or
   more words, results that are bare homepages (no path, `/`, a locale-only path such as `/sv-se/`, or an index
   page) are moved below the other results, for every provider, before the result limit is applied.
+
+### D-038 G2: indexing one large source scales across cores
+- **Biggest cause (a bug):** folders indexed generated files as text. In `requests`, `ext/requests-logo.ai`
+  (an Illustrator file stored as PDF text) produced 3,017 of 3,572 chunks, and the logo SVG one 727k-token
+  chunk: 93% of all tokens. Folders now skip `svg ai eps ps`, text or code files whose content starts with
+  `%PDF-` or `%!PS`, and code files with a line over 10,000 characters (minified or generated). These are counted
+  as `skipped_generated`. Real PDFs still go to Docling. `requests` is now 554 chunks.
+- **Parallel embedding:** `RuntimeOptions` gains `embedding_streams` (1–8) and `stream_threads`. With more than
+  one stream, ingestion uses separate embedder replicas (own model and tokenizer; HF fast tokenizers are not
+  thread-safe). Replicas load lazily and are kept until the next reconfigure (about 2.2 GB at 4 × BF16).
+  Chat keeps one shared instance on `torch_threads`, so reranking, the grounding checker and Docling are
+  unaffected. Replicas must fit in memory minus 4 GB, else fewer streams are used. Batches of 8 are
+  length-sorted, longest first, and pass through a bounded queue.
+- **Calibration v5** times 1×T*, 2×U/2, 4×U/4 and 8×U/8 (at least 2 threads each, if memory allows) on
+  ~685-token code-like chunks, and keeps more than one stream only if it is at least 1.1× faster. It stores
+  `embedding_chunks_per_s_code`.
+- **Reading:** folder files are read on up to 8 threads in path order. Docling conversions run one at a time
+  (it has its own threads). Chunking stays sequential (0.28 s for `requests`, limited by the GIL).
+- **Writing:** chunk rows go to `space.db` first, vectors to LanceDB every 512 chunks, and the full-text index
+  is rebuilt once at the end. A cancelled or failed run removes both.
+- **Model loads take turns:** transformers sets a process-wide default dtype while building a model, and
+  concurrent loads produced broken BF16 replicas.
+- **Result (8 CPUs):** 300 real code chunks went from 5.69 to 10.24 chunks/s (4 streams × 2 threads, cores busy
+  4.0 → 7.3). The whole `requests` folder went from 19 min to 79 s.
