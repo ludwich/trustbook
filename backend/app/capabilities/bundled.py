@@ -20,6 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
+from pydantic import BaseModel
+
+from app.capabilities.cpu import CpuInfo, cpu_info
+
 logger = logging.getLogger("trustbook.bundled")
 
 BundledKind = Literal["embeddings", "reranker", "grounding", "stt"]
@@ -128,7 +132,38 @@ def read_models_lock(models_dir: Path) -> dict[BundledKind, ModelInfo]:
     return result
 
 
-ProviderFactory = Callable[[ModelInfo], Any]
+Dtype = Literal["float32", "bfloat16"]
+
+
+class RuntimeOptions(BaseModel):
+    """How the bundled models run on this computer, chosen by calibration (DECISIONS D-020).
+
+    ``torch_threads`` None means "every CPU we may use". The grounding checker always runs in
+    float32 (grounding correctness before speed); FP16 is never used (SPEC §2).
+    """
+
+    torch_threads: int | None = None
+    embedding_dtype: Dtype = "float32"
+    reranker_dtype: Dtype = "float32"
+
+
+@dataclass(frozen=True)
+class TuneResult:
+    options: RuntimeOptions
+    notes: list[str]
+
+
+def default_threads(cpu: CpuInfo | None = None) -> int:
+    """Model threads before calibration: every CPU we may use.
+
+    Not the physical-core count: container topology is unreliable (an 8-CPU LXC reports 2 cores),
+    so physical cores are only one of the candidates calibration measures (DECISIONS D-020).
+    """
+    return (cpu or cpu_info()).usable
+
+
+ProviderFactory = Callable[[ModelInfo, RuntimeOptions], Any]
+Tuner = Callable[["ProviderRegistry", CpuInfo, Sequence[str]], TuneResult]
 
 
 def _default_factories() -> dict[BundledKind, ProviderFactory]:
@@ -164,9 +199,12 @@ class ProviderRegistry:
         models_dir: Path,
         factories: dict[BundledKind, ProviderFactory] | None = None,
         runtime_check: Callable[[BundledKind], bool] | None = None,
+        tuner: Tuner | None = None,
     ) -> None:
         self._models_dir = models_dir
         self._factories = factories
+        self._tuner = tuner
+        self._options = RuntimeOptions()
         # Injected factories bring their own runtime; otherwise look for the ml packages.
         self._runtime_check = runtime_check or (
             (lambda _kind: True) if factories is not None else runtime_installed
@@ -182,6 +220,29 @@ class ProviderRegistry:
     def info(self, kind: BundledKind) -> ModelInfo:
         """Lock-file information for ``kind`` (re-read each call; the file is tiny)."""
         return read_models_lock(self._models_dir)[kind]
+
+    @property
+    def options(self) -> RuntimeOptions:
+        return self._options
+
+    def configure(self, options: RuntimeOptions) -> None:
+        """Use ``options`` from now on; loaded models are dropped and reload on next use."""
+        with self._lock:
+            if options == self._options:
+                return
+            self._options = options
+            self._instances.clear()
+
+    def tune(self, cpu: CpuInfo, sample_texts: Sequence[str]) -> TuneResult:
+        """Find the fastest thread count and dtypes for this computer (calibration)."""
+        if self._tuner is not None:
+            return self._tuner(self, cpu, sample_texts)
+        if self._factories is not None or not self.runtime_available("embeddings"):
+            # Injected fakes or no ML runtime: nothing to tune.
+            return TuneResult(RuntimeOptions(torch_threads=default_threads(cpu)), [])
+        from app.capabilities import bundled_runtime
+
+        return bundled_runtime.tune_runtime(self, cpu, sample_texts)
 
     def runtime_available(self, kind: BundledKind) -> bool:
         """Whether ``kind`` can run in this build (an injected provider always can)."""
@@ -233,7 +294,7 @@ class ProviderRegistry:
             raise ProviderUnavailableError("Model files are missing from this install.")
         factories = self._factories if self._factories is not None else _default_factories()
         try:
-            instance = factories[kind](info)
+            instance = factories[kind](info, self._options)
         except ProviderUnavailableError:
             raise
         except ImportError as exc:

@@ -10,6 +10,7 @@ from app.capabilities.bundled import (
     ModelInfo,
     ProviderRegistry,
     ProviderUnavailableError,
+    RuntimeOptions,
     get_providers,
     read_models_lock,
     set_providers,
@@ -80,7 +81,7 @@ def test_factory_used_once(tmp_path: Path) -> None:
     write_models_lock(tmp_path)
     calls: list[ModelInfo] = []
 
-    def factory(info: ModelInfo) -> Any:
+    def factory(info: ModelInfo, _options: RuntimeOptions) -> Any:
         calls.append(info)
         return FakeEmbedder()
 
@@ -94,7 +95,7 @@ def test_factory_used_once(tmp_path: Path) -> None:
 def test_import_error_unavailable(tmp_path: Path) -> None:
     write_models_lock(tmp_path)
 
-    def factory(_info: ModelInfo) -> Any:
+    def factory(_info: ModelInfo, _options: RuntimeOptions) -> Any:
         raise ImportError("no torch")
 
     registry = ProviderRegistry(tmp_path, factories={"grounding": factory})

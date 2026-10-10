@@ -68,6 +68,9 @@ def build_services(
     spaces = SpaceService(paths)
     handlers = handlers or default_handlers
     calibration = CalibrationService(paths, providers, jobs)
+    saved = calibration.read()
+    if saved is not None and saved.runtime is not None:
+        providers.configure(saved.runtime)  # threads and dtypes measured on this computer
     handlers.register(CALIBRATE_KIND, calibration.handler)
 
     def space_name(space_id: str) -> str | None:

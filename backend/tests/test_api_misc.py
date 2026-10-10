@@ -66,7 +66,11 @@ def test_calibration_routes(make_client: AppFactory, paths: Paths) -> None:
         "parse_pages_per_s",
         "stt_realtime_factor",
         "notes",
+        "cpu",
+        "runtime",
     }
+    assert set(results["cpu"]) == {"model", "logical", "usable", "physical", "bf16"}
+    assert results["runtime"]["torch_threads"] >= 1
     assert results["parse_pages_per_s"] is None
     assert paths.calibration_file.is_file()
 

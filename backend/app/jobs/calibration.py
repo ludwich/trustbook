@@ -13,23 +13,30 @@ from typing import Any, Literal
 from pydantic import BaseModel, ValidationError
 
 from app.capabilities.audio import wav_bytes
-from app.capabilities.bundled import ProviderRegistry, ProviderUnavailableError
+from app.capabilities.bundled import (
+    ProviderRegistry,
+    ProviderUnavailableError,
+    RuntimeOptions,
+    TuneResult,
+    default_threads,
+)
+from app.capabilities.cpu import CpuInfo, cpu_info
 from app.config import Paths
 from app.db.models import Job
 from app.fsutil import atomic_write_json
 from app.jobs.handlers import JobContext
-from app.jobs.pool import usable_cpus
 from app.jobs.repository import JobRepository
 from app.timeutil import utc_now_iso
 
 logger = logging.getLogger("trustbook.calibration")
 
-CALIBRATION_VERSION = 2  # 2: real speech sample for STT, usable CPUs
+CALIBRATION_VERSION = 3  # 2: real speech for STT, usable CPUs; 3: tuned threads + BF16
 CALIBRATE_KIND = "calibrate"
 CALIBRATE_TITLE = "Measure this computer's speed"
 EMBED_CHUNKS = 64
 SPEECH_SAMPLE = "calibration.wav"  # public-domain speech, see docker/download_models.py
 RERANK_PAIRS = 32
+TUNE_CHUNKS = 12
 STT_SECONDS = 10.0
 PARSE_NOTE = "Document parser arrives in Phase 1."
 
@@ -51,6 +58,8 @@ class Calibration(BaseModel):
     parse_pages_per_s: float | None
     stt_realtime_factor: float | None
     notes: list[str]
+    cpu: CpuInfo | None = None
+    runtime: RuntimeOptions | None = None
 
 
 class CalibrationState(BaseModel):
@@ -129,6 +138,10 @@ class CalibrationService:
         """Job handler: measure each part, guarded, and save the results."""
         notes: list[str] = []
         ctx.progress(0.0)
+        cpu = cpu_info()
+        runtime = self._tune(cpu, notes)
+        ctx.check_cancelled()
+        ctx.progress(0.3)
         embed = self._guard("Embedding speed", self._measure_embeddings, notes)
         ctx.check_cancelled()
         ctx.progress(0.4)
@@ -141,12 +154,14 @@ class CalibrationService:
         result = Calibration(
             version=CALIBRATION_VERSION,
             measured_at=utc_now_iso(),
-            cpu_count=usable_cpus(),
+            cpu_count=cpu.usable,
             embedding_chunks_per_s=embed,
             rerank_pairs_per_s=rerank,
             parse_pages_per_s=None,
             stt_realtime_factor=stt,
             notes=notes,
+            cpu=cpu,
+            runtime=runtime,
         )
         atomic_write_json(self._paths.calibration_file, result.model_dump())
         ctx.progress(1.0)
@@ -156,6 +171,19 @@ class CalibrationService:
         self.run(ctx)
 
     # --- measurements ----------------------------------------------------------------------
+
+    def _tune(self, cpu: CpuInfo, notes: list[str]) -> RuntimeOptions:
+        """Pick model threads and BF16/FP32 by measurement, and use them from now on."""
+        try:
+            result = self._providers.tune(cpu, synthetic_chunks(TUNE_CHUNKS))
+        except Exception as exc:
+            if not isinstance(exc, ProviderUnavailableError):
+                logger.warning("Model tuning failed", exc_info=True)
+            notes.append(f"Model settings not tuned: {_reason(exc)}.")
+            result = TuneResult(RuntimeOptions(torch_threads=default_threads(cpu)), [])
+        notes.extend(result.notes)
+        self._providers.configure(result.options)
+        return result.options
 
     def _guard(self, label: str, measure: Callable[[], float], notes: list[str]) -> float | None:
         try:

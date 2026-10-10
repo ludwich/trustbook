@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-import math
-import os
 import threading
 from collections.abc import Callable
-from pathlib import Path
 
+from app.capabilities.cpu import memory_bytes, usable_cpus
 from app.capabilities.http import space_context
 from app.db.models import Job
 from app.jobs.handlers import HandlerRegistry, JobCancelledError, JobContext
@@ -18,32 +16,27 @@ from app.jobs.repository import JobRepository
 logger = logging.getLogger("trustbook.jobs")
 
 
-def usable_cpus(cgroup_cpu_max: Path = Path("/sys/fs/cgroup/cpu.max")) -> int:
-    """CPUs this process may really use: affinity mask, capped by a cgroup (container) quota.
-
-    ``os.cpu_count()`` reports the host's cores inside containers, which oversizes the pool.
-    """
-    try:
-        cores = len(os.sched_getaffinity(0))
-    except AttributeError:  # not on Linux
-        cores = os.cpu_count() or 2
-    try:
-        quota, period = cgroup_cpu_max.read_text("utf-8").split()[:2]
-        if quota != "max" and int(period) > 0:
-            cores = min(cores, max(1, math.ceil(int(quota) / int(period))))
-    except (OSError, ValueError):
-        pass
-    return max(1, cores)
+# "High" never runs more than this many jobs at once. The bundled models are loaded once per
+# process and shared, but every running job holds its own document, parser state and buffers,
+# and parallel model calls only compete for the same cores (SPEC §11, DECISIONS D-021).
+MAX_WORKERS = 8
+# Memory kept for the shared models (~3 GB) and the app, and a budget per extra running job.
+BASE_MEMORY = 4 * 1024**3
+MEMORY_PER_WORKER = 3 * 1024**3 // 2
 
 
-def workers_for_power(power: str, cpu_count: int | None = None) -> int:
-    """Worker count for a power setting: low 1, normal 2, high max(2, cores - 2)."""
+def workers_for_power(power: str, cpu_count: int | None = None, memory: int | None = None) -> int:
+    """Worker count: low 1, normal 2, high max(2, cores - 2) capped by MAX_WORKERS and memory."""
     if power == "low":
         return 1
-    if power == "high":
-        cores = cpu_count if cpu_count is not None else usable_cpus()
-        return max(2, cores - 2)
-    return 2
+    if power != "high":
+        return 2
+    cores = cpu_count if cpu_count is not None else usable_cpus()
+    workers = min(max(2, cores - 2), MAX_WORKERS)
+    available = memory if memory is not None else memory_bytes()
+    if available is not None:
+        workers = min(workers, (available - BASE_MEMORY) // MEMORY_PER_WORKER)
+    return max(2, workers)
 
 
 def error_message(exc: BaseException) -> str:
