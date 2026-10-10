@@ -29,9 +29,9 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] Secrets: planted fake secret in a generated test folder is skipped (Gate 3), test generated at runtime (never commit a secret-looking string)
 
 ## 4. Gate
-- [ ] CI green, PR `phase-3 → main`, `:phase-3-rc` published (e2e gate passes)
+- [x] CI green, PR `phase-3 → main` (#4), `:phase-3-rc` published from `92a8b12` (e2e gate passes)
 - [x] GATES.md Gate 3 checklist incl. per-category false refusals and p95 latency
-- [ ] `docker image prune -f`; stop and summarise
+- [x] `docker image prune -f`; stop and summarise — **waiting for Ludwig's Gate 3 verdict** (this commit is pushed with the merge)
 
 ## Notes for a restarted session
 - Quality bar script (stops on first failure): scratchpad `qbar.sh`; never chain checks through `| tail`.
