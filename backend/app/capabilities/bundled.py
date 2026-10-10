@@ -11,6 +11,7 @@ friends lazily. Tests inject fakes with :meth:`ProviderRegistry.override` or :fu
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import threading
@@ -141,6 +142,20 @@ def _default_factories() -> dict[BundledKind, ProviderFactory]:
     }
 
 
+# Python modules each bundled provider imports (the ``ml`` extra; absent in CI and dev installs).
+_RUNTIME_MODULES: dict[BundledKind, tuple[str, ...]] = {
+    "embeddings": ("torch", "sentence_transformers"),
+    "reranker": ("torch", "sentence_transformers"),
+    "grounding": ("torch", "transformers"),
+    "stt": ("needle",),
+}
+
+
+def runtime_installed(kind: BundledKind) -> bool:
+    """True when the Python packages ``kind`` needs are importable (without importing them)."""
+    return all(importlib.util.find_spec(name) is not None for name in _RUNTIME_MODULES[kind])
+
+
 class ProviderRegistry:
     """Lazily loads and caches bundled providers; supports injection for tests."""
 
@@ -148,9 +163,14 @@ class ProviderRegistry:
         self,
         models_dir: Path,
         factories: dict[BundledKind, ProviderFactory] | None = None,
+        runtime_check: Callable[[BundledKind], bool] | None = None,
     ) -> None:
         self._models_dir = models_dir
         self._factories = factories
+        # Injected factories bring their own runtime; otherwise look for the ml packages.
+        self._runtime_check = runtime_check or (
+            (lambda _kind: True) if factories is not None else runtime_installed
+        )
         self._instances: dict[BundledKind, Any] = {}
         self._overrides: dict[BundledKind, Any] = {}
         self._lock = threading.Lock()
@@ -162,6 +182,13 @@ class ProviderRegistry:
     def info(self, kind: BundledKind) -> ModelInfo:
         """Lock-file information for ``kind`` (re-read each call; the file is tiny)."""
         return read_models_lock(self._models_dir)[kind]
+
+    def runtime_available(self, kind: BundledKind) -> bool:
+        """Whether ``kind`` can run in this build (an injected provider always can)."""
+        with self._lock:
+            if kind in self._overrides or kind in self._instances:
+                return True
+        return self._runtime_check(kind)
 
     def override(
         self,

@@ -237,3 +237,42 @@ def test_list_models(registry: CapabilityRegistry, checker: HealthChecker, route
     router.json("GET", "http://localhost:9000/v1/models", {"data": [{"id": "whisper"}]})
     draft = Update(mode="endpoint", preset="custom", base_url="http://localhost:9000", model="w")
     assert checker.list_models("stt", draft) == ["whisper"]
+
+
+def test_searxng_probe_retries_then_marks_ready(
+    registry: CapabilityRegistry, checker: HealthChecker, router: Router
+) -> None:
+    calls: list[httpx.Request] = []
+
+    def healthz(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(503 if len(calls) < 3 else 200, text="OK")
+
+    router.add("GET", "http://searxng:8080/healthz", healthz)
+    sleeps: list[float] = []
+    result = checker.probe_searxng(attempts=5, delay_s=2.0, sleep=sleeps.append)
+    assert result is not None and result.ok
+    assert (len(calls), sleeps) == (3, [2.0, 2.0])
+    assert not any("/search" in str(r.url) for r in router.requests)  # no query left the box
+    search = registry.get("web_search")
+    assert (search.status, search.last_test and search.last_test.message) == (
+        "ready",
+        "SearXNG is running.",
+    )
+
+
+def test_searxng_probe_marks_error_when_down(
+    registry: CapabilityRegistry, checker: HealthChecker, router: Router
+) -> None:
+    router.add("GET", "http://searxng:8080/healthz", lambda _r: httpx.Response(502))
+    result = checker.probe_searxng(attempts=2, delay_s=0, sleep=lambda _s: None)
+    assert result is not None and not result.ok
+    assert registry.get("web_search").status == "error"
+
+
+def test_searxng_probe_skipped_for_other_providers(
+    registry: CapabilityRegistry, checker: HealthChecker, router: Router
+) -> None:
+    registry.update("web_search", Update(provider="brave", api_key="brave-key-123456"))
+    assert checker.probe_searxng(sleep=lambda _s: None) is None
+    assert router.requests == []

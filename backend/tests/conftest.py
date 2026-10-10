@@ -118,6 +118,7 @@ def make_client(
             "handlers": HandlerRegistry(),
             "start_workers": False,
             "calibrate_on_start": False,
+            "probe_search_on_start": False,
         }
         options.update(overrides)
         client = TestClient(create_app(**options))

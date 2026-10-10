@@ -14,6 +14,7 @@ from app.capabilities.adapters.factory import (
     build_search_adapter,
     build_stt_adapter,
 )
+from app.capabilities.adapters.search import SearxngAdapter
 from app.capabilities.audio import wav_bytes
 from app.capabilities.bundled import ProviderRegistry, ProviderUnavailableError
 from app.capabilities.http import OutboundHttp
@@ -68,6 +69,44 @@ class HealthChecker:
         result = TestResult(ok=ok, message=message, latency_ms=latency_ms)
         if not is_draft:
             self._registry.save_test(cap_id, result)
+        return result
+
+    def probe_searxng(
+        self,
+        *,
+        attempts: int = 12,
+        delay_s: float = 5.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> TestResult | None:
+        """At startup, check that SearXNG answers so its card shows the real status.
+
+        Uses ``/healthz`` only, so no search words leave the machine. Retries while the
+        SearXNG container is still starting. Returns ``None`` when SearXNG is not in use.
+        """
+        settings = self._registry.stored("web_search")
+        if (settings.provider or "searxng") != "searxng":
+            return None
+        adapter = SearxngAdapter(self._http, base_url=settings.base_url or self._searxng_url)
+        message = ""
+        for attempt in range(attempts):
+            if attempt:
+                sleep(delay_s)
+            started = self._clock()
+            try:
+                adapter.ping()
+            except AdapterError as exc:
+                message = str(exc)
+                continue
+            result = TestResult(
+                ok=True,
+                message="SearXNG is running.",
+                latency_ms=int((self._clock() - started) * 1000),
+            )
+            break
+        else:
+            result = TestResult(ok=False, message=message, latency_ms=None)
+        if self._registry.stored("web_search").provider == settings.provider:
+            self._registry.save_test("web_search", result)
         return result
 
     def list_models(self, cap_id: str, draft: CapabilityConfigUpdate | None = None) -> list[str]:

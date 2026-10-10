@@ -48,6 +48,12 @@ class SearxngAdapter:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
+    def ping(self) -> None:
+        """``GET /healthz``: proves SearXNG is up without sending a query to any search engine."""
+        request = httpx.Request("GET", f"{self._base_url}/healthz")
+        with self._http.client("web_search", timeout=self._timeout) as client:
+            send(client, request)
+
     def search(self, query: str, limit: int = 10) -> list[SearchResult]:
         request = httpx.Request(
             "GET",

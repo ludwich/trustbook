@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -67,6 +68,7 @@ def create_app(
     handlers: HandlerRegistry | None = None,
     start_workers: bool = True,
     calibrate_on_start: bool = True,
+    probe_search_on_start: bool = True,
 ) -> FastAPI:
     """Create the app. All arguments exist so tests can inject fakes and a tmp data folder."""
     _disable_third_party_telemetry()
@@ -86,6 +88,10 @@ def create_app(
             services.calibration.ensure_first_run()
         if start_workers:
             services.pool.start()
+        if probe_search_on_start:
+            threading.Thread(
+                target=services.health.probe_searxng, name="searxng-probe", daemon=True
+            ).start()
         app.state.services = services
         logger.info("Trustbook %s ready; data folder %s", resolved.version, resolved.data)
         try:

@@ -435,6 +435,8 @@ class CapabilityRegistry:
         info = self._providers.info(_BUNDLED_KINDS[cap_id])
         if not info.present:
             return Evaluation("error", "Model files are missing from this install.", "local")
+        if not self._providers.runtime_available(_BUNDLED_KINDS[cap_id]):
+            return Evaluation("error", "The model runtime is not installed in this build.", "local")
         failed = self._failed_test(s)
         if failed:
             return Evaluation("error", failed, "local")

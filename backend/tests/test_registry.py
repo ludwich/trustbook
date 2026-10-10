@@ -18,8 +18,9 @@ from app.config import CAPABILITY_IDS, Paths, SettingsStore, TestResult
 from tests.fakes import write_models_lock
 
 
-def make_registry(paths: Paths) -> CapabilityRegistry:
-    return CapabilityRegistry(paths, SettingsStore(paths), ProviderRegistry(paths.models_dir))
+def make_registry(paths: Paths, *, runtime: bool = True) -> CapabilityRegistry:
+    providers = ProviderRegistry(paths.models_dir, runtime_check=lambda _kind: runtime)
+    return CapabilityRegistry(paths, SettingsStore(paths), providers)
 
 
 @pytest.fixture
@@ -80,6 +81,15 @@ def test_default_views(registry: CapabilityRegistry) -> None:
     assert caps["tts"].hidden
     assert caps["stt"].config.mode == "bundled"
     assert caps["chat"].config.mode is None
+
+
+def test_bundled_error_when_runtime_missing(paths: Paths) -> None:
+    write_models_lock(paths.models_dir)
+    embeddings = make_registry(paths, runtime=False).get("embeddings")
+    assert (embeddings.status, embeddings.status_detail) == (
+        "error",
+        "The model runtime is not installed in this build.",
+    )
 
 
 def test_bundled_ready_when_present(paths: Paths) -> None:
