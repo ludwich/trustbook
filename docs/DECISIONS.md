@@ -262,3 +262,52 @@ grounding correctness > data safety > simplicity > performance > features.
 - **Decision:** the bundled models sit behind a writer-preferring readers-writer lock. Parsing, embedding,
   retrieval and the overview use it shared. Calibration takes it exclusively: it waits for current model work
   to finish, and new model work waits until calibration is done (about a minute, once).
+
+## 2026-10-10 — Phase 2 (Gate 1 follow-ups)
+
+### D-031 G1: power labels show the real worker counts
+- `Settings.workers_by_power` returns the capped counts (D-021). The UI labels each option from it; Ludwig saw
+  "High: 30 workers" while 8 were used.
+
+### D-032 G3: code answers get the definitions of the constants they use
+- **Finding:** code-03 answered "DEFAULT_POOLSIZE / DEFAULT_POOLBLOCK" instead of 10 / 10 / False, because the
+  values sit in other chunks of the same file.
+- **Decision:** after selecting the context, retrieval finds UPPER_CASE names used but not defined in each code
+  chunk, and adds the chunk that assigns each one (`NAME =` or `NAME:` at column 0; same file first, then same
+  source). At most 3 are added. They are ordinary numbered chunks the model may cite, appended after the
+  ranked chunks. Total context may reach 11 chunks but never exceeds 6,000 tokens; definitions push out only
+  the lowest-ranked chunks, never the top one or the chunk that needs them. The refusal threshold still uses
+  rerank scores only.
+- **How:** a query-time `GLOB` over `space.db` (~1.2 ms per name on 3,600 chunks); no new table.
+- **Eval:** `must_contain` is now a target metric (`--min-must-contain`). Refused answers count as misses, and
+  a run with no keyword questions fails the target.
+
+### D-033 G4: the secrets report is viewable
+- `GET …/sources/{id}/secrets` returns file, line and rule ID only (other fields of `secrets.json` are never
+  passed on). The source row shows one button, "N files skipped: possible secrets", which opens the report.
+
+### D-034 G5: readable refusal suggestion
+- Built from the user's own question: the leading question words are stripped, "how do/can I …" becomes
+  "how to …", the result is trimmed on a word boundary and quoted: `Add sources that cover “…”, then ask
+  again.` A question with nothing meaningful left gets a generic sentence, and `no_sources` has its own
+  fixed sentence. The card title is the refusal message; the subtitle is only the suggestion.
+
+### D-035 G6: the source viewer gets context from the server, not character offsets
+- **Cause:** the backend's offsets are Python code points, correct in `snapshot.md`. The browser sliced the
+  whole snapshot with UTF-16 indices, so every emoji before the chunk (HISTORY.md in `requests`) shifted the
+  highlight. Loading the 3.7 MB snapshot also showed the top of the file briefly.
+- **Decision:** `GET …/chunks/{id}/context` returns either the cited file's lines with a highlighted line range
+  (code view: monospace, line numbers, commit; whole file up to 2,000 lines, else ±200 lines), or
+  before/highlight/after strings with a page, section or timestamp label. Any locator with a file and line
+  numbers uses the code view. The viewer computes its scroll position from line numbers before the first
+  paint.
+
+### D-036 G7: failed sources are unticked
+- A source that fails is stored unticked, and ticking it returns 409. Unticking or renaming still works (group
+  "untick all"). A refresh re-ticks it when the refresh is queued, and it is unticked again if the refresh
+  fails. The UI disables the checkbox and leaves failed sources out of group states and counts.
+
+### D-037 G8: web search ranking
+- SearXNG queries carry `language=en` (a request parameter; SearXNG stays unmodified). For queries of three or
+  more words, results that are bare homepages (no path, `/`, a locale-only path such as `/sv-se/`, or an index
+  page) are moved below the other results, for every provider, before the result limit is applied.
