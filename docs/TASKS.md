@@ -56,12 +56,14 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
 ## 8. Gate
 - [x] Licenses for new deps (Docling, Trafilatura, Crawl4AI, yt-dlp, LanceDB, …) in THIRD_PARTY_LICENSES.md
-- [ ] CI green, PR `phase-1 → main`, `:phase-1-rc` published
+- [x] CI green, PR `phase-1 → main` (#2), `:phase-1-rc` published (e2e gate passed in release.yml)
 - [x] Run smoke set against Ludwig's endpoint; record citation precision in GATES.md
-- [ ] `docker image prune -f`; stop and summarise
+- [x] `docker image prune -f`; stop and summarise — **waiting for Ludwig's Gate 1 verdict**
 
 - [x] Calibration: exclusive model lock (D-030), parse speed measured (version 4)
 - [x] Smoke-set dry runs against Ludwig's llama-server (Qwen3.6-35B-A3B): 87.5% → 92.0% → 100% after hand-verified key fixes
+
+- [x] Exact gate command on the published `phase-1-rc`: 100% (23/23), refusals 3/3
 
 ## Notes for a restarted session
 - Phase 0 merged (`a60f774`), tagged `phase-0`. Local branch `phase-0` deleted; push tags as `refs/tags/phase-N`

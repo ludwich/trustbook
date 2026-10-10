@@ -123,8 +123,9 @@ Other checks:
 
 | Check | Result |
 |---|---|
-| CI on `phase-1` (ruff, mypy --strict, pytest, eval tests, ESLint, typecheck, Vitest, image build check) | see PR checks |
-| Release pipeline: Playwright e2e (paste → ask → cited answer, real models, mock LLM) runs against the image before it is pushed | pass locally on a fresh container (2.3 min incl. calibration) |
+| **Exact gate command (#3) on the published `phase-1-rc` image**, pulled anonymously and started with `compose.yaml` | **100.0% (23/23)**, refusals 3/3, exit 0 |
+| CI on `phase-1` (ruff, mypy --strict, pytest, eval tests, ESLint, typecheck, Vitest, image build check) | green |
+| Release pipeline: Playwright e2e (paste → ask → cited answer, real models, mock LLM) runs against the image before it is pushed | pass (GitHub runner and a fresh local container) |
 | Every source type in the container: Docling PDF (11 pages, OCR warning), web page, JavaScript-only page via headless Chromium, YouTube captions, audio upload via Whistle, LAN URL refused | pass |
 | Secret scan on the `requests` folder: 4 test TLS private keys (`tests/certs/**.key`) skipped, reported as file, line and rule ID (`private-key`) only; source shows "4 files skipped" | pass |
 | Calibration v4 on the workbench: indexing 10.8 chunks/s (synthetic), ranking 18.4 pairs/s, BF16 for both, 7 threads | pass |
