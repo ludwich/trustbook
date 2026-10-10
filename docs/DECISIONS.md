@@ -410,3 +410,23 @@ grounding correctness > data safety > simplicity > performance > features.
   endpoint answers 400, the field is dropped and the request is sent again, before any other fallback; OpenAI
   rejects unknown fields. Only the gate uses `think=False`. Answers keep thinking. Measured: 0.6–1.0 s per gate
   call, correct decisions for a question, a greeting and a brainstorming request.
+
+### D-044 Verifying claims about code: focused premises and a literal check
+- **Finding:** the 45-question tuning run (smoke + refusal set; refuse threshold 0 to collect data) had 23/23
+  correct refusals and 91% precision, but 6/22 answerable questions were refused. Thresholds weren't the
+  lever: verify 0.3–0.5 gave identical results. Four of the six were refused by verification of correct
+  claims about code. Offline tests showed HHEM scoring a true claim ("DEFAULT_POOLSIZE is set to 10") against
+  a chunk containing `DEFAULT_POOLSIZE = 10` at 0.18, and a true and a false claim about Basic auth at
+  0.08 and 0.01. Long code chunks (up to ~950 tokens, beyond HHEM's 512-token training length) drown the
+  lines that matter.
+- **Decision:**
+  - **Layer 4:** each sentence is also scored against a focused window: the lines (code) or sentences
+    (prose) of its cited chunks that share its content terms, with neighbours, in order, at most 1,200
+    characters. The window is cut only from cited text. With focused premises HHEM separates true from false
+    claims (0.69 vs 0.06; 0.94 vs 0.02).
+  - **Layer 5 (code citations):** every number and every `True`/`False`/`None` in a sentence citing code
+    must occur as a whole word in the cited chunks. HHEM still scores "pool_block is True" 0.56–0.71
+    against a `False` premise, so this deterministic check covers it.
+- The two other false refusals were the model itself answering "not in the chunks" (one with a top rerank
+  score of 0.14), a retrieval matter, not verification.
+- Thresholds stay at refuse 0.15 / verify 0.5. The sweep showed no gain from moving them.

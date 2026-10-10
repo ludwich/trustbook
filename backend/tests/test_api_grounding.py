@@ -126,11 +126,12 @@ def test_partially_verified_answer_streams_only_passing_sentences(
     assert history[0]["diagnostics"] is None  # user message
     rows = ChatStore(env.engine).citation_rows(message["id"])
     assert [(r.sentence_index, r.chunk_id, r.verifier_score) for r in rows] == [(0, chunk_id, 1.0)]
-    # Every pair went through the grounding checker: premise = chunk text, hypothesis = sentence.
-    assert env.grounding.calls[-1] == [
-        (GUIDE, QUOTE),
-        (GUIDE, "Proxies also need a licence key."),
-    ]
+    # Every pair went through the grounding checker: premise = chunk text, hypothesis = sentence,
+    # then focused windows cut from that same chunk text (D-044).
+    pairs = env.grounding.calls[-1]
+    assert pairs[:2] == [(GUIDE, QUOTE), (GUIDE, "Proxies also need a licence key.")]
+    for premise, _hypothesis in pairs[2:]:
+        assert all(line in GUIDE for line in premise.splitlines())
 
 
 def test_mostly_unsupported_answer_is_regenerated_then_refused(

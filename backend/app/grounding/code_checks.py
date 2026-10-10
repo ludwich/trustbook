@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -139,3 +139,64 @@ def locator_problem(files: SnapshotFiles, source_id: str, locator: Mapping[str, 
     if any(r is not None and r[0] <= start and end <= r[1] for r in ranges):
         return None
     return f"lines {start}-{end} are not in {file}"
+
+
+# --- focused premises and literal checks (D-044) -----------------------------------------------
+
+_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?")
+_PROSE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_STOPWORDS = frozenset(
+    "the a an and or of to in on for with by is are was were be been it its this that these "
+    "those as at from not no if then than when which who what how does do did can may will "
+    "default defaults set uses use used value values".split()
+)
+FOCUS_MAX_CHARS = 1_200
+_LITERAL = re.compile(r"(?<![A-Za-z0-9_.])(?:\d+(?:\.\d+)?|True|False|None)(?![A-Za-z0-9_])")
+
+
+def _terms(text: str) -> set[str]:
+    return {w.lower() for w in _WORD.findall(text) if w.lower() not in _STOPWORDS and len(w) > 1}
+
+
+def focus_premise(
+    sentence: str, chunk_texts: Sequence[str], max_chars: int = FOCUS_MAX_CHARS
+) -> str:
+    """The lines (code) or sentences (prose) of the cited chunks that share terms with ``sentence``.
+
+    Each matching unit comes with its neighbours, in original order, at most ``max_chars``. The
+    grounding checker was trained on short prose; a 900-token chunk drowns the few lines that state
+    the claim, so true and false claims about code both scored near 0 (D-044). The window is cut
+    only from cited text, so it adds nothing the model was not shown.
+    """
+    wanted = _terms(sentence)
+    if not wanted:
+        return ""
+    units: list[str] = []
+    for text in chunk_texts:
+        code_like = "\n" in text and text.startswith("File: ")
+        parts = text.splitlines() if code_like else _PROSE_SPLIT.split(" ".join(text.split()))
+        units.extend(p for p in parts if p.strip())
+        units.append("")  # chunk boundary
+    scores = [len(_terms(u) & wanted) for u in units]
+    ranked = sorted((i for i, s in enumerate(scores) if s > 0), key=lambda i: (-scores[i], i))
+    chosen: set[int] = set()
+    size = 0
+    for i in ranked:
+        for j in (i - 1, i, i + 1):
+            if 0 <= j < len(units) and j not in chosen and units[j]:
+                if size + len(units[j]) + 1 > max_chars:
+                    continue
+                chosen.add(j)
+                size += len(units[j]) + 1
+    return "\n".join(units[i] for i in sorted(chosen))
+
+
+def missing_literals(text: str, chunk_texts: Iterable[str]) -> list[str]:
+    """Numbers and ``True``/``False``/``None`` in ``text`` that no cited chunk contains as a word.
+
+    Used for sentences citing code, where the grounding checker cannot tell ``True`` from
+    ``False`` reliably (D-044).
+    """
+    texts = list(chunk_texts)
+    found = dict.fromkeys(m.group(0) for m in _LITERAL.finditer(text))
+    return [lit for lit in found if not _occurs(lit, texts)]

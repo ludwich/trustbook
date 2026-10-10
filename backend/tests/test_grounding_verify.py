@@ -269,3 +269,41 @@ def test_qualified_names_pass_when_every_part_occurs_as_a_whole_word() -> None:
     assert missing_identifiers("`Resp.ok` works.", [code]) == ["Resp.ok"]  # no partial words
     assert missing_identifiers('Prefix `"Basic "`.', [code]) == ['"Basic "']  # literal: verbatim
     assert missing_identifiers('Prefix `"Basic "`.', ['b"Basic " + token']) == []
+
+
+def test_focus_premise_keeps_only_cited_lines_that_share_terms() -> None:
+    from app.grounding.code_checks import focus_premise
+
+    code = (
+        "File: src/requests/adapters.py (lines 1-40)\n"
+        + "\n".join(f"x{i} = {i}" for i in range(30))
+        + "\nDEFAULT_POOLBLOCK = False\nDEFAULT_POOLSIZE = 10\nDEFAULT_RETRIES = 0"
+    )
+    window = focus_premise("DEFAULT_POOLSIZE is set to 10.", [code])
+    assert "DEFAULT_POOLSIZE = 10" in window
+    assert "x3 = 3" not in window  # unrelated lines are left out
+    assert all(line in code for line in window.splitlines())  # only cited text
+    assert focus_premise("the a of", [code]) == ""  # nothing to match on
+
+
+def test_literals_in_code_sentences_must_occur_in_the_cited_code() -> None:
+    from app.grounding.code_checks import missing_literals
+
+    code = "DEFAULT_POOLBLOCK = False\nDEFAULT_POOLSIZE = 10"
+    assert missing_literals("pool_block defaults to False and the pool size is 10.", [code]) == []
+    assert missing_literals("By default, pool_block is True.", [code]) == ["True"]
+    assert missing_literals("The pool size is 20.", [code]) == ["20"]
+    assert missing_literals("Version 2.32.0 added it.", ["in 2.32.0"]) == []
+
+
+def test_code_sentence_with_a_literal_not_in_the_code_fails_layer_5() -> None:
+    chunk = rc(
+        "a",
+        "File: src/a.py (lines 1-2)\nDEFAULT_POOLBLOCK = False",
+        {"file": "src/a.py", "start_line": 1, "end_line": 2},
+    )
+    checked = Verifier(lambda pairs: [1.0] * len(pairs), threshold=0.5).check(
+        [("By default, pool_block is True.", [chunk])]
+    )
+    assert not checked.checks[0].passed
+    assert "True is not in the cited code" in checked.checks[0].problems

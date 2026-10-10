@@ -4,7 +4,8 @@ Each sentence is scored against every chunk it cites with the bundled grounding 
 ``(premise = the cited chunk's text, hypothesis = the sentence)``, and, when it cites more than one
 chunk, against all of them joined in citation order (a claim may need two cited chunks together:
 ``pool_connections=DEFAULT_POOLSIZE`` plus ``DEFAULT_POOLSIZE = 10``; D-042). The sentence
-score is the highest of those scores; it passes at ``score >= verify_threshold``. The premise is
+score (also against a focused window of the cited lines sharing its terms, D-044) is the
+highest of those scores; it passes at ``score >= verify_threshold``. The premise is
 the chunk text exactly as indexed, so a code chunk keeps its ``File: … (lines a-b)`` first line
 (it is part of what the model was shown and lets "defined in sessions.py" be checked).
 
@@ -20,7 +21,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.capabilities.bundled import ProviderRegistry
-from app.grounding.code_checks import SnapshotFiles, locator_problem, missing_identifiers
+from app.grounding.code_checks import (
+    SnapshotFiles,
+    focus_premise,
+    locator_problem,
+    missing_identifiers,
+    missing_literals,
+)
 from app.retrieval.service import RetrievedChunk
 
 ScorePairs = Callable[[Sequence[tuple[str, str]]], list[float]]
@@ -151,14 +158,24 @@ class Verifier:
             for text, cited in sentences
             if len(cited) > 1
         ]
-        raw = self._score_pairs(pairs + joined) if pairs else []
-        if len(raw) != len(pairs) + len(joined):
+        focused_index: list[int] = []
+        focused: list[tuple[str, str]] = []
+        for i, (text, cited) in enumerate(sentences):
+            window = focus_premise(text, [chunk.text for chunk in cited])
+            if window:
+                focused_index.append(i)
+                focused.append((window, text))
+        raw = self._score_pairs(pairs + joined + focused) if pairs else []
+        if len(raw) != len(pairs) + len(joined) + len(focused):
             raise RuntimeError("The grounding checker returned the wrong number of scores")
         flat = iter(_clean(v) for v in raw)
         per_chunk: list[list[float | None]] = [
             [next(flat) for _ in cited] for _, cited in sentences
         ]
         self._joined = {i: next(flat) for i, (_, cited) in enumerate(sentences) if len(cited) > 1}
+        for i in focused_index:
+            score = next(flat)
+            self._joined[i] = max(self._joined.get(i, 0.0), score)
         return per_chunk
 
     def _code_problems(self, text: str, cited: Sequence[RetrievedChunk]) -> list[str]:
@@ -166,6 +183,11 @@ class Verifier:
             f"`{name}` is not in the cited chunks"
             for name in missing_identifiers(text, (c.text for c in cited))
         ]
+        if any("file" in chunk.locator for chunk in cited):
+            problems.extend(
+                f"{literal} is not in the cited code"
+                for literal in missing_literals(text, (c.text for c in cited))
+            )
         for chunk in cited:
             problem = locator_problem(self._files, chunk.source_id, chunk.locator)
             if problem is not None:
