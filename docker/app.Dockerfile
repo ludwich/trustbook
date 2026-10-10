@@ -126,9 +126,10 @@ COPY --chmod=0644 docker/searxng/settings.yml /app/searxng/settings.yml
 # --- UI ---
 COPY --from=frontend /src/frontend/dist /app/static
 
-# --- App code ---
+# --- App code (+ the eval runner and public smoke set, so gates run with `docker compose exec`) ---
 COPY backend/app /app/app
-RUN chmod -R a+rX /app/app /app/static /app/searxng
+COPY eval /app/eval
+RUN chmod -R a+rX /app/app /app/static /app/searxng /app/eval
 
 # Prove every baked model loads offline and scores sensibly (fails the build otherwise).
 # No network: a model that tries to fetch anything at load time breaks the build here.

@@ -3,8 +3,10 @@
 > **Trust your notebook.** A local-first research notebook. Add sources into isolated *spaces* and ask
 > questions. Every answer comes only from those sources, with citations you can check in one click.
 
-Status: **proof of concept, Phase 0 (foundations)**. Spaces, settings, the setup wizard and the job queue
-work; adding sources and chat arrive in Phase 1. See [`SPEC.md`](SPEC.md) for the full plan.
+Status: **proof of concept, Phase 1 (grounded chat)**. Add documents, web pages, YouTube videos, web
+search results, pasted text and folders to a space, and ask questions: every answer sentence cites the
+passages it comes from, and Trustbook refuses when your sources don't cover the question. Answer
+checking, code-specific features and the Ideation tab follow in later phases (see [`SPEC.md`](SPEC.md)).
 
 - Runs on your machine in containers (Docker Desktop, Docker Engine, Podman or Rancher Desktop).
 - Embeddings, reranking, answer checking and speech-to-text run locally on CPU, bundled in the image.
@@ -14,8 +16,8 @@ work; adding sources and chat arrive in Phase 1. See [`SPEC.md`](SPEC.md) for th
 
 ## Install
 
-You need Docker (or Podman) with Compose, about 6 GB of free disk space and at least 4 GB of RAM for
-the app container. With Podman, use podman-compose 1.1 or newer (or Podman's docker-compose provider).
+You need Docker (or Podman) with Compose, about 12 GB of free disk space and at least 8 GB of RAM for
+the app container (Docker Desktop: Settings → Resources). With Podman, use podman-compose 1.1 or newer (or Podman's docker-compose provider).
 
 1. Create a folder, for example `trustbook`, and put two files in it:
    - [`compose.yaml`](compose.yaml)
@@ -46,6 +48,15 @@ Stop with `docker compose down`. Your data stays in `TRUSTBOOK_DATA`.
 Inside the container, `localhost` is the container itself. To reach Ollama, llama-server or LM Studio
 running on your computer, use `http://host.docker.internal:<port>/v1` (the presets do this for you).
 
+## Adding sources
+
+Open a space and use **Add source**: upload files (PDF, Word, PowerPoint, Excel, text, audio), link a
+folder from your home folder (secrets are detected and skipped), add a web page or YouTube link, search
+the web and tick results, or paste text. Each source is read once into a dated snapshot inside the space.
+Large folders take a while: the speed test in Settings shows how fast this computer indexes.
+
+Trustbook only fetches public web pages; addresses on your local network are refused.
+
 ## Your data
 
 ```
@@ -69,6 +80,10 @@ cd frontend && pnpm install && pnpm dev     # proxies /api to :8484
 
 # whole stack, built locally
 docker compose -f compose.dev.yaml up --build
+
+# evaluation (see eval/smoke/README.md)
+uv run --project backend python eval/runner.py --base-url http://localhost:8484 --space Smoke \
+  --setup eval/smoke/corpus.yaml --questions eval/smoke/questions.yaml --report report.md
 ```
 
 Builder notes: [`CLAUDE.md`](CLAUDE.md) · architecture: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) ·
