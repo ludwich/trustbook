@@ -108,7 +108,9 @@ describe("chat", () => {
         citations: [C1, C2],
       }),
     );
-    expect(await screen.findByText("Checking…")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Checking the answer against your sources…"),
+    ).toBeInTheDocument();
     expect(await screen.findByText("The board approved the budget.")).toBeInTheDocument();
 
     const stored = answer({ id: "m_a1" });
@@ -116,7 +118,11 @@ describe("chat", () => {
     sse.push(sseEvent("done", { message: stored }));
     sse.close();
 
-    await waitFor(() => expect(screen.queryByText("Checking…")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Checking the answer against your sources…"),
+      ).not.toBeInTheDocument(),
+    );
     const answers = screen.getAllByTestId("assistant-message");
     expect(answers).toHaveLength(1);
     const a = within(answers[0] as HTMLElement);

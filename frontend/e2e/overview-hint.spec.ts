@@ -78,7 +78,10 @@ test("the overview is written automatically and its suggested questions can be a
 
   // Clicking a suggestion asks it.
   await questions.first().click();
-  await expect(page.getByText(question, { exact: true }).first()).toBeVisible();
+  // Scoped to the chat: the conversation picker also holds the question (as a hidden <option>).
+  await expect(
+    page.getByTestId("user-message").filter({ hasText: question }).first(),
+  ).toBeVisible();
   await expect(page.getByTestId("assistant-message")).toHaveCount(1, { timeout: 90_000 });
 });
 

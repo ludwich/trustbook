@@ -104,6 +104,13 @@ describe("formatComputer", () => {
     ).toBe("uses 6 of 8 CPUs · FP32");
     expect(formatComputer(cpu, null)).toBe("AMD Ryzen AI Max+ 395 · uses 32 of 32 CPUs");
   });
+  it("adds 'S streams' only for more than one embedding stream", () => {
+    expect(formatComputer(cpu, { ...runtime, embedding_streams: 2 })).toBe(
+      "AMD Ryzen AI Max+ 395 · uses 32 of 32 CPUs · 16 model threads · 2 streams · BF16",
+    );
+    expect(formatComputer(cpu, { ...runtime, embedding_streams: 1 })).not.toContain("stream");
+    expect(formatComputer(cpu, { ...runtime, embedding_streams: null })).not.toContain("stream");
+  });
   it("returns null for results without CPU or runtime details", () => {
     expect(formatComputer(undefined, undefined)).toBeNull();
     expect(formatComputer(null, null)).toBeNull();

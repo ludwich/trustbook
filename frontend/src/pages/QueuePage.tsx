@@ -214,6 +214,7 @@ function Summary({ summary }: { summary: QueueSummary }) {
 function JobRow({ job, children }: { job: Job; children?: ReactNode }) {
   const status = STATUS[job.status];
   const showProgress = job.status === "running" || (job.progress !== null && job.status !== "done");
+  const eta = UNFINISHED.includes(job.status) ? formatEta(job.eta_seconds) : null;
   return (
     <li className="flex items-center gap-4 px-4 py-3" data-testid={`job-${job.id}`}>
       <div className="min-w-0 flex-1">
@@ -237,6 +238,7 @@ function JobRow({ job, children }: { job: Job; children?: ReactNode }) {
                 ? `Started ${formatTime(job.started_at)}`
                 : `Added ${formatTime(job.created_at)}`}
           </span>
+          {eta && <span data-testid={`job-eta-${job.id}`}>{eta}</span>}
         </div>
         {showProgress && (
           <div className="mt-2 flex items-center gap-2">

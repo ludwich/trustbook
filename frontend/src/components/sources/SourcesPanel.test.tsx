@@ -1,10 +1,12 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { SOURCES_POLL_BUSY_MS, SOURCES_POLL_IDLE_MS, sourcesPollInterval } from "@/api/queries";
 import { groupChecked, visibleQualityWarning } from "./sourceMeta";
 import { source } from "@/test/fixtures";
 import { renderApp } from "@/test/render";
+import { server } from "@/test/server";
 import { spaceBackend } from "@/test/spaceBackend";
 
 const SPACE = "/spaces/sp_1";
@@ -348,5 +350,55 @@ describe("sources polling", () => {
     }
     expect(SOURCES_POLL_BUSY_MS).toBe(2_000);
     expect(SOURCES_POLL_IDLE_MS).toBe(15_000);
+  });
+
+  it("changes ticks at once, before the server answers (source and group)", async () => {
+    const user = userEvent.setup();
+    spaceBackend({
+      sources: [
+        source({ id: "s1", title: "Contract.pdf" }),
+        source({ id: "s2", title: "Minutes.docx" }),
+      ],
+    });
+    // Hold every write until released, like a slow server.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const slow = async () => {
+      await held;
+      return HttpResponse.json([]);
+    };
+    server.use(
+      http.patch("*/api/spaces/:sid/sources/:id", slow),
+      http.put("*/api/spaces/:sid/sources/enabled", slow),
+    );
+    renderApp(SPACE);
+
+    const box = await screen.findByRole("checkbox", { name: "Use Contract.pdf" });
+    const group = screen.getByRole("checkbox", { name: "Use all documents" });
+    await user.click(box);
+    // No waitFor: the checkbox must not snap back while the request is open.
+    expect(box).not.toBeChecked();
+    expect(group).toBePartiallyChecked();
+
+    await user.click(group);
+    expect(group).toBeChecked();
+    expect(box).toBeChecked();
+    release();
+  });
+
+  it("puts the tick back and explains when the server refuses it", async () => {
+    const user = userEvent.setup();
+    spaceBackend({ sources: [source({ id: "s1", title: "Contract.pdf" })] });
+    server.use(
+      http.patch("*/api/spaces/:sid/sources/:id", () =>
+        HttpResponse.json({ detail: "The source is busy." }, { status: 409 }),
+      ),
+    );
+    renderApp(SPACE);
+
+    const box = await screen.findByRole("checkbox", { name: "Use Contract.pdf" });
+    await user.click(box);
+    expect(await screen.findByText("The source is busy.")).toBeInTheDocument();
+    await waitFor(() => expect(box).toBeChecked());
   });
 });

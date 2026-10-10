@@ -1,6 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useRef, useState } from "react";
 import { api } from "./client";
 import type {
+  GateDecision,
+  GateLogEntry,
   Overview,
   PasteSourceCreate,
   SearchItem,
@@ -37,6 +40,9 @@ export const queryKeys = {
     ["spaces", sid, "conversations", cid, "messages"] as const,
   overview: (sid: string) => ["spaces", sid, "overview"] as const,
   browse: (path: string) => ["browse", path] as const,
+  gateLog: (sid: string) => ["spaces", sid, "gate-log"] as const,
+  folderEstimate: (sid: string, path: string) =>
+    ["spaces", sid, "estimate", "folder", path] as const,
 };
 
 /** Jobs that still need work (shown in the header indicator). */
@@ -310,12 +316,23 @@ function mergeSources(old: Source[] | undefined, updated: Source[]): Source[] | 
   return old.map((s) => byId.get(s.id) ?? s);
 }
 
-/** Ticks or unticks sources. Optimistic, so checkboxes respond at once. */
+/**
+ * Ticks or unticks sources. Optimistic, so checkboxes respond at once.
+ *
+ * Two layers: `toggle()` records the wanted state in local React state synchronously, inside the
+ * click handler, so a controlled checkbox never snaps back (TanStack's `onMutate` runs a tick
+ * later, after React has already reset the input). `onMutate` also updates the sources cache, and
+ * rolls it back on error. Both are dropped once the request settles and the list is refetched.
+ */
 export function useSetSourcesEnabled(sid: string) {
   const qc = useQueryClient();
   const key = queryKeys.sources(sid);
-  return useMutation({
-    mutationFn: ({ ids, enabled }: { ids: string[]; enabled: boolean }) =>
+  // id → [wanted state, token of the toggle that set it]
+  const [pending, setPending] = useState<Record<string, [boolean, number]>>({});
+  const tokenRef = useRef(0);
+
+  const mutation = useMutation({
+    mutationFn: ({ ids, enabled }: { ids: string[]; enabled: boolean; token: number }) =>
       ids.length === 1
         ? api.updateSource(sid, ids[0] as string, { enabled }).then((s) => [s])
         : api.setSourcesEnabled(sid, ids, enabled),
@@ -332,8 +349,44 @@ export function useSetSourcesEnabled(sid: string) {
       if (ctx?.previous) qc.setQueryData(key, ctx.previous);
     },
     onSuccess: (updated) => qc.setQueryData<Source[]>(key, (old) => mergeSources(old, updated)),
-    onSettled: () => void qc.invalidateQueries({ queryKey: queryKeys.chatStatus(sid) }),
+    onSettled: async (_d, _e, { ids, token }) => {
+      void qc.invalidateQueries({ queryKey: queryKeys.chatStatus(sid) });
+      await qc.invalidateQueries({ queryKey: key });
+      // Only clear what this toggle set; a newer click on the same source keeps its own state.
+      setPending((p) => {
+        const next = { ...p };
+        for (const id of ids) if (next[id]?.[1] === token) delete next[id];
+        return next;
+      });
+    },
   });
+
+  const { mutate } = mutation;
+  const toggle = useCallback(
+    (ids: string[], enabled: boolean) => {
+      if (ids.length === 0) return;
+      const token = ++tokenRef.current;
+      setPending((p) => {
+        const next = { ...p };
+        for (const id of ids) next[id] = [enabled, token];
+        return next;
+      });
+      mutate({ ids, enabled, token });
+    },
+    [mutate],
+  );
+
+  /** The sources with every pending tick applied. */
+  const apply = useCallback(
+    (sources: Source[]): Source[] =>
+      sources.map((s) => {
+        const p = pending[s.id];
+        return p && p[0] !== s.enabled ? { ...s, enabled: p[0] } : s;
+      }),
+    [pending],
+  );
+
+  return { ...mutation, toggle, apply };
 }
 
 export function useRefreshSource(sid: string) {
@@ -477,5 +530,48 @@ export function useDismissHint() {
       );
     },
     onSuccess: (data) => qc.setQueryData(queryKeys.settings, data),
+  });
+}
+
+// ---- Phase 2: estimates and gate log ----------------------------------------
+
+/** Estimate for linking a folder; shown in the picker footer once a folder is chosen. */
+export function useFolderEstimate(sid: string, path: string, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.folderEstimate(sid, path),
+    queryFn: () => api.estimateSources(sid, [{ kind: "folder", path }]),
+    enabled: enabled && path !== "",
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+export function useGateLog(sid: string, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.gateLog(sid),
+    queryFn: () => api.listGateLog(sid, 200),
+    enabled,
+  });
+}
+
+/** "That's not right": stores the user's decision. Optimistic, so the select responds at once. */
+export function useCorrectGateDecision(sid: string) {
+  const qc = useQueryClient();
+  const key = queryKeys.gateLog(sid);
+  return useMutation({
+    mutationFn: ({ id, decision }: { id: number; decision: GateDecision }) =>
+      api.correctGateDecision(sid, id, decision),
+    onMutate: async ({ id, decision }) => {
+      await qc.cancelQueries({ queryKey: key });
+      const previous = qc.getQueryData<GateLogEntry[]>(key);
+      qc.setQueryData<GateLogEntry[]>(key, (old) =>
+        old?.map((e) => (e.id === id ? { ...e, correction: decision } : e)),
+      );
+      return { previous };
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.previous) qc.setQueryData(key, ctx.previous);
+    },
+    onSettled: () => void qc.invalidateQueries({ queryKey: key }),
   });
 }

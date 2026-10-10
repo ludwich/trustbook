@@ -1,4 +1,5 @@
 import {
+  IconBulb,
   IconChevronDown,
   IconCircleCheck,
   IconFileSearch,
@@ -67,19 +68,71 @@ const BADGES: Record<
   unverified: { label: "Unverified", variant: "muted", icon: IconShieldQuestion },
 };
 
+export const UNVERIFIED_TIP = "Answer checking is turned off in Settings";
+
 export function AnswerBadge({ badge, removed = 0 }: { badge: MessageBadge; removed?: number }) {
+  const tipId = useId();
   const b = BADGES[badge];
   const Icon = b.icon;
-  return (
-    <Badge variant={b.variant} data-testid="answer-badge">
+  const unverified = badge === "unverified";
+  const el = (
+    <Badge
+      variant={b.variant}
+      data-testid="answer-badge"
+      data-badge={badge}
+      tabIndex={unverified ? 0 : undefined}
+      aria-describedby={unverified ? tipId : undefined}
+      className={cn(
+        unverified && "cursor-help focus-visible:ring-[3px] focus-visible:ring-ring/50",
+      )}
+    >
       <Icon aria-hidden />
       {b.label}
+      {badge === "partially_verified" && removed > 0 && " "}
       {badge === "partially_verified" && removed > 0 && (
         <span className="font-normal">
           · {removed} {removed === 1 ? "statement" : "statements"} removed
         </span>
       )}
     </Badge>
+  );
+  if (!unverified) return el;
+  // Small CSS tooltip (hover or keyboard focus); the text is also the badge's description.
+  return (
+    <span className="group relative inline-flex w-fit">
+      {el}
+      <span
+        role="tooltip"
+        id={tipId}
+        className="pointer-events-none invisible absolute top-full left-0 z-20 mt-1 w-max max-w-64 rounded-md bg-foreground px-2 py-1 text-xs text-background opacity-0 shadow-md transition-opacity group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100"
+      >
+        {UNVERIFIED_TIP}
+      </span>
+    </span>
+  );
+}
+
+export const IDEATION_HINT = "Brainstorming? The Ideation tab is made for that.";
+
+/** Shown under an answer when the gate thought the question was brainstorming. */
+export function IdeationHint({ onOpenIdeation }: { onOpenIdeation?: () => void }) {
+  return (
+    <p
+      className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground"
+      data-testid="ideation-hint"
+    >
+      <IconBulb className="size-4 shrink-0" aria-hidden />
+      <span>{IDEATION_HINT}</span>
+      {onOpenIdeation && (
+        <button
+          type="button"
+          onClick={onOpenIdeation}
+          className="font-medium text-primary underline-offset-2 hover:underline focus-visible:underline focus-visible:outline-none"
+        >
+          Open Ideation
+        </button>
+      )}
+    </p>
   );
 }
 
@@ -124,24 +177,53 @@ function sameText(a: string | undefined, b: string): boolean {
   return a !== undefined && norm(a) === norm(b);
 }
 
-/** Collapsed list of statements removed because they could not be checked (Phase 2 fills it). */
+export const REMOVED_TITLE = "Unverified, not from your sources";
+
+/**
+ * Collapsed drawer with the statements removed by answer checking (partially verified answers).
+ * Kept apart from the answer and muted, so nobody mistakes them for part of it.
+ */
 export function RemovedSentences({ sentences }: { sentences: string[] }) {
+  const [open, setOpen] = useState(false);
+  const panelId = useId();
   if (sentences.length === 0) return null;
   return (
-    <details className="group rounded-md border border-dashed px-3 py-1.5 text-sm">
-      <summary className="flex cursor-pointer list-none items-center gap-1 text-xs text-muted-foreground">
+    <section
+      aria-label={REMOVED_TITLE}
+      className="mt-1 rounded-md border border-dashed bg-muted/30 text-sm"
+      data-testid="removed-sentences"
+    >
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={panelId}
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-1.5 rounded-md px-3 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+      >
         <IconChevronDown
-          className="size-3.5 transition-transform group-open:rotate-180"
+          className={cn("size-3.5 transition-transform", open && "rotate-180")}
           aria-hidden
         />
-        Unverified, not from your sources
-      </summary>
-      <ul className="mt-1.5 grid list-disc gap-1 pl-5 text-muted-foreground">
-        {sentences.map((s, i) => (
-          <li key={i}>{s}</li>
-        ))}
-      </ul>
-    </details>
+        {REMOVED_TITLE}
+        <span className="ml-auto tabular-nums">{sentences.length}</span>
+      </button>
+      {open && (
+        <div id={panelId} className="border-t border-dashed px-3 py-2">
+          <p className="mb-1.5 text-xs text-muted-foreground">
+            Removed from the answer because your sources don&apos;t support them. Don&apos;t rely on
+            them.
+          </p>
+          <ul
+            className="grid list-disc gap-1 pl-5 text-muted-foreground"
+            aria-label="Removed statements"
+          >
+            {sentences.map((s, i) => (
+              <li key={i}>{s}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
   );
 }
 

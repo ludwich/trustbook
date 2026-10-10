@@ -34,6 +34,10 @@ import type {
   Source,
   SourceUpdate,
   WebSearchResponse,
+  GateDecision,
+  GateLogEntry,
+  SourceEstimate,
+  SourceEstimateItem,
 } from "./types";
 import { readSse, type SseEvent } from "@/lib/sse";
 
@@ -194,6 +198,47 @@ export async function* streamMessage(
   }
 }
 
+const GATE_DECISIONS: readonly GateDecision[] = ["sources", "brainstorm", "chitchat"];
+
+function asDecision(v: unknown): GateDecision | null {
+  return typeof v === "string" && (GATE_DECISIONS as readonly string[]).includes(v)
+    ? (v as GateDecision)
+    : null;
+}
+
+function firstString(...values: unknown[]): string {
+  for (const v of values) if (typeof v === "string") return v;
+  return "";
+}
+
+/**
+ * One gate log row from the server. Accepts the documented-in-spirit names (`created_at`,
+ * `question`, `correction`) and the DB column names (`created`, `input`, `user_correction`).
+ */
+export function toGateLogEntry(raw: unknown): GateLogEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.id !== "number") return null;
+  return {
+    id: r.id,
+    created_at: firstString(r.created_at, r.created, r.timestamp),
+    question: firstString(r.question, r.input),
+    decision: asDecision(r.decision) ?? "sources",
+    confidence: typeof r.confidence === "number" ? r.confidence : null,
+    correction: asDecision(r.correction ?? r.user_correction),
+  };
+}
+
+/** The gate log may come as a bare list or wrapped as `{"entries": [...]}`. */
+export function toGateLog(raw: unknown): GateLogEntry[] {
+  const list: unknown[] = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object" && Array.isArray((raw as { entries?: unknown }).entries)
+      ? (raw as { entries: unknown[] }).entries
+      : [];
+  return list.map(toGateLogEntry).filter((e): e is GateLogEntry => e !== null);
+}
+
 function enc(v: string): string {
   return encodeURIComponent(v);
 }
@@ -294,6 +339,9 @@ export const api = {
   /** Gitleaks report of a linked folder: file, line and rule ID only. */
   getSecrets: (sid: string, sourceId: string) =>
     request<SecretsReport>("GET", `/api/spaces/${enc(sid)}/sources/${enc(sourceId)}/secrets`),
+  /** How long adding these would take on this computer (SPEC §11). */
+  estimateSources: (sid: string, items: SourceEstimateItem[]) =>
+    request<SourceEstimate>("POST", `/api/spaces/${enc(sid)}/sources/estimate`, { items }),
   browse: (path: string) => request<BrowseListing>("GET", `/api/browse?path=${enc(path)}`),
 
   // Chat
@@ -307,6 +355,12 @@ export const api = {
   listMessages: (sid: string, cid: string) =>
     request<Message[]>("GET", `/api/spaces/${enc(sid)}/conversations/${enc(cid)}/messages`),
   streamMessage,
+
+  // Gate log
+  listGateLog: async (sid: string, limit = 100) =>
+    toGateLog(await request<unknown>("GET", `/api/spaces/${enc(sid)}/gate-log?limit=${limit}`)),
+  correctGateDecision: (sid: string, id: number, decision: GateDecision) =>
+    request<unknown>("POST", `/api/spaces/${enc(sid)}/gate-log/${id}/correct`, { decision }),
 
   // Overview
   getOverview: (sid: string) => request<Overview>("GET", `/api/spaces/${enc(sid)}/overview`),

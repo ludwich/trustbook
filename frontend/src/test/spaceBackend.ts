@@ -11,6 +11,8 @@ import type {
   Settings,
   Snapshot,
   Source,
+  SourceEstimate,
+  SourceEstimateItem,
   WebSearchResult,
 } from "@/api/types";
 import {
@@ -53,6 +55,10 @@ export interface SpaceBackendOptions {
   /** GET …/sources/{id}/secrets by source id (404 when missing). */
   secrets?: Record<string, SecretsReport>;
   stream?: StreamHandler;
+  /** POST …/sources/estimate. Default: a few seconds, no confirmation. */
+  estimate?: (items: SourceEstimateItem[]) => SourceEstimate;
+  /** GET …/gate-log, as the server would send it (raw rows). */
+  gateLog?: Record<string, unknown>[];
 }
 
 /**
@@ -86,7 +92,10 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
       conversationsCreated: [] as unknown[],
       conversationsDeleted: [] as string[],
       asked: [] as { conversationId: string; content: string }[],
+      estimate: [] as SourceEstimateItem[][],
+      gateCorrect: [] as { id: number; body: unknown }[],
     },
+    gateLog: [...(opts.gateLog ?? [])],
   };
   let nextId = 1;
   const newSource = (over: Partial<Source>): Source => {
@@ -234,6 +243,28 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
       return c
         ? HttpResponse.json(c)
         : HttpResponse.json({ detail: "Passage not found." }, { status: 404 });
+    }),
+    http.post("*/api/spaces/:sid/sources/estimate", async ({ request }) => {
+      const body = (await request.json()) as { items: SourceEstimateItem[] };
+      state.calls.estimate.push(body.items);
+      return HttpResponse.json(
+        opts.estimate?.(body.items) ?? {
+          seconds: 5,
+          files: null,
+          summary: "Less than a minute on this PC",
+          confirm: false,
+        },
+      );
+    }),
+    http.get("*/api/spaces/:sid/gate-log", () => HttpResponse.json(state.gateLog)),
+    http.post("*/api/spaces/:sid/gate-log/:id/correct", async ({ params, request }) => {
+      const id = Number(params.id);
+      const body = (await request.json()) as { decision: string };
+      state.calls.gateCorrect.push({ id, body });
+      state.gateLog = state.gateLog.map((e) =>
+        e.id === id ? { ...e, user_correction: body.decision } : e,
+      );
+      return HttpResponse.json(state.gateLog.find((e) => e.id === id) ?? {});
     }),
     http.get("*/api/browse", ({ request }) => {
       const path = new URL(request.url).searchParams.get("path") ?? "";

@@ -1,6 +1,6 @@
 import { IconArrowUp, IconChevronRight, IconFile, IconFolder, IconHome } from "@tabler/icons-react";
 import { useState } from "react";
-import { useAddFolder, useBrowse } from "@/api/queries";
+import { useAddFolder, useBrowse, useFolderEstimate } from "@/api/queries";
 import { QueryError } from "@/components/common/QueryError";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,7 +13,12 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatBytes } from "@/lib/format";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { type AddDialogProps, FormError } from "./dialogParts";
+import { useEstimateConfirm } from "./useEstimateConfirm";
+
+/** Wait this long after the last folder change before asking for an estimate. */
+const FOLDER_ESTIMATE_DEBOUNCE_MS = 400;
 
 /** "a/b/c" → [{name:"a",path:"a"},{name:"b",path:"a/b"},{name:"c",path:"a/b/c"}] */
 function crumbs(path: string): { name: string; path: string }[] {
@@ -47,6 +52,24 @@ function FolderPicker({ spaceId, onDone }: { spaceId: string; onDone: () => void
     (a, b) => Number(b.is_dir) - Number(a.is_dir) || a.name.localeCompare(b.name),
   );
   const atRoot = current === "";
+  const estimate = useEstimateConfirm(spaceId);
+  // Estimate the folder the user has settled on (not every folder they pass through).
+  const settled = useDebouncedValue(current, FOLDER_ESTIMATE_DEBOUNCE_MS);
+  const folderEstimate = useFolderEstimate(
+    spaceId,
+    settled,
+    !atRoot && settled === current && listing.isSuccess,
+  );
+  const known = settled === current ? folderEstimate.data : undefined;
+
+  const link = () => {
+    const path = current;
+    void estimate.check(
+      [{ kind: "folder", path }],
+      () => add.mutate(path, { onSuccess: onDone }),
+      known,
+    );
+  };
 
   return (
     <div className="grid gap-3">
@@ -138,16 +161,26 @@ function FolderPicker({ spaceId, onDone }: { spaceId: string; onDone: () => void
 
       <FormError error={add.error} />
       <DialogFooter className="items-center sm:justify-between">
-        <p className="min-w-0 truncate text-xs text-muted-foreground">
-          {atRoot ? "Open the folder you want to link." : `Selected: ${current}`}
-        </p>
+        <div className="grid min-w-0 gap-0.5 text-xs text-muted-foreground">
+          <p className="truncate">
+            {atRoot ? "Open the folder you want to link." : `Selected: ${current}`}
+          </p>
+          {!atRoot && (
+            <p className="truncate" aria-live="polite" data-testid="folder-estimate">
+              {known ? known.summary : folderEstimate.isError ? "" : "Estimating…"}
+            </p>
+          )}
+        </div>
         <Button
-          disabled={atRoot || listing.isPending || listing.isError || add.isPending}
-          onClick={() => add.mutate(current, { onSuccess: onDone })}
+          disabled={
+            atRoot || listing.isPending || listing.isError || add.isPending || estimate.checking
+          }
+          onClick={link}
         >
           {add.isPending ? "Linking…" : "Link this folder"}
         </Button>
       </DialogFooter>
+      {estimate.dialog}
     </div>
   );
 }

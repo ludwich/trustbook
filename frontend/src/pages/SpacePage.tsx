@@ -1,6 +1,12 @@
-import { IconArrowLeft, IconBulb, IconMessages } from "@tabler/icons-react";
+import {
+  IconArrowLeft,
+  IconBulb,
+  IconDotsVertical,
+  IconMessages,
+  IconRoute,
+} from "@tabler/icons-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { api, ApiError } from "@/api/client";
 import { queryKeys, useSources, useSpace } from "@/api/queries";
@@ -8,8 +14,15 @@ import { ChatView } from "@/components/chat/ChatView";
 import { SourceViewerProvider } from "@/components/chat/SourceViewer";
 import { EmptyState } from "@/components/common/EmptyState";
 import { QueryError } from "@/components/common/QueryError";
+import { GateLogDialog } from "@/components/gate/GateLogDialog";
 import { SourcesPanel } from "@/components/sources/SourcesPanel";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatDate } from "@/lib/format";
@@ -87,6 +100,8 @@ export function SpacePage() {
 function SpaceWorkspace({ spaceId }: { spaceId: string }) {
   const space = useSpace(spaceId);
   useSyncChatWithSources(spaceId);
+  const [tab, setTab] = useState("chat");
+  const [gateLogOpen, setGateLogOpen] = useState(false);
   const s = space.data;
   if (!s) return null;
 
@@ -103,7 +118,29 @@ function SpaceWorkspace({ spaceId }: { spaceId: string }) {
               <IconArrowLeft className="size-3.5" aria-hidden />
               All spaces
             </Link>
-            <h1 className="text-base leading-snug font-semibold break-words">{s.name}</h1>
+            <div className="flex items-start gap-1">
+              <h1 className="min-w-0 flex-1 text-base leading-snug font-semibold break-words">
+                {s.name}
+              </h1>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="Space menu"
+                    className="-mt-0.5 -mr-1.5 text-muted-foreground"
+                  >
+                    <IconDotsVertical aria-hidden />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => setGateLogOpen(true)}>
+                    <IconRoute aria-hidden />
+                    Gate log
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
             {s.description && (
               <p className="mt-0.5 text-sm text-muted-foreground">{s.description}</p>
             )}
@@ -118,11 +155,12 @@ function SpaceWorkspace({ spaceId }: { spaceId: string }) {
             </p>
           </div>
           <SourcesPanel spaceId={spaceId} />
+          <GateLogDialog spaceId={spaceId} open={gateLogOpen} onOpenChange={setGateLogOpen} />
         </aside>
 
         {/* Centre */}
         <section className="flex min-h-0 min-w-0 flex-col px-6 pt-3 pb-4">
-          <Tabs defaultValue="chat" className="flex min-h-0 flex-1 flex-col">
+          <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
             <TabsList aria-label="Space views">
               <TabsTrigger value="chat">
                 <IconMessages aria-hidden />
@@ -135,7 +173,7 @@ function SpaceWorkspace({ spaceId }: { spaceId: string }) {
             </TabsList>
 
             <TabsContent value="chat" className="flex min-h-0 flex-col pt-2">
-              <ChatView spaceId={spaceId} />
+              <ChatView spaceId={spaceId} onOpenIdeation={() => setTab("ideation")} />
             </TabsContent>
 
             <TabsContent value="ideation" className="pt-2">

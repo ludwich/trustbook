@@ -97,11 +97,13 @@ interface ComputerCpu {
 interface ComputerRuntime {
   torch_threads: number | null;
   embedding_dtype: string | null;
+  embedding_streams?: number | null;
 }
 
 /**
  * Compact "This computer" summary, e.g.
- * "AMD Ryzen AI Max+ 395 · uses 32 of 32 CPUs · 16 model threads · BF16".
+ * "AMD Ryzen AI Max+ 395 · uses 32 of 32 CPUs · 16 model threads · 2 streams · BF16".
+ * "S streams" only shows when indexing runs more than one embedding stream.
  * Returns null when neither part is known (results from before calibration v3).
  */
 export function formatComputer(
@@ -117,6 +119,8 @@ export function formatComputer(
   }
   if (runtime) {
     if (runtime.torch_threads !== null) parts.push(plural(runtime.torch_threads, "model thread"));
+    const streams = runtime.embedding_streams;
+    if (typeof streams === "number" && streams > 1) parts.push(plural(streams, "stream"));
     parts.push(runtime.embedding_dtype === "bfloat16" ? "BF16" : "FP32");
   }
   return parts.join(" · ");

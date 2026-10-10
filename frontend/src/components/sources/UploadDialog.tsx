@@ -13,6 +13,7 @@ import {
 import { formatBytes, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { type AddDialogProps, FormError } from "./dialogParts";
+import { useEstimateConfirm } from "./useEstimateConfirm";
 
 export function UploadDialog({
   spaceId,
@@ -55,6 +56,7 @@ function UploadForm({
   onDone: () => void;
 }) {
   const upload = useUploadFiles(spaceId);
+  const estimate = useEstimateConfirm(spaceId);
   const [files, setFiles] = useState<File[]>(initialFiles);
   const [over, setOver] = useState(false);
   const [missing, setMissing] = useState(false);
@@ -82,7 +84,11 @@ function UploadForm({
       setMissing(true);
       return;
     }
-    upload.mutate(files, { onSuccess: onDone });
+    const chosen = files;
+    void estimate.check(
+      [{ kind: "upload", files: chosen.map((f) => ({ name: f.name, bytes: f.size })) }],
+      () => upload.mutate(chosen, { onSuccess: onDone }),
+    );
   };
 
   return (
@@ -147,14 +153,17 @@ function UploadForm({
       {missing && <FormError error="Choose at least one file." />}
       <FormError error={upload.error} />
       <DialogFooter>
-        <Button type="submit" disabled={upload.isPending}>
+        <Button type="submit" disabled={upload.isPending || estimate.checking}>
           {upload.isPending
             ? "Uploading…"
-            : files.length > 0
-              ? `Add ${plural(files.length, "file")}`
-              : "Add files"}
+            : estimate.checking
+              ? "Estimating…"
+              : files.length > 0
+                ? `Add ${plural(files.length, "file")}`
+                : "Add files"}
         </Button>
       </DialogFooter>
+      {estimate.dialog}
     </form>
   );
 }

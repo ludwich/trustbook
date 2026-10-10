@@ -181,6 +181,11 @@ export interface Job {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /**
+   * Remaining estimate of this job in seconds. Not in the contract yet (Phase 2 asks for it:
+   * "ingest jobs store their estimate"); absent or null → the queue view shows no per-job time.
+   */
+  eta_seconds?: number | null;
 }
 
 export interface QueueSummary {
@@ -218,7 +223,10 @@ export interface Calibration {
   version: number;
   measured_at: string;
   cpu_count: number;
+  /** Prose chunks per second (~350 tokens, one model call at a time). */
   embedding_chunks_per_s: number | null;
+  /** Code chunks per second, indexed the way ingestion does it (parallel streams). v5+. */
+  embedding_chunks_per_s_code?: number | null;
   rerank_pairs_per_s: number | null;
   parse_pages_per_s: number | null;
   stt_realtime_factor: number | null;
@@ -243,6 +251,10 @@ export interface CalibrationRuntime {
   torch_threads: number | null;
   embedding_dtype: ModelDtype | null;
   reranker_dtype: ModelDtype | null;
+  /** Concurrent embedding model replicas used for indexing. Absent on older results. */
+  embedding_streams?: number | null;
+  /** Threads per embedding stream. Absent on older results. */
+  stream_threads?: number | null;
 }
 
 export interface CalibrationState {
@@ -458,6 +470,11 @@ export interface MessageContent {
   sentences?: AnswerSentence[];
   /** Refused answers: what to add. Not in the contract yet (see the Phase 1 frontend notes). */
   suggestion?: string | null;
+  /**
+   * The gate thought the question was brainstorming: the UI points to the Ideation tab.
+   * Phase 2 contract says only "adds a hint"; the field name is the frontend's assumption.
+   */
+  hint?: "ideation" | null;
 }
 
 export interface Message {
@@ -471,7 +488,7 @@ export interface Message {
 }
 
 export type ChatStage = "retrieving" | "generating" | "checking";
-export type RefusalReason = "not_in_sources" | "no_sources" | "invalid_output";
+export type RefusalReason = "not_in_sources" | "no_sources" | "invalid_output" | "unsupported";
 
 export interface Refusal {
   reason: RefusalReason;
@@ -501,4 +518,38 @@ export interface Overview {
   stale: boolean;
   /** Present when the chat endpoint is remote. */
   estimate: { tokens: number; remote: boolean } | null;
+}
+
+// ---- Phase 2: estimates -------------------------------------------------------
+
+export type SourceEstimateItem =
+  | { kind: "folder"; path: string }
+  | { kind: "upload"; files: { name: string; bytes: number }[] }
+  | { kind: "url" | "youtube" | "paste"; count: number };
+
+/** POST …/sources/estimate. `confirm` is true above 120 s. */
+export interface SourceEstimate {
+  seconds: number;
+  files: number | null;
+  /** "About 4,200 files, roughly 25 min on this PC" */
+  summary: string;
+  confirm: boolean;
+}
+
+// ---- Phase 2: gate log --------------------------------------------------------
+
+export type GateDecision = "sources" | "brainstorm" | "chitchat";
+
+/**
+ * One gate decision (GET …/gate-log). The contract does not spell out the entry shape; the client
+ * normalises the DB column names (`created`, `input`, `user_correction`) to these.
+ */
+export interface GateLogEntry {
+  id: number;
+  created_at: string;
+  question: string;
+  decision: GateDecision;
+  /** null when the gate was off, not set up or failed (the decision is then "sources"). */
+  confidence: number | null;
+  correction: GateDecision | null;
 }
