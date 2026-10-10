@@ -438,6 +438,10 @@ grounding correctness > data safety > simplicity > performance > features.
   - Only literals, constant names and empty calls are restated.
 - Offline, restated facts scored 0.88 for true claims and 0.03 for false ones. On Ludwig's data, the HTTPAdapter
   defaults answer went from refused to three verified sentences at 0.95–0.97.
+- **Third iteration:** restated facts rank ahead of raw lines at equal overlap, and the window keeps at most
+  six units, so noise cannot drown the fact. The literal check applies `True`/`False`/`None` only to value
+  claims ("is", "defaults to", "set to", "equals"). "returns True if the host changes" describes behaviour,
+  which code rarely spells as a literal. Numbers are always checked.
 - **Known limit:** claims describing what code does ("joins the username and password with a colon") still
   score low. HHEM cannot read `b64encode(b":".join(...))`. Such answers stay refused or partially verified
   (grounding before usefulness). Code-aware verification is a Phase 3 item (see docs/BACKLOG.md).

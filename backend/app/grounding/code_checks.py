@@ -151,7 +151,13 @@ _STOPWORDS = frozenset(
     "default defaults set uses use used value values".split()
 )
 FOCUS_MAX_CHARS = 1_200
-_LITERAL = re.compile(r"(?<![A-Za-z0-9_.])(?:\d+(?:\.\d+)?|True|False|None)(?![A-Za-z0-9_])")
+FOCUS_MAX_UNITS = 6
+_NUMBER = re.compile(r"(?<![A-Za-z0-9_.])\d+(?:\.\d+)?(?![A-Za-z0-9_])")
+# True/False/None only where the sentence states a value ("is False", "defaults to None"), not
+# behaviour ("returns True if the host changes"), which code rarely spells as a literal.
+_VALUE_CONSTANT = re.compile(
+    r"\b(?:is|are|defaults?(?:\s+to)?|(?:is\s+)?set\s+to|equals?|=)\s+(True|False|None)\b"
+)
 
 
 def _terms(text: str) -> set[str]:
@@ -215,7 +221,9 @@ def focus_premise(
     wanted = _terms(sentence)
     if not wanted:
         return ""
-    units: list[tuple[str, bool]] = [(f, False) for f in code_facts(chunk_texts)]
+    facts = code_facts(chunk_texts)
+    n_facts = len(facts)
+    units: list[tuple[str, bool]] = [(f, False) for f in facts]
     for text in chunk_texts:
         code_like = text.startswith("File: ")
         flat = " ".join(text.split())
@@ -225,10 +233,12 @@ def focus_premise(
     best = max(scores, default=0)
     if best == 0:
         return ""
-    # The best-matching units first, then the rest that share at least two terms (or the only one).
+    # The best-matching units first (restated facts before raw lines at equal overlap), then the
+    # rest that share at least two terms; at most FOCUS_MAX_UNITS so noise can't drown the fact.
     order = sorted(
-        (i for i, s in enumerate(scores) if s == best or s >= 2), key=lambda i: (-scores[i], i)
-    )
+        (i for i, s in enumerate(scores) if s == best or s >= 2),
+        key=lambda i: (-scores[i], i >= n_facts, i),
+    )[:FOCUS_MAX_UNITS]
     chosen: list[str] = []
     size = 0
     for i in order:
@@ -241,11 +251,14 @@ def focus_premise(
 
 
 def missing_literals(text: str, chunk_texts: Iterable[str]) -> list[str]:
-    """Numbers and ``True``/``False``/``None`` in ``text`` that no cited chunk contains as a word.
+    """Numbers, and ``True``/``False``/``None`` stated as values, that no cited chunk contains.
 
     Used for sentences citing code, where the grounding checker cannot tell ``True`` from
     ``False`` reliably (D-044).
     """
     texts = list(chunk_texts)
-    found = dict.fromkeys(m.group(0) for m in _LITERAL.finditer(text))
+    found = dict.fromkeys(
+        [m.group(0) for m in _NUMBER.finditer(text)]
+        + [m.group(1) for m in _VALUE_CONSTANT.finditer(text)]
+    )
     return [lit for lit in found if not _occurs(lit, texts)]

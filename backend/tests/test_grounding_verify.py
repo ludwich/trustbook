@@ -297,6 +297,9 @@ def test_literals_in_code_sentences_must_occur_in_the_cited_code() -> None:
     assert missing_literals("By default, pool_block is True.", [code]) == ["True"]
     assert missing_literals("The pool size is 20.", [code]) == ["20"]
     assert missing_literals("Version 2.32.0 added it.", ["in 2.32.0"]) == []
+    # Behaviour, not a value: code rarely spells it as a literal.
+    assert missing_literals("should_strip_auth returns True if the host changes.", [code]) == []
+    assert missing_literals("pool_block defaults to None.", [code]) == ["None"]
 
 
 def test_code_sentence_with_a_literal_not_in_the_code_fails_layer_5() -> None:
