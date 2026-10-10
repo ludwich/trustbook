@@ -228,3 +228,13 @@ grounding correctness > data safety > simplicity > performance > features.
   in the image, and Playwright's separate ffmpeg (video recording only) is deleted.
 - **Reason:** no allowlisted alternative provides these capabilities. All are used unmodified, as
   separately replaceable shared libraries.
+
+### D-028 Phase 1 UI choices
+- **Wording:** chunks are called "passages" in the UI. "Using X of Y sources": X = ticked and ready, Y = ready.
+- **Refresh:** also offered for `search` sources (they are web pages). The home folder itself cannot be linked
+  as one source (too broad).
+- **Deferred:** the time estimate before large adds (SPEC §11) comes with the estimates work in Phase 2,
+  as SPEC §14 lists it.
+- **Bundle size:** the size warning limit is 800 kB (561 kB bundle, served from localhost only).
+- New runtime dependency `@radix-ui/react-dropdown-menu` (MIT, accessible menus). New dev dependency
+  `@playwright/test` (Apache-2.0).

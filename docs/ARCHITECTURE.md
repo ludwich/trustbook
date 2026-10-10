@@ -287,13 +287,16 @@ group if most files are code, else `documents`.
 ```
 Citation = {"n": int, "chunk_id": str, "source_id": str, "source_title": str, "locator": object}
 Message  = {"id","role":"user"|"assistant","created_at",
-            "content": {"text"?: str,                               // user messages
+            "content": {"text"?: str,                               // user messages; refusal message
+                        "suggestion"?: str|null,                    // refusals only
                         "sentences"?: [{"text": str, "citations": Citation[]}]},
             "badge": null|"verified"|"partially_verified"|"refused"|"unverified",
             "removed_sentences": [str], "sources_used": [{"source_id","title"}]}
 ```
 
 Phase 1 has no sentence verifier (layer 4 is Phase 2): `badge` is `"refused"` for refusals, else `null`.
+Every stream ends with `done` (also after `refused`, carrying the persisted refusal message) or `error`.
+Refresh applies to `url`, `youtube`, `search` and `folder` sources. The browse root itself cannot be linked.
 Citation numbers `n` are per answer, in order of first use.
 
 Chat pipeline (layers 1–3): no search or scraping code is reachable from `chat/` (layer 1). The top
