@@ -54,14 +54,14 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 ## 5. CI / release
 - [x] `.github/workflows/ci.yml`: ruff, mypy, pytest, ESLint, typecheck, Vitest, Docker build check
 - [x] `.github/workflows/release.yml`: branch `phase-N` → `:phase-N-rc`; tag `phase-N` → `:phase-N` + `:latest`
-- [~] CI green on `phase-0`, image `ghcr.io/ludwich/trustbook:phase-0-rc` published and pullable
+- [x] CI green on `phase-0`, image `ghcr.io/ludwich/trustbook:phase-0-rc` published and pullable
 
 ## 6. Gate
 - [x] README (install, `.env`, gate command, grill-me credit placeholder)
 - [x] `docs/GATES.md` Gate 0 checklist + how to verify
-- [ ] PR `phase-0 → main`
-- [ ] `docker image prune -f`
-- [ ] Stop and summarise
+- [x] PR `phase-0 → main` (#1)
+- [x] `docker image prune -f`
+- [x] Stop and summarise — **waiting for Ludwig's Gate 0 verdict**
 
 ## Notes for a restarted session
 - Gate 0 handover: docs/GATES.md. Known issues: D-019 (Whistle threads), D-015 (search rate limits).
