@@ -204,7 +204,7 @@ def test_model_failure_mid_way_fails_cleanly(
     stream_client: TestClient, replicas: list[Replica]
 ) -> None:
     services = services_of(stream_client)
-    _paste(stream_client)
+    sid, _created = _paste(stream_client)
     services.providers.ingest_embedder(1).fail_after = 4  # type: ignore[attr-defined]
     run_jobs(services)
     source = stream_client.get(f"/api/spaces/{sid}/sources").json()[0]
