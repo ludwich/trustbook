@@ -16,7 +16,7 @@ questions:
       By default, for which HTTP methods does Requests follow redirects, and how can I turn
       redirect handling off or on for a single request?
     expected_sources:
-      - "Quickstart — Requests 2.34.2 documentation"
+      - "Quickstart"
       - https://requests.readthedocs.io/en/stable/user/quickstart/
       - requests
     expected_locators:
@@ -30,9 +30,9 @@ questions:
       Is the timeout parameter in Requests a limit on the total time it takes to download a
       response?
     expected_sources:
-      - "Quickstart — Requests 2.34.2 documentation"
+      - "Quickstart"
       - https://requests.readthedocs.io/en/stable/user/quickstart/
-      - "Advanced Usage — Requests 2.34.2 documentation"
+      - "Advanced Usage"
       - https://requests.readthedocs.io/en/stable/user/advanced/
       - requests
     expected_locators:
@@ -47,11 +47,12 @@ questions:
       If I pass cookies to one request made with a Session, are those cookies sent again on the
       session's next request?
     expected_sources:
-      - "Advanced Usage — Requests 2.34.2 documentation"
+      - "Advanced Usage"
       - https://requests.readthedocs.io/en/stable/user/advanced/
       - requests
     expected_locators:
       - {file: docs/user/advanced.rst, lines: [44, 60]}
+      - {file: tests/test_requests.py, lines: [425, 429]}  # test_request_cookies_not_persisted
     must_contain: [persist]
 
   - id: docs-04
@@ -61,7 +62,7 @@ questions:
       Where does Requests look for a netrc file, and how can I stop a Session from using netrc
       credentials?
     expected_sources:
-      - "Authentication — Requests 2.34.2 documentation"
+      - "Authentication"
       - https://requests.readthedocs.io/en/stable/user/authentication/
       - requests
     expected_locators:
@@ -75,9 +76,9 @@ questions:
       Which compressed response encodings does Requests decode automatically, and what do I need
       installed for Brotli?
     expected_sources:
-      - "Frequently Asked Questions — Requests 2.34.2 documentation"
+      - "Frequently Asked Questions"
       - https://requests.readthedocs.io/en/stable/community/faq/
-      - "Quickstart — Requests 2.34.2 documentation"
+      - "Quickstart"
       - https://requests.readthedocs.io/en/stable/user/quickstart/
       - requests
     expected_locators:
@@ -127,10 +128,15 @@ questions:
     question: >-
       When following a redirect, under what conditions does a requests Session remove the
       Authorization header from the request?
-    expected_sources: [requests]
+    expected_sources:
+      - requests
+      - Quickstart
+      - https://requests.readthedocs.io/en/stable/user/quickstart/
     expected_locators:
       - {file: src/requests/sessions.py, lines: [154, 184]}
       - {file: src/requests/sessions.py, lines: [309, 327]}
+      - {file: docs/user/quickstart.rst, lines: [226, 226]}  # "removed if you get redirected off-host"
+      - {heading: Custom Headers}
     must_contain: [host]
 
   - id: code-05
@@ -154,7 +160,7 @@ questions:
       total and backoff_factor values does that example use, and which Retry object does
       HTTPAdapter create when max_retries is left at its default?
     expected_sources:
-      - "Advanced Usage — Requests 2.34.2 documentation"
+      - "Advanced Usage"
       - https://requests.readthedocs.io/en/stable/user/advanced/
       - requests
     expected_locators:
@@ -172,10 +178,11 @@ questions:
       prefix matches, how is that implemented, and which adapters does a new Session mount by
       default?
     expected_sources:
-      - "Advanced Usage — Requests 2.34.2 documentation"
+      - "Advanced Usage"
       - https://requests.readthedocs.io/en/stable/user/advanced/
       - requests
     expected_locators:
+      - {file: tests/test_requests.py, lines: [1659, 1722]}  # get_adapter prefix-matching tests
       - {file: src/requests/sessions.py, lines: [500, 503]}
       - {file: src/requests/sessions.py, lines: [870, 880]}
       - {file: src/requests/sessions.py, lines: [888, 897]}

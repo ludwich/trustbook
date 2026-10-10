@@ -130,3 +130,21 @@ grep -rniE '<pattern>' requests --exclude-dir=.git | grep -v '\.pem:'
 grep -ciE '<pattern>' docs/user_quickstart.txt docs/user_advanced.txt \
   docs/user_authentication.txt docs/community_faq.txt   # page text extracted from the HTML
 ```
+
+
+## Additions after the first dry run (2026-10-10)
+
+The first run against Ludwig's endpoint flagged three citations as wrong. Each was checked by hand at
+commit `6e83187b`; all three state the answer, so the answer key was widened (not the system):
+
+- **docs-03:** `tests/test_requests.py:425-429`, `test_request_cookies_not_persisted`: "Sending a request
+  with cookies should not add cookies to the session" (`assert not s.cookies`).
+- **code-04:** `docs/user/quickstart.rst:226` and the Quickstart page, section "Custom Headers":
+  "Authorization headers will be removed if you get redirected off-host."
+
+Source titles in `questions.yaml` now match how Trustbook titles the pages ("Quickstart", "Advanced
+Usage", …). The URLs were already accepted.
+- **multi-02:** `tests/test_requests.py:1659-1722`, `test_session_get_adapter_prefix_matching` and its
+  mixed-case twin mount two prefixes and assert `get_adapter` returns the more specific prefix's adapter.
+  They support the sentence "The Session uses its get_adapter method to evaluate the URL against the
+  registered prefixes and return the correct adapter" (second dry run).
