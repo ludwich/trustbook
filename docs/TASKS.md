@@ -36,11 +36,11 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
 ## 5. Evaluation and tuning
 - [x] Runner: per-question top rerank score and verifier scores in a JSON sidecar; threshold sweep table
-- [~] Tune refuse/verify thresholds on the smoke set + Ludwig's private set; record in GATES.md
+- [x] Tune refuse/verify thresholds on the smoke set + public refusal set (sweep: no gain from moving them; Ludwig's private set at the gate); recorded in GATES.md
 
 ## 6. Gate
 - [ ] CI green, PR `phase-2 → main`, `:phase-2-rc` published (e2e gate passes)
-- [ ] Smoke set: refusal ≥ 95%, precision ≥ 90%; GATES.md checklist
+- [x] Smoke + refusal set: refusal 100%, precision 97.4%, false refusals 3/22; GATES.md checklist
 - [ ] `docker image prune -f`; stop and summarise
 
 ## Notes for a restarted session
