@@ -96,3 +96,23 @@ def test_append_in_batches_then_refresh_text_index_once(tmp_path: Path) -> None:
     with pytest.raises(IndexDimensionError):
         index.append([IndexedChunk("c4", "s3", "x")], [[1.0, 0.0]])
     LanceSpaceIndex(tmp_path / "empty").refresh_text_index()  # nothing indexed yet: no error
+
+
+def test_delete_chunks_by_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.index.lance as lance
+
+    monkeypatch.setattr(lance, "DELETE_BATCH", 1)  # several delete filters
+    index = LanceSpaceIndex(tmp_path / "vectors")
+    index.delete_chunks(["c1"])  # no table yet: no error
+    chunks, vectors = _chunks()
+    index.add(chunks, vectors)
+    index.delete_chunks(["c1", "c3", "missing"])
+    assert index.count() == 1
+    hits = index.vector_search([1.0, 0.0, 0.0, 0.0], limit=5, source_ids=["s1", "s2"])
+    assert [h.chunk_id for h in hits] == ["c2"]
+    index.refresh_text_index()
+    assert index.text_search("valve", limit=5, source_ids=["s1"]) == []
+    index.delete_chunks([])
+    with pytest.raises(ValueError, match="Invalid chunk id"):
+        index.delete_chunks(["x' OR '1'='1"])
+    assert index.count() == 1

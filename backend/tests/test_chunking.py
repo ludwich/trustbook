@@ -184,7 +184,11 @@ def test_files_snapshot_uses_code_and_document_chunkers() -> None:
         files=[FileEntry("a.py", s1, e1, "code"), FileEntry("README.md", s2, e2, "document")],
     )
     drafts = chunk_snapshot(snap, WordCounter())
-    assert drafts[0].locator == {"file": "a.py", "start_line": 1, "end_line": 6, "symbol": None}
+    # .py goes to tree-sitter (one chunk per function); README.md to the document chunker
+    assert [d.locator for d in drafts[:2]] == [
+        {"file": "a.py", "start_line": 1, "end_line": 2, "symbol": "f"},
+        {"file": "a.py", "start_line": 5, "end_line": 6, "symbol": "g"},
+    ]
     readme = drafts[-1]
     assert readme.locator == {
         "file": "README.md",

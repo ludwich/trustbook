@@ -16,6 +16,14 @@ Url = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_
 MAX_PASTE_CHARS = 2_000_000
 
 
+class AheadOut(BaseModel):
+    """The linked folder's HEAD differs from the indexed commit (SPEC §7.5)."""
+
+    indexed_commit: str
+    head_commit: str
+    commits_ahead: int | None  # None: can't be counted (e.g. a shallow clone without the commit)
+
+
 class SourceOut(BaseModel):
     id: str
     type: SourceType
@@ -33,6 +41,7 @@ class SourceOut(BaseModel):
     stats: dict[str, Any]
     created_at: str
     job_id: str | None
+    ahead: AheadOut | None = None
 
 
 class PasteCreate(BaseModel):

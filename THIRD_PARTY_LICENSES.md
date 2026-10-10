@@ -61,6 +61,7 @@ License policy: SPEC §2 and docs/DECISIONS.md D-009, D-027.
 | docling-ibm-models | 4.0.3 | MIT |  |
 | docling-parse | 7.22.2 | MIT |  |
 | docling-slim | 2.137.0 | MIT |  |
+| dulwich | 1.2.17 | Apache-2.0 OR GPL-2.0-or-later | used under Apache-2.0 (COPYING offers either); commit counting without the GPL git binary (D-047) |
 | et-xmlfile | 2.0.0 | MIT License |  |
 | fastapi | 0.143.0 | MIT |  |
 | filelock | 4.1.0 | MIT |  |
@@ -150,6 +151,11 @@ License policy: SPEC §2 and docs/DECISIONS.md D-009, D-027.
 | tqdm | 4.70.1 | MPL-2.0 AND MIT | MPL-2.0 AND MIT, unmodified (D-009) |
 | trafilatura | 2.3.1 | Apache-2.0 |  |
 | transformers | 5.19.0 | Apache 2.0 License |  |
+| tree-sitter | 0.26.0 | MIT | code chunking (D-047) |
+| tree-sitter-c-sharp | 0.23.5 | MIT | grammar (D-047) |
+| tree-sitter-javascript | 0.25.0 | MIT | grammar (D-047) |
+| tree-sitter-python | 0.25.0 | MIT | grammar (D-047) |
+| tree-sitter-typescript | 0.23.2 | MIT | grammars for TypeScript and TSX (D-047) |
 | typer | 0.26.8 | MIT |  |
 | typing-extensions | 4.16.0 | PSF-2.0 | PSF-2.0 (D-009) |
 | typing-inspection | 0.4.4 | MIT |  |

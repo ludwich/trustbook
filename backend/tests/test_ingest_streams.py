@@ -214,7 +214,7 @@ def test_model_failure_mid_way_fails_cleanly(
     assert _chunks(services, sid) == []
 
 
-def test_refresh_replaces_vectors_without_duplicates(
+def test_refresh_replaces_changed_vectors_without_duplicates(
     stream_client: TestClient, tmp_path: Path
 ) -> None:
     services = services_of(stream_client)
@@ -231,10 +231,18 @@ def test_refresh_replaces_vectors_without_duplicates(
     run_jobs(services)
     first = _chunks(services, sid)
     assert first and _index(services, sid).count() == len(first)
+    # Incremental refresh (SPEC §7.5): only the changed file gets new chunks and vectors.
+    (folder / "m03.py").write_text("def changed(x):\n    return x * 2\n")
     assert stream_client.post(f"/api/spaces/{sid}/sources/{created['id']}/refresh").status_code
     run_jobs(services)
     second = _chunks(services, sid)
-    assert _index(services, sid).count() == len(second) == len(first)
-    assert {c.id for c in first}.isdisjoint({c.id for c in second})
+    assert _index(services, sid).count() == len(second) == len(first) - 29
+    old_ids = {c.id for c in first if json.loads(c.locator)["file"] != "m03.py"}
+    new_ids = {c.id for c in second if json.loads(c.locator)["file"] == "m03.py"}
+    assert old_ids == {c.id for c in second} - new_ids
+    assert len(new_ids) == 1 and new_ids.isdisjoint({c.id for c in first})
     files = [json.loads(c.locator)["file"] for c in second]  # chunk order follows file order
     assert files == sorted(files) and len(set(files)) == 12
+    source = stream_client.get(f"/api/spaces/{sid}/sources").json()[0]
+    assert source["stats"]["changed_files"] == 1
+    assert source["stats"]["unchanged_files"] == 11

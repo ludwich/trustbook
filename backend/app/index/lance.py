@@ -21,6 +21,7 @@ from app.index.base import Hit, IndexedChunk
 logger = logging.getLogger("trustbook.index")
 
 TABLE = "chunks"
+DELETE_BATCH = 500  # chunk ids per delete filter
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -131,6 +132,18 @@ class LanceSpaceIndex:
             table = self._open()
             if table is not None:
                 table.delete(f"source_id = '{source_id}'")
+
+    def delete_chunks(self, chunk_ids: Sequence[str]) -> None:
+        ids = sorted(set(chunk_ids))
+        if any(not _SAFE_ID.match(i) for i in ids):
+            raise ValueError("Invalid chunk id")
+        with self._lock:
+            table = self._open()
+            if table is None:
+                return
+            for start in range(0, len(ids), DELETE_BATCH):
+                batch = ids[start : start + DELETE_BATCH]
+                table.delete("chunk_id IN (" + ", ".join(f"'{i}'" for i in batch) + ")")
 
     def vector_search(
         self, vector: Sequence[float], *, limit: int, source_ids: Sequence[str]

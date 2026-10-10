@@ -332,7 +332,7 @@ def web_search(space_id: str, body: WebSearchRequest, services: ServicesDep) -> 
     if not settings.enabled:
         raise HTTPException(status_code=409, detail="Web search is turned off in Settings.")
     provider = settings.provider or "searxng"
-    if provider != "searxng" and not settings.api_key:
+    if provider in ("brave", "tavily") and not settings.api_key:
         raise HTTPException(status_code=409, detail="Add the search API key in Settings first.")
     adapter = build_search_adapter(
         provider,
@@ -367,6 +367,14 @@ def set_enabled(space_id: str, body: EnabledUpdate, services: ServicesDep) -> li
             _refuse_ticking_failed(services, repo, body.source_ids)
         sources = repo.set_enabled(body.source_ids, body.enabled)
     return [services.ingest.out(s) for s in sources]
+
+
+@router.get("/spaces/{space_id}/sources/{source_id}")
+def get_source(space_id: str, source_id: str, services: ServicesDep) -> SourceOut:
+    """One source (incl. ``ahead`` for a linked folder whose HEAD moved, SPEC §7.5)."""
+    with _not_found():
+        source = _repo(services, space_id).get(source_id)
+    return services.ingest.out(source)
 
 
 @router.patch("/spaces/{space_id}/sources/{source_id}")

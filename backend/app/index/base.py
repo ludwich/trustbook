@@ -40,6 +40,10 @@ class SpaceIndex(Protocol):
 
     def delete_source(self, source_id: str) -> None: ...
 
+    def delete_chunks(self, chunk_ids: Sequence[str]) -> None:
+        """Remove these chunks' rows (incremental refresh of a linked folder)."""
+        ...
+
     def vector_search(
         self, vector: Sequence[float], *, limit: int, source_ids: Sequence[str]
     ) -> list[Hit]: ...

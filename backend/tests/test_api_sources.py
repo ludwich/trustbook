@@ -106,8 +106,9 @@ def test_paste_source_is_indexed_end_to_end(client: TestClient, space: dict[str,
     assert set(created) == {
         "id", "type", "title", "origin", "group", "status", "progress", "failure_reason",
         "failure_next_step", "quality_warning", "enabled", "snapshot_at", "commit_hash",
-        "stats", "created_at", "job_id",
+        "stats", "created_at", "job_id", "ahead",
     }  # fmt: skip
+    assert created["ahead"] is None  # only folder sources whose HEAD moved
 
     assert run_jobs(services) == 1
     source = _one(client, sid, created["id"])
@@ -469,21 +470,20 @@ def test_folder_source_end_to_end(client: TestClient, space: dict[str, Any], pat
     report = services_of(client).spaces.get(sid).folder / "sources" / created["id"] / "secrets.json"
     assert "ghp_fake" not in report.read_text()
 
-    code_chunk = next(
+    code_chunks = [
         c
         for c in (
             client.get(f"/api/spaces/{sid}/chunks/{cid}").json()
             for cid in _chunk_ids(client, sid, created["id"])
         )
         if c["locator"].get("file") == "src/api.py"
-    )
-    assert code_chunk["locator"] == {
-        "file": "src/api.py",
-        "start_line": 1,
-        "end_line": 6,
-        "symbol": None,
-    }
-    assert code_chunk["text"].startswith("File: src/api.py")
+    ]
+    # tree-sitter (Phase 3): one chunk per function, with its symbol and line range
+    assert [c["locator"] for c in code_chunks] == [
+        {"file": "src/api.py", "start_line": 1, "end_line": 2, "symbol": "get"},
+        {"file": "src/api.py", "start_line": 5, "end_line": 6, "symbol": "post"},
+    ]
+    assert code_chunks[0]["text"].startswith("File: src/api.py · get (lines 1-2)\n")
 
 
 def test_folder_validation(client: TestClient, space: dict[str, Any], paths: Paths) -> None:

@@ -5,8 +5,8 @@ from __future__ import annotations
 import bisect
 from typing import Any
 
-from app.chunking.code import chunk_code
 from app.chunking.document import ChunkDraft, Locate, chunk_document
+from app.chunking.syntax import chunk_source_code
 from app.chunking.tokens import TokenCounter
 from app.chunking.transcript import chunk_transcript
 from app.parse.snapshot import FileEntry, Segment, Snapshot
@@ -68,29 +68,29 @@ def _file_document_locator(text: str, entry: FileEntry, segments: list[Segment])
     return locate
 
 
+# Changes whenever chunking a file gives different chunks; a refresh re-chunks files indexed with
+# another version instead of keeping their chunks (incremental refresh, SPEC §7.5).
+CHUNKER_VERSION = "p3-treesitter-1"
+
+
+def chunk_file(snapshot: Snapshot, entry: FileEntry, counter: TokenCounter) -> list[ChunkDraft]:
+    """The chunks of one file of a ``files`` snapshot."""
+    text = snapshot.markdown
+    if entry.kind == "code":
+        return chunk_source_code(text, entry.start, entry.end, entry.path, counter)
+    locate = _file_document_locator(text, entry, snapshot.segments)
+    return chunk_document(
+        text, entry.start, entry.end, counter, locate, prefix=f"File: {entry.path}\n"
+    )
+
+
 def chunk_snapshot(snapshot: Snapshot, counter: TokenCounter) -> list[ChunkDraft]:
     """All chunks of ``snapshot`` in reading order."""
     text = snapshot.markdown
     if snapshot.kind == "timestamps":
         return chunk_transcript(text, snapshot.segments, counter)
     if snapshot.kind == "files":
-        drafts: list[ChunkDraft] = []
-        for entry in snapshot.files:
-            if entry.kind == "code":
-                drafts.extend(chunk_code(text, entry.start, entry.end, entry.path, counter))
-            else:
-                locate = _file_document_locator(text, entry, snapshot.segments)
-                drafts.extend(
-                    chunk_document(
-                        text,
-                        entry.start,
-                        entry.end,
-                        counter,
-                        locate,
-                        prefix=f"File: {entry.path}\n",
-                    )
-                )
-        return drafts
+        return [d for entry in snapshot.files for d in chunk_file(snapshot, entry, counter)]
     locate = (
         page_locator(snapshot.segments)
         if snapshot.kind == "pages"

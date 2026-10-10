@@ -39,6 +39,11 @@ class InMemorySpaceIndex:
             for chunk_id in [k for k, (c, _) in self._rows.items() if c.source_id == source_id]:
                 del self._rows[chunk_id]
 
+    def delete_chunks(self, chunk_ids: Sequence[str]) -> None:
+        with self._lock:
+            for chunk_id in chunk_ids:
+                self._rows.pop(chunk_id, None)
+
     def vector_search(
         self, vector: Sequence[float], *, limit: int, source_ids: Sequence[str]
     ) -> list[Hit]:

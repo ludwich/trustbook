@@ -170,6 +170,21 @@ class Overview(SQLModel, table=True):
     updated_at: str
 
 
+class SourceFile(SQLModel, table=True):
+    """One file of a linked folder as last indexed (migration 004, incremental refresh)."""
+
+    __tablename__ = "source_files"
+
+    source_id: str = Field(primary_key=True, foreign_key="sources.id")
+    path: str = Field(primary_key=True)
+    sha256: str
+    kind: str
+    chunker: str
+    start_offset: int
+    end_offset: int
+    chunk_ids: str = "[]"
+
+
 SPACE_TABLES: tuple[type[SQLModel], ...] = (
     Source,
     Chunk,
@@ -180,4 +195,5 @@ SPACE_TABLES: tuple[type[SQLModel], ...] = (
     IdeationSession,
     IdeationNode,
     Overview,
+    SourceFile,
 )
