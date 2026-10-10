@@ -1,0 +1,201 @@
+# Public smoke set (SPEC §13): 5 docs, 5 code, 2 multi-source, 3 unanswerable.
+# Corpus: eval/smoke/corpus.yaml (psf/requests v2.34.2, commit 6e83187b8feb273ed4c6cdab5efd8d54901dfab3).
+# Format: eval/format.md. Every answer is checked by hand in eval/smoke/verification.md.
+#
+# Docs pages are listed twice in expected_sources (page title and URL) so that a citation matches
+# even if Trustbook extracts a slightly different title. The linked folder also contains the docs as
+# .rst files (docs/user/*.rst), so a docs question may also be answered from the folder source; the
+# file locators below then require the matching .rst passage.
+
+questions:
+  # --- docs ------------------------------------------------------------------------------------
+  - id: docs-01
+    category: docs
+    type: answerable
+    question: >-
+      By default, for which HTTP methods does Requests follow redirects, and how can I turn
+      redirect handling off or on for a single request?
+    expected_sources:
+      - "Quickstart — Requests 2.34.2 documentation"
+      - https://requests.readthedocs.io/en/stable/user/quickstart/
+      - requests
+    expected_locators:
+      - {file: docs/user/quickstart.rst, lines: [480, 527]}
+    must_contain: [HEAD, allow_redirects]
+
+  - id: docs-02
+    category: docs
+    type: answerable
+    question: >-
+      Is the timeout parameter in Requests a limit on the total time it takes to download a
+      response?
+    expected_sources:
+      - "Quickstart — Requests 2.34.2 documentation"
+      - https://requests.readthedocs.io/en/stable/user/quickstart/
+      - "Advanced Usage — Requests 2.34.2 documentation"
+      - https://requests.readthedocs.io/en/stable/user/advanced/
+      - requests
+    expected_locators:
+      - {file: docs/user/quickstart.rst, lines: [529, 549]}
+      - {file: docs/user/advanced.rst, lines: [1086, 1133]}
+    must_contain: [bytes]
+
+  - id: docs-03
+    category: docs
+    type: answerable
+    question: >-
+      If I pass cookies to one request made with a Session, are those cookies sent again on the
+      session's next request?
+    expected_sources:
+      - "Advanced Usage — Requests 2.34.2 documentation"
+      - https://requests.readthedocs.io/en/stable/user/advanced/
+      - requests
+    expected_locators:
+      - {file: docs/user/advanced.rst, lines: [44, 60]}
+    must_contain: [persist]
+
+  - id: docs-04
+    category: docs
+    type: answerable
+    question: >-
+      Where does Requests look for a netrc file, and how can I stop a Session from using netrc
+      credentials?
+    expected_sources:
+      - "Authentication — Requests 2.34.2 documentation"
+      - https://requests.readthedocs.io/en/stable/user/authentication/
+      - requests
+    expected_locators:
+      - {file: docs/user/authentication.rst, lines: [36, 56]}
+    must_contain: [.netrc, NETRC, trust_env]
+
+  - id: docs-05
+    category: docs
+    type: answerable
+    question: >-
+      Which compressed response encodings does Requests decode automatically, and what do I need
+      installed for Brotli?
+    expected_sources:
+      - "Frequently Asked Questions — Requests 2.34.2 documentation"
+      - https://requests.readthedocs.io/en/stable/community/faq/
+      - "Quickstart — Requests 2.34.2 documentation"
+      - https://requests.readthedocs.io/en/stable/user/quickstart/
+      - requests
+    expected_locators:
+      - {file: docs/community/faq.rst, lines: [8, 18]}
+      - {file: docs/user/quickstart.rst, lines: [121, 132]}
+    must_contain: [gzip, brotli]
+
+  # --- code (line numbers at commit 6e83187b) ----------------------------------------------------
+  - id: code-01
+    category: code
+    type: answerable
+    question: >-
+      What is the default maximum number of redirects a requests Session follows before it raises
+      TooManyRedirects?
+    expected_sources: [requests]
+    expected_locators:
+      - {file: src/requests/models.py, lines: [104, 104]}
+      - {file: src/requests/sessions.py, lines: [484, 488]}
+      - {file: src/requests/sessions.py, lines: [216, 219]}
+    must_contain: ["30"]
+
+  - id: code-02
+    category: code
+    type: answerable
+    question: >-
+      Does Response.ok mean the status code was exactly 200? How does requests compute it?
+    expected_sources: [requests]
+    expected_locators:
+      - {file: src/requests/models.py, lines: [859, 872]}
+    must_contain: [raise_for_status, "400"]
+
+  - id: code-03
+    category: code
+    type: answerable
+    question: >-
+      What are the default values of pool_connections, pool_maxsize and pool_block when an
+      HTTPAdapter is created without arguments?
+    expected_sources: [requests]
+    expected_locators:
+      - {file: src/requests/adapters.py, lines: [79, 81]}
+      - {file: src/requests/adapters.py, lines: [201, 221]}
+    must_contain: ["10", "False"]
+
+  - id: code-04
+    category: code
+    type: answerable
+    question: >-
+      When following a redirect, under what conditions does a requests Session remove the
+      Authorization header from the request?
+    expected_sources: [requests]
+    expected_locators:
+      - {file: src/requests/sessions.py, lines: [154, 184]}
+      - {file: src/requests/sessions.py, lines: [309, 327]}
+    must_contain: [host]
+
+  - id: code-05
+    category: code
+    type: answerable
+    question: >-
+      How does requests encode the username and password when it builds an HTTP Basic
+      Authorization header?
+    expected_sources: [requests]
+    expected_locators:
+      - {file: src/requests/auth.py, lines: [34, 75]}
+      - {file: src/requests/auth.py, lines: [111, 113]}
+    must_contain: [latin, "64"]
+
+  # --- multi-source (docs page + code) -------------------------------------------------------
+  - id: multi-01
+    category: multi
+    type: answerable
+    question: >-
+      The documentation shows how to add automatic retries with urllib3's Retry class. Which
+      total and backoff_factor values does that example use, and which Retry object does
+      HTTPAdapter create when max_retries is left at its default?
+    expected_sources:
+      - "Advanced Usage — Requests 2.34.2 documentation"
+      - https://requests.readthedocs.io/en/stable/user/advanced/
+      - requests
+    expected_locators:
+      - {file: src/requests/adapters.py, lines: [79, 81]}
+      - {file: src/requests/adapters.py, lines: [166, 174]}
+      - {file: src/requests/adapters.py, lines: [201, 211]}
+      - {file: docs/user/advanced.rst, lines: [1032, 1050]}
+    must_contain: ["0.1", read]
+
+  - id: multi-02
+    category: multi
+    type: answerable
+    question: >-
+      How does a Session decide which transport adapter handles a URL when more than one mounted
+      prefix matches, how is that implemented, and which adapters does a new Session mount by
+      default?
+    expected_sources:
+      - "Advanced Usage — Requests 2.34.2 documentation"
+      - https://requests.readthedocs.io/en/stable/user/advanced/
+      - requests
+    expected_locators:
+      - {file: src/requests/sessions.py, lines: [500, 503]}
+      - {file: src/requests/sessions.py, lines: [870, 880]}
+      - {file: src/requests/sessions.py, lines: [888, 897]}
+      - {file: docs/user/advanced.rst, lines: [968, 998]}
+    must_contain: [longest, HTTPAdapter]
+
+  # --- unanswerable (plausible, but not in the corpus) --------------------------------------
+  - id: unans-01
+    category: unanswerable
+    type: unanswerable
+    question: How do I open a WebSocket connection with requests and read incoming messages?
+
+  - id: unans-02
+    category: unanswerable
+    type: unanswerable
+    question: How do I enable HTTP/2 multiplexing on a requests Session?
+
+  - id: unans-03
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      How do I set a base_url on a requests Session so that calls like s.get('/users') are
+      resolved against it?
