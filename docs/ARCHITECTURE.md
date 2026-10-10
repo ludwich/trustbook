@@ -132,7 +132,8 @@ CapabilityConfig = {
   "preset": str|null, "base_url": str|null, "model": str|null, "api_version": str|null,
   "api_key_set": bool, "api_key_hint": str|null,      // e.g. "…a1b2"; never the key
   "use_chat": bool|null,                              // gate only: reuse the chat config
-  "provider": "searxng"|"brave"|"tavily"|null,        // web_search only
+  "provider": "searxng"|"brave"|"tavily"|"mock"|null, // web_search only (mock: TRUSTBOOK_MOCK_LLM=1)
+  "code_judge": bool|null,                            // grounding only (Phase 3, default true)
   "mode": "bundled"|"endpoint"|null                    // stt only
 }
 CapabilityConfigUpdate = { any subset of: enabled, preset, base_url, model, api_version,

@@ -481,3 +481,42 @@ grounding correctness > data safety > simplicity > performance > features.
 - `commits_ahead` is null when a commit is missing (shallow clone), the history is unreadable, or the count
   exceeds 10,000. HEAD is cached for 5 s per folder, counts per commit pair.
 - `ahead` is shown only for ready folder sources whose HEAD differs from the indexed commit.
+
+### D-045 Claims about code: a strict chat-model judge, anchored to the cited lines
+- **Why:** HHEM (prose NLI) can't judge claims about code (D-044). Symbol/literal matching alone would pass false
+  claims ("joined with a semicolon" matches the same lines as "with a colon"), which would weaken grounding.
+- **Decision:** a sentence that cites code and fails only the checker gets one judgement for the whole answer.
+  The judge runs at temperature 0, `think=False`, with a JSON schema and a 30 s limit, and sees only the cited
+  code with real line numbers. The sentence passes only if **all** hold:
+  - the judge says supported;
+  - every evidence range lies inside a chunk the sentence cites;
+  - every code anchor of the sentence occurs in the evidence lines (anchors: backticked spans, identifiers,
+    numbers, quoted strings, value-claim `True`/`False`/`None`; character names such as "colon" or "semicolon"
+    must occur inside a string literal in the evidence; letter-only acronyms like HTTP or URL are prose, while MD5
+    or DEFAULT_POOLSIZE are anchors);
+  - layer 5 still passes.
+  A sentence with no anchors needs half its content words in the evidence lines. Names may also match the
+  chunk's header line or `locator.symbol`; a dotted name needs its last part in the evidence.
+- The judge can rescue a sentence, never fail one. A failure or timeout leaves the checker's result. The setting is
+  `grounding.code_judge` (default on). `diagnostics.sentence_methods` records `checker` / `code_judge` per
+  sentence. The judge prompt is verbatim in `app/grounding/code_judge.py`.
+- **Measured** (Qwen3.6-35B-A3B; real reranker and HHEM; tree-sitter chunks): 17/18 claims as expected, 10
+  statements judged in 9.2 s.
+  - Every false claim failed: semicolon, SHA-1, UTF-8, only-the-password, pool_block True, pool_maxsize 20,
+    Digest default SHA-256, SHA-1/BLAKE2, `rate_limited`.
+  - True claims passed via the judge: colon + base64, the "Basic " prefix, pool_connections 10, Digest MD5
+    default, MD5-SESS/SHA-256/SHA-512.
+  - The one miss is the strict D-042 backtick rule (`requests.codes` not in the cited chunk).
+
+### D-046 Retrieval agreement guard
+- A chunk in the top 3 of **both** the vector and full-text lists is kept even if the reranker (a prose
+  cross-encoder) drops it. It replaces the lowest-ranked kept chunks within the token budget, never the top
+  chunk. The refusal threshold still uses rerank scores only.
+- **Why:** for ref-near-08 and ref-near-10 the right code chunk was #1 in both lists and was reranked out of the
+  context.
+
+### D-050 Mock test hooks
+- `TB-UNSUPPORTED` appends one unsupported sentence last. 1 good + 1 bad is exactly half, so the answer is
+  `partially_verified`, not refused.
+- The mock code judge and the `mock` web-search provider exist only when `TRUSTBOOK_MOCK_LLM=1`: the registry
+  refuses the provider otherwise, and the adapter factory refuses to build it.
