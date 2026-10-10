@@ -67,6 +67,7 @@ def test_all_sentences_pass_is_verified_with_scores_and_diagnostics() -> None:
         "top_rerank": 0.9,
         "sentence_scores": [0.9, 0.6],
         "regenerated": False,
+        "sentence_methods": ["checker", "checker"],
     }
     assert stages == ["retrieving", "generating", "checking"]
     assert len(chat.calls) == 1
@@ -199,6 +200,7 @@ def test_refusals_before_generation_carry_the_top_score() -> None:
         "top_rerank": 0.05,
         "sentence_scores": [],
         "regenerated": False,
+        "sentence_methods": [],
     }
     none = Retrieval(chunks=[], ranked=[], source_ids=[])
     outcome, _ = run(ScriptedChat(), found=none)

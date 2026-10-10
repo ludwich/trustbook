@@ -7,6 +7,14 @@ with the question it returns ``{"sentences": []}``. Overview prompts (schema wit
 get summary sentences citing chunks plus exactly three questions. Gate prompts (schema with
 ``decision``) are classified by keywords: greetings and thanks → ``chitchat``; "brainstorm",
 "ideas for", "what if" → ``brainstorm``; everything else → ``sources``.
+
+Test hooks (docs/ARCHITECTURE.md, "Test hooks"):
+
+- A question containing ``TB-UNSUPPORTED`` gets one extra sentence, :data:`UNSUPPORTED_SENTENCE`,
+  citing ``c1``. It fails verification, so the answer is ``partially_verified``.
+- Code judge prompts (schema with ``verdicts``): a statement is supported when its cited lines
+  share at least two content words with it; those lines are named as evidence.
+- :class:`MockSearchAdapter`: the ``mock`` web-search provider, fixed results for any query.
 """
 
 from __future__ import annotations
@@ -18,13 +26,18 @@ from collections import Counter
 from collections.abc import Sequence
 from typing import Any
 
-from app.capabilities.adapters.base import ChatMessage, ChatResult, Usage
+from app.capabilities.adapters.base import ChatMessage, ChatResult, SearchResult, Usage
+from app.capabilities.adapters.search import demote_homepages
 from app.chat.prompt import PromptChunk, parse_prompt
 from app.chat.text import content_terms, truncate
+from app.grounding.code_judge import parse_judge_prompt
 
 MOCK_MODEL = "mock"
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 MAX_QUOTE_CHARS = 300
+UNSUPPORTED_TRIGGER = "TB-UNSUPPORTED"
+UNSUPPORTED_SENTENCE = "This also requires a licence key from the vendor."
+JUDGE_MIN_SHARED = 2
 
 
 def _sentences(text: str) -> list[str]:
@@ -57,7 +70,33 @@ def grounded_answer(chunks: Sequence[PromptChunk], question: str) -> dict[str, A
         text = _best_sentence(second, terms)
         if text != sentences[0]["text"]:
             sentences.append({"text": text, "chunk_ids": [second.label]})
+    if UNSUPPORTED_TRIGGER in question and chunks:
+        sentences.append({"text": UNSUPPORTED_SENTENCE, "chunk_ids": [chunks[0].label]})
     return {"sentences": sentences}
+
+
+def judge_verdicts(prompt: str) -> dict[str, Any]:
+    """Mock code judge: supported when the cited lines share 2+ content words with the statement.
+
+    The lines that share a word are the evidence, one range per line.
+    """
+    chunks, statements = parse_judge_prompt(prompt)
+    verdicts: list[dict[str, Any]] = []
+    for index, statement in enumerate(statements, start=1):
+        terms = set(content_terms(statement.text))
+        shared: set[str] = set()
+        evidence: list[dict[str, Any]] = []
+        for label in statement.labels:
+            for number, line in chunks.get(label, []):
+                common = terms & set(content_terms(line))
+                if common:
+                    shared |= common
+                    evidence.append({"chunk": label, "start_line": number, "end_line": number})
+        supported = len(shared) >= JUDGE_MIN_SHARED
+        verdicts.append(
+            {"index": index, "supported": supported, "evidence": evidence if supported else []}
+        )
+    return {"verdicts": verdicts}
 
 
 _GREETING_WORDS = frozenset(
@@ -132,6 +171,9 @@ class MockChatAdapter:
         if isinstance(properties, dict) and "decision" in properties:
             text = json.dumps(gate_decision(last_user))
             return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
+        if isinstance(properties, dict) and "verdicts" in properties:
+            text = json.dumps(judge_verdicts(last_user))
+            return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
         if isinstance(properties, dict) and "sentences" in properties:
             # The prompt with the chunks is the first user message (a retry appends more).
             prompt = next((m["content"] for m in messages if m["role"] == "user"), "")
@@ -154,3 +196,34 @@ class MockChatAdapter:
 
     def list_models(self) -> list[str]:
         return [MOCK_MODEL]
+
+
+# The ``mock`` web-search provider: bare homepages first (the order a search engine might give),
+# then specific pages, so the homepage demotion for specific queries is visible.
+MOCK_SEARCH_RESULTS: tuple[SearchResult, ...] = (
+    SearchResult("Example", "https://www.example.com/sv-se/", "Example home page."),
+    SearchResult("Example Organisation", "https://example.org/", "Welcome to Example."),
+    SearchResult(
+        "AB-731 certificate",
+        "https://docs.example.com/certificates/ab-731",
+        "What the AB-731 certificate covers and how to earn it.",
+    ),
+    SearchResult(
+        "Exam AB-731",
+        "https://learn.example.com/exams/ab-731",
+        "Skills measured in exam AB-731, with study material.",
+    ),
+)
+
+
+class MockSearchAdapter:
+    """Fixed results for any query (only with ``TRUSTBOOK_MOCK_LLM=1``); never touches the network.
+
+    Ranked like the real adapters: for specific queries, bare homepages go last.
+    """
+
+    def ping(self) -> None:
+        return None
+
+    def search(self, query: str, limit: int = 10) -> list[SearchResult]:
+        return demote_homepages(query, list(MOCK_SEARCH_RESULTS))[: max(0, limit)]

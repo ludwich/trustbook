@@ -66,8 +66,9 @@ class CapabilityConfig(BaseModel):
     api_key_set: bool = False
     api_key_hint: str | None = None
     use_chat: bool | None = None
-    provider: Literal["searxng", "brave", "tavily"] | None = None
+    provider: Literal["searxng", "brave", "tavily", "mock"] | None = None
     mode: Literal["bundled", "endpoint"] | None = None
+    code_judge: bool | None = None  # grounding only
 
 
 class CapabilityConfigUpdate(BaseModel):
@@ -84,6 +85,7 @@ class CapabilityConfigUpdate(BaseModel):
     use_chat: bool | None = None
     provider: str | None = None
     mode: str | None = None
+    code_judge: bool | None = None
 
     def is_empty(self) -> bool:
         return not self.model_fields_set

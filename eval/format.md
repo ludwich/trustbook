@@ -89,15 +89,19 @@ counts once.
 |---|---|
 | **Citation precision** (gate) | Over answerable questions: correct citations / all citations. A citation is correct if its source matches an `expected_sources` entry **and** (when an expected locator applies, see above) its locator matches one. Refused or failed answers add no citations; they show up as false refusals or errors. Also shown per question as `correct/total`. |
 | **Correct-refusal rate** (gate) | Unanswerable questions with outcome `refused` / all unanswerable questions (errors count as not refused). |
-| **False refusals** | Answerable questions with outcome `refused` / all answerable questions. |
+| **False refusals** | Answerable questions with outcome `refused` / all answerable questions. Also shown per category: `docs`, `code`, `multi`, and `other` (no category, or any other value). |
+| **False refusals on code questions** (target with `--max-false-refusals-code N`) | Refused / all answerable questions that are **code questions**: `category: code`, or any question with an expected **file** locator whose file is code. A file is code unless its extension is a documentation or text one (`md markdown mdx rst txt text adoc asciidoc html htm pdf docx pptx xlsx odt rtf`); a name without an extension (`Makefile`) is code. So a `multi` question pinned to `src/requests/auth.py` counts, one pinned only to `HISTORY.md` or a docs heading does not. The target is a count: exit 1 when more than `N` are refused, or when the set has no code questions. |
 | **Errors** | Questions with outcome `error`. |
-| **Answer latency p50 / p95** | Time from sending the message request to the first `done` or `refused` event, over `answered` and `refused` questions. Percentiles use linear interpolation between closest ranks (NumPy's default). |
+| **Answer latency p50 / p95** (target with `--max-p95 SECONDS`) | Time from sending the message request to the first `done` or `refused` event, over `answered` and `refused` questions. Percentiles use linear interpolation between closest ranks (NumPy's default). A p95 above 60 s is flagged "**above 60 s**" in the report even without `--max-p95`. |
+| **Cited ranges valid** (with `--code-root PATH`; target with `--min-ranges-valid`) | Over every citation (deduplicated per answer, all answered questions) whose locator has a `file`: the file exists under `PATH` (a checkout of the corpus at the indexed commit; paths that leave `PATH` count as missing) and, when the citation has line numbers, `1 <= start_line <= end_line <=` the file's line count. Invalid ones are listed under "Cited ranges" with the reason. Gate 3 wants 100%. |
 | **must_contain hit rate** (target with `--min-must-contain`) | Answerable questions with `must_contain` whose answer text contains **all** keywords / answerable questions with `must_contain`. Refused or failed answers count as misses. Per question shown as `found/total`. Catches answers that cite the right passage but stop short of the value asked for (e.g. a constant's name instead of its value). |
 | **Expected sources cited** (informational) | Per answerable question: distinct expected sources (as resolved in the space) that were cited / expected sources found in the space. Shows whether a multi-source answer used both sources. |
 
-`--min-precision`, `--min-refusal` and `--min-must-contain` (fractions, `0.9` or `90`) make the runner
-exit 1 when a value is below the threshold or cannot be computed (no citations / no unanswerable
-questions / no answerable questions with `must_contain`). The report shows the target and
+`--min-precision`, `--min-refusal`, `--min-must-contain` and `--min-ranges-valid` (fractions, `0.9` or
+`90`) make the runner exit 1 when a value is below the threshold or cannot be computed (no citations /
+no unanswerable questions / no answerable questions with `must_contain` / no file citations).
+`--max-false-refusals-code N` (a count) and `--max-p95 SECONDS` exit 1 when the value is higher or
+cannot be computed. `--min-ranges-valid` needs `--code-root`. The report shows the target and
 pass/**FAIL** for each one given.
 
 ## Corpus file (`--setup`)
@@ -125,17 +129,24 @@ text, and nothing is written anywhere else, so a private set stays wherever you 
  "thresholds": {"refuse": 0.15, "verify": 0.5},          // GET /api/settings; null if unavailable
  "questions": [{"id": "code-01", "type": "answerable", "category": "code",
                 "outcome": "answered", "refusal_reason": null, "badge": "partially_verified",
-                "top_rerank": 0.83, "sentence_scores": [0.97, 0.12], "regenerated": false,
+                "top_rerank": 0.83, "sentence_scores": [0.97, 0.12],
+                "sentence_methods": ["checker", null], "regenerated": false,
                 "removed_sentences": 1, "citations": 2, "citations_correct": 2, "latency_s": 4.1}],
+ "false_refusals": {"docs": {"num": 0, "den": 5, "value": 0.0}, "code": {…}, "multi": {…}, "other": {…}},
+ "false_refusals_code": {"num": 1, "den": 17, "value": 0.06},
+ "cited_ranges": {"num": 48, "den": 48, "value": 1.0},     // only with --code-root
  "sweep": [{"refuse": 0.05, "verify": 0.3, "correct_refusal": {"num": 3, "den": 3, "value": 1.0},
             "answered": {…}, "precision_proxy": {…}}]}
 ```
 
-`top_rerank`, `sentence_scores` and `regenerated` come from the answer's `diagnostics`
-(docs/ARCHITECTURE.md, "Grounding layers 4–5"). `sentence_scores` follows the model's cited
-sentences, removed ones included: the grounding checker's best score over the cited chunks, `0.0`
-when a deterministic code check failed (it fails at any threshold), `null` when the checker is off.
-They are `null` for answers from an API without diagnostics.
+`top_rerank`, `sentence_scores`, `sentence_methods` and `regenerated` come from the answer's
+`diagnostics` (docs/ARCHITECTURE.md, "Grounding layers 4–5" and "Code claim verification").
+`sentence_scores` follows the model's cited sentences, removed ones included: the grounding
+checker's best score over the cited chunks, `0.0` when a deterministic code check failed (it fails
+at any threshold), `null` when the checker is off. `sentence_methods` (same order) says what passed
+each sentence: `checker`, `code_judge` (it failed the checker and passed the code judge; its score
+is still the checker's) or `null` (failed, or checker off). They are `null` for answers from an
+API without them.
 
 ## Threshold sweep
 
@@ -147,7 +158,8 @@ at `(refuse r, verify v)`:
 1. `error` stays an error (not refused, not answered).
 2. **Refused** if `top_rerank < r` (layer 2).
 3. Otherwise, if sentence scores were recorded: **refused** if the first score is below `v`, or more
-   than half of them are (the refusal rule; `null` scores pass). If not, **refused** when the run
+   than half of them are (the refusal rule; `null` scores pass, and so do sentences whose
+   `sentence_methods` entry is `code_judge`: the judge's decision does not depend on `v`). If not, **refused** when the run
    refused it for a reason the scores can't re-decide (anything but `unsupported`: `no_sources`,
    `invalid_output`, `chitchat`, or `not_in_sources` from a model that found nothing); else
    **answered**.

@@ -119,3 +119,40 @@ Use the report's "Threshold sweep" table to pick the thresholds; for a full swee
 `thresholds.refuse` first (see `eval/format.md`, "Threshold sweep"). Passing the folder
 `--questions eval/smoke` also loads `refusal.yaml`; for the Gate 1 set alone, pass
 `eval/smoke/questions.yaml` as above.
+
+## Gate 3: code questions, cited ranges and latency
+
+Gate 3 runs the same two files against the same space, after Trustbook has re-indexed the folder with
+the Phase 3 code chunker (refresh the `requests` source, or start from a new space). The corpus
+folder from step 1 is also the checkout the cited ranges are checked against (`--code-root`):
+
+```sh
+uv run --project backend python eval/runner.py \
+  --base-url http://localhost:8484 \
+  --space "requests smoke" \
+  --setup eval/smoke/corpus.yaml \
+  --questions eval/smoke/questions.yaml \
+  --questions eval/smoke/refusal.yaml \
+  --report gate-3.md \
+  --min-precision 0.9 --min-refusal 0.95 \
+  --max-false-refusals-code 1 \
+  --code-root ~/trustbook-eval/requests --min-ranges-valid 1.0 \
+  --max-p95 60
+```
+
+On Windows, pass the same folder as `--code-root C:\Users\ludwig\trustbook-eval\requests` (the
+`TRUSTBOOK_BROWSE_ROOT` folder plus `trustbook-eval\requests`).
+
+The report adds:
+
+- **False refusals per category** (`docs`, `code`, `multi`, `other`) and **false refusals on code
+  questions**: `category: code` plus every question with an expected file locator on a code file
+  (for example a `multi` question pinned to `src/requests/auth.py`). Gate 3 allows at most one
+  (`--max-false-refusals-code 1`) across the smoke and refusal sets.
+- **Cited ranges valid**: every citation with a file must name a file that exists in the checkout,
+  with a line range inside it (`--min-ranges-valid 1.0` = 100%). Failures are listed with the
+  reason under "Cited ranges".
+- **p95 latency** is flagged "above 60 s" whenever it is; `--max-p95 60` also makes it a target. Drop
+  `--max-p95` if latency is only tracked, not gated.
+
+Gate 3 also keeps Gate 2's correct refusals ≥ 95% and citation precision ≥ 90%.

@@ -1,4 +1,11 @@
-"""Hybrid retrieval (SPEC §8): enabled sources → vector + full text → RRF → rerank → budget."""
+"""Hybrid retrieval (SPEC §8): enabled sources → vector + full text → RRF → rerank → budget.
+
+Agreement guard (D-046): a chunk ranked in the top :data:`AGREEMENT_TOP` of **both** the vector
+and the full-text lists stays in the context even if the reranker dropped it. The reranker was
+trained on prose and sometimes ranks the one code chunk that answers a question below the
+context cut, although both searches put it first. The kept chunk replaces the lowest-ranked kept
+chunk and the token budget still holds. The refusal threshold still uses the rerank scores.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +17,7 @@ from sqlalchemy import Engine
 from sqlmodel import Session
 
 from app.capabilities.bundled import Embedder, Reranker
-from app.index.base import SpaceIndex
+from app.index.base import Hit, SpaceIndex
 from app.retrieval.definitions import definition_extras, fit_extras
 from app.retrieval.fusion import (
     CONTEXT_CHUNKS,
@@ -24,6 +31,8 @@ from app.retrieval.fusion import (
 from app.retrieval.store import ChunkRow, load_chunks, usable_sources
 
 logger = logging.getLogger("trustbook.retrieval")
+
+AGREEMENT_TOP = 3
 
 
 @dataclass(frozen=True)
@@ -132,16 +141,42 @@ def with_definitions(
     return fit_extras(selected, chunks, max_tokens=max_tokens)
 
 
-def candidates(
+def _top_ids(hits: Sequence[Hit], n: int) -> list[str]:
+    found: list[str] = []
+    for hit in hits:
+        if hit.chunk_id not in found:
+            found.append(hit.chunk_id)
+        if len(found) == n:
+            break
+    return found
+
+
+def agreed_ids(
+    vector_hits: Sequence[Hit], text_hits: Sequence[Hit], *, top: int = AGREEMENT_TOP
+) -> list[str]:
+    """Chunk ids in the top ``top`` of both lists, in vector order (D-046)."""
+    text_top = set(_top_ids(text_hits, top))
+    return [cid for cid in _top_ids(vector_hits, top) if cid in text_top]
+
+
+@dataclass(frozen=True)
+class Candidates:
+    """The fused candidates (best first, at most 40) and the ids both searches ranked top 3."""
+
+    rows: list[ChunkRow]
+    agreed: list[str] = field(default_factory=list)
+
+
+def search(
     engine: Engine,
     index: SpaceIndex,
     embedder: Embedder,
     query: str,
     source_ids: Sequence[str],
-) -> list[ChunkRow]:
+) -> Candidates:
     """Vector top 40 + full-text top 40, fused with RRF (k = 60), cut to the top 40."""
     if not source_ids:
-        return []
+        return Candidates([])
     vectors = embedder.embed_queries([query])
     if len(vectors) != 1:
         raise RuntimeError("The embedding model returned the wrong number of vectors")
@@ -159,7 +194,65 @@ def candidates(
     missing = len(fused) - len(ordered)
     if missing:
         logger.warning("%d indexed chunk(s) have no row in space.db; skipped", missing)
-    return ordered[:RERANK_TOP]
+    agreed = [cid for cid in agreed_ids(vector_hits, text_hits) if cid in rows]
+    return Candidates(ordered[:RERANK_TOP], agreed)
+
+
+def candidates(
+    engine: Engine,
+    index: SpaceIndex,
+    embedder: Embedder,
+    query: str,
+    source_ids: Sequence[str],
+) -> list[ChunkRow]:
+    """The fused candidates of :func:`search` (best first, at most 40)."""
+    return search(engine, index, embedder, query, source_ids).rows
+
+
+def keep_agreed(
+    selected: Sequence[RetrievedChunk],
+    ranked: Sequence[RetrievedChunk],
+    agreed: Sequence[str],
+    *,
+    max_chunks: int = CONTEXT_CHUNKS,
+    max_tokens: int = CONTEXT_TOKENS,
+) -> list[RetrievedChunk]:
+    """``selected`` with every agreed chunk the reranker left out put back (D-046).
+
+    Each one replaces the lowest-ranked kept chunk, more than one if that is what the token
+    budget needs. The top chunk and other agreed chunks are never replaced; an agreed chunk that
+    still does not fit is left out. The result keeps the rerank order.
+    """
+    position = {c.chunk_id: i for i, c in enumerate(ranked)}
+    by_id = {c.chunk_id: c for c in ranked}
+    result = list(selected)
+    protected = set(agreed)
+    for chunk_id in agreed:
+        chunk = by_id.get(chunk_id)
+        if chunk is None or any(c.chunk_id == chunk_id for c in result):
+            continue
+        trial = list(result)
+        size = max(0, chunk.token_count)
+
+        def over(chosen: list[RetrievedChunk], size: int = size) -> bool:
+            used = sum(max(0, c.token_count) for c in chosen)
+            return len(chosen) >= max_chunks or used + size > max_tokens
+
+        while trial and over(trial):
+            victims = [i for i, c in enumerate(trial) if i > 0 and c.chunk_id not in protected]
+            if not victims:
+                break
+            trial.pop(max(victims, key=lambda i: position.get(trial[i].chunk_id, len(position))))
+        if trial and over(trial):
+            logger.info("Agreement guard: chunk %s does not fit the context budget", chunk_id)
+            continue
+        trial.append(chunk)
+        trial.sort(key=lambda c: position.get(c.chunk_id, len(position)))
+        logger.info(
+            "Agreement guard: kept chunk %s (reranked #%d)", chunk_id, position[chunk_id] + 1
+        )
+        result = trial
+    return result
 
 
 def retrieve(
@@ -175,7 +268,8 @@ def retrieve(
     allowed = list(source_ids) if source_ids is not None else usable_source_ids(engine)
     if not allowed:
         return Retrieval(chunks=[], ranked=[], source_ids=[])
-    rows = candidates(engine, index, embedder, query, allowed)
-    ranked = rerank(query, rows, reranker)
-    chunks = with_definitions(engine, select_context(ranked), ranked)
+    found = search(engine, index, embedder, query, allowed)
+    ranked = rerank(query, found.rows, reranker)
+    chosen = keep_agreed(select_context(ranked), ranked, found.agreed)
+    chunks = with_definitions(engine, chosen, ranked)
     return Retrieval(chunks=chunks, ranked=ranked, source_ids=allowed)

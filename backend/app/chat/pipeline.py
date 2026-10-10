@@ -11,7 +11,9 @@
    :data:`~app.chat.prompt.REGENERATE_INSTRUCTION`, checked again. Then the refusal rule: more
    than half failing, or the first sentence failing → refuse (``unsupported``). Otherwise the
    failing sentences are removed (``partially_verified``) or none fail (``verified``). With the
-   grounding checker off, layer 4 is skipped and the badge is ``unverified``.
+   grounding checker off, layer 4 is skipped and the badge is ``unverified``. Sentences citing
+   code that fail the checker may pass on the code judge (D-045); ``diagnostics.sentence_methods``
+   records which.
 
 Citation numbers are given after removal, in order of first use among the kept sentences.
 """
@@ -179,7 +181,12 @@ def answer(
             first = [c.diagnostic_score for c in checked.checks]
             return Refused(
                 refusal("unsupported", question),
-                Diagnostics(top_rerank=top, sentence_scores=first, regenerated=True),
+                Diagnostics(
+                    top_rerank=top,
+                    sentence_scores=first,
+                    regenerated=True,
+                    sentence_methods=checked.methods,
+                ),
             )
         parsed = second
         checked = check_sentences(verifier, parsed.sentences, chunks)
@@ -188,6 +195,7 @@ def answer(
         top_rerank=top,
         sentence_scores=[c.diagnostic_score for c in checked.checks],
         regenerated=regenerated,
+        sentence_methods=checked.methods,
     )
     if checked.refuse:
         logger.info(

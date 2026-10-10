@@ -158,6 +158,7 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
         "top_rerank": 1.0,
         "sentence_scores": [0.0],
         "regenerated": True,
+        "sentence_methods": [None],
     }
     assert len(chat.calls) == 2
 

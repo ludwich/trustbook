@@ -12,6 +12,7 @@ Hint = Literal["ideation"]
 GateDecision = Literal["sources", "brainstorm", "chitchat"]
 GATE_DECISIONS: tuple[GateDecision, ...] = ("sources", "brainstorm", "chitchat")
 Stage = Literal["retrieving", "generating", "checking"]
+SentenceMethod = Literal["checker", "code_judge"]
 OverviewStatus = Literal["none", "pending", "ready", "failed"]
 
 MAX_QUESTION_CHARS = 4_000
@@ -54,11 +55,15 @@ class Diagnostics(BaseModel):
 
     ``sentence_scores`` follows the model's cited sentences, removed ones included: the grounding
     checker's best score per sentence, 0.0 when a code check failed, None when the checker is off.
+    ``sentence_methods`` (same order): what passed each sentence, ``checker`` or ``code_judge``
+    (failed the checker, passed on the code judge, D-045); None for failed sentences and when the
+    checker is off.
     """
 
     top_rerank: float | None = None
     sentence_scores: list[float | None] = Field(default_factory=list)
     regenerated: bool = False
+    sentence_methods: list[SentenceMethod | None] = Field(default_factory=list)
 
 
 class MessageOut(BaseModel):

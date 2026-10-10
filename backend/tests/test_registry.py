@@ -64,7 +64,7 @@ def test_default_views(registry: CapabilityRegistry) -> None:
     ]
     assert [f.name for f in caps["stt"].fields] == ["mode", "base_url", "api_key", "model"]
     assert [f.name for f in caps["web_search"].fields] == ["provider", "base_url", "api_key"]
-    assert [f.name for f in caps["grounding"].fields] == ["enabled"]
+    assert [f.name for f in caps["grounding"].fields] == ["enabled", "code_judge"]
     assert caps["embeddings"].fields == []
     assert caps["gate"].status == "not_configured"
     assert caps["gate"].config.use_chat is True
@@ -291,11 +291,30 @@ def test_gate_mirrors_chat(registry: CapabilityRegistry) -> None:
 
 def test_grounding_toggle(registry: CapabilityRegistry) -> None:
     grounding = registry.get("grounding")
-    assert [f.name for f in grounding.fields] == ["enabled"]
+    assert [f.name for f in grounding.fields] == ["enabled", "code_judge"]
     assert grounding.fields[0].label == "Check every sentence against its sources"
     grounding = registry.update("grounding", Update(enabled=False))
     assert grounding.status == "disabled"
     assert grounding.status_detail == "Off. Answers are marked Unverified."
+
+
+def test_grounding_code_judge_toggle(registry: CapabilityRegistry) -> None:
+    """D-045: "Check code claims with the chat model", on by default, a plain toggle."""
+    grounding = registry.get("grounding")
+    judge = grounding.fields[1]
+    assert (judge.name, judge.type, judge.required) == ("code_judge", "toggle", False)
+    assert judge.label == "Check code claims with the chat model"
+    assert judge.help and "cited lines" in judge.help
+    assert grounding.config.code_judge is True
+    assert registry.get("chat").config.code_judge is None  # grounding only
+    before = grounding.status
+    grounding = registry.update("grounding", Update(code_judge=False))
+    assert grounding.config.code_judge is False and grounding.status == before
+    assert registry.stored("grounding").code_judge is False
+    grounding = registry.update("grounding", Update(code_judge=True))
+    assert grounding.config.code_judge is True
+    with pytest.raises(ConfigError):
+        registry.merge("chat", Update(code_judge=False))
 
 
 def test_stt_endpoint_mode(registry: CapabilityRegistry) -> None:

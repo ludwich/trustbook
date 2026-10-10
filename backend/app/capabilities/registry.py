@@ -160,6 +160,14 @@ class CapabilityRegistry:
     def presets(self, cap_id: str) -> list[PresetSpec]:
         return [p for p in self.manifest(cap_id).presets if not p.mock_only or self._paths.mock_llm]
 
+    def providers(self, cap_id: str) -> list[Option]:
+        """Selectable services (test-only ones only with ``TRUSTBOOK_MOCK_LLM=1``)."""
+        return [
+            Option(value=p.value, label=p.label)
+            for p in self.manifest(cap_id).providers
+            if not p.mock_only or self._paths.mock_llm
+        ]
+
     def preset(self, cap_id: str, preset_id: str | None) -> PresetSpec | None:
         return next((p for p in self.presets(cap_id) if p.id == preset_id), None)
 
@@ -213,7 +221,7 @@ class CapabilityRegistry:
                 )
                 for p in self.presets(cap_id)
             ],
-            providers=list(manifest.providers),
+            providers=self.providers(cap_id),
             config=self._config_out(cap_id, settings),
             locality=evaluation.locality,
             status=evaluation.status,
@@ -234,6 +242,7 @@ class CapabilityRegistry:
             use_chat=bool(s.use_chat) if cap_id == "gate" else None,
             provider=s.provider if cap_id == "web_search" else None,
             mode=s.mode if cap_id == "stt" else None,
+            code_judge=s.code_judge is not False if cap_id == "grounding" else None,
         )
 
     # --- fields ----------------------------------------------------------------------------
@@ -256,7 +265,7 @@ class CapabilityRegistry:
         endpoint = self._uses_endpoint(cap_id, s)
         names: list[str] = []
         for name in manifest.ui_fields:
-            if name in ("enabled", "use_chat", "mode", "provider"):
+            if name in ("enabled", "use_chat", "mode", "provider", "code_judge"):
                 names.append(name)
             elif name == "preset" and endpoint:
                 names.append(name)
@@ -276,7 +285,7 @@ class CapabilityRegistry:
         return names
 
     def _required(self, cap_id: str, name: str, s: CapabilitySettings) -> bool:
-        if name in ("enabled", "use_chat"):
+        if name in ("enabled", "use_chat", "code_judge"):
             return False
         if cap_id == "web_search":
             return name != "base_url"
@@ -295,6 +304,13 @@ class CapabilityRegistry:
             spec: FieldOut
             if name == "enabled":
                 spec = FieldOut(name=name, label="Enabled", type="toggle", required=False)
+            elif name == "code_judge":
+                spec = FieldOut(
+                    name=name,
+                    label="Check code claims with the chat model",
+                    type="toggle",
+                    required=False,
+                )
             elif name == "use_chat":
                 spec = FieldOut(
                     name=name,
@@ -317,7 +333,7 @@ class CapabilityRegistry:
                     label="Search service",
                     type="select",
                     required=True,
-                    options=list(manifest.providers),
+                    options=self.providers(cap_id),
                 )
             elif name == "preset":
                 spec = FieldOut(
@@ -482,6 +498,10 @@ class CapabilityRegistry:
                 "search engines.",
                 "local",
             )
+        elif provider == "mock":
+            if not self._paths.mock_llm:
+                return Evaluation("not_configured", "Choose a search service.", None)
+            evaluation = Evaluation("ready", "Test mode: fixed search results.", "local")
         else:
             label = "Brave Search" if provider == "brave" else "Tavily"
             if not s.api_key:
@@ -509,12 +529,14 @@ class CapabilityRegistry:
             merged.enabled = update.enabled
         if "use_chat" in given and update.use_chat is not None:
             merged.use_chat = update.use_chat
+        if "code_judge" in given and update.code_judge is not None:
+            merged.code_judge = update.code_judge
         if "mode" in given and update.mode is not None:
             if update.mode not in ("bundled", "endpoint"):
                 raise ConfigError("Choose either the built-in model or an endpoint.")
             merged.mode = update.mode
         if "provider" in given and update.provider is not None:
-            if update.provider not in {o.value for o in manifest.providers}:
+            if update.provider not in {o.value for o in self.providers(cap_id)}:
                 raise ConfigError("Choose one of the listed search services.")
             merged.provider = update.provider
         if "preset" in given:

@@ -41,6 +41,11 @@ def _env_flag(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def mock_llm_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """``TRUSTBOOK_MOCK_LLM=1``: test adapters (mock chat, mock web search) may be used."""
+    return _env_flag((os.environ if env is None else env).get("TRUSTBOOK_MOCK_LLM"))
+
+
 @dataclass(frozen=True)
 class Paths:
     """All file-system locations and environment-driven options."""
@@ -134,6 +139,8 @@ class CapabilitySettings(BaseModel):
     use_chat: bool | None = None
     provider: str | None = None
     mode: str | None = None
+    # grounding only: check claims about code with the chat model (D-045); None = on.
+    code_judge: bool | None = None
     last_test: TestResult | None = None
 
 
@@ -151,7 +158,7 @@ def default_capabilities() -> dict[str, CapabilitySettings]:
         "gate": CapabilitySettings(use_chat=True),
         "embeddings": CapabilitySettings(),
         "reranker": CapabilitySettings(),
-        "grounding": CapabilitySettings(enabled=True),
+        "grounding": CapabilitySettings(enabled=True, code_judge=True),
         "stt": CapabilitySettings(mode="bundled"),
         "web_search": CapabilitySettings(provider="searxng"),
         "tts": CapabilitySettings(enabled=False),

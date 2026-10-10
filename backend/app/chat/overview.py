@@ -38,6 +38,7 @@ from app.chat.schemas import OverviewEstimate, OverviewOut, OverviewStatus, Sent
 from app.db.engine import get_engine
 from app.db.models import Job
 from app.db.models import Overview as OverviewRow
+from app.grounding.code_judge import CodeJudge
 from app.grounding.verify import GroundingSettings, Verifier, build_verifier, checker_scores
 from app.index.base import IndexRegistry, SpaceIndex
 from app.jobs.handlers import JobContext
@@ -381,7 +382,10 @@ class OverviewService:
                 self._providers,
                 self._chat_adapter,
                 verifier=build_verifier(
-                    self._grounding(), checker_scores(self._providers), space.folder
+                    self._grounding(),
+                    checker_scores(self._providers),
+                    space.folder,
+                    CodeJudge(self._chat_adapter),
                 ),
                 check_cancelled=ctx.check_cancelled,
             )

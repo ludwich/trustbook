@@ -3,8 +3,9 @@
 
 Asks every question in one or more YAML question files (format: ``eval/format.md``) against a
 space of a running Trustbook, then prints a Markdown report ready to paste into ``docs/GATES.md``:
-citation precision, correct-refusal rate, ``must_contain`` hit rate, false refusals and answer
-latency p50/p95.
+citation precision, correct-refusal rate, ``must_contain`` hit rate, false refusals (overall, per
+category and on code questions), answer latency p50/p95 and, with ``--code-root``, whether every
+cited file/line range exists in a checkout of the corpus.
 
 Usage (from the repo root, with the backend's virtualenv)::
 
@@ -17,8 +18,8 @@ top reranker score, sentence verifier scores (from the answer's ``diagnostics``)
 sweep (see ``eval/format.md``, "Threshold sweep"). Nothing is written anywhere else, so a private
 question set never ends up in the repository unless the report path is inside it.
 
-Exit codes: 0 = report written; 1 = a ``--min-*`` threshold was not met; 2 = the API is
-unreachable or the input (questions, corpus, space) is invalid.
+Exit codes: 0 = report written; 1 = a ``--min-*`` / ``--max-*`` target was not met; 2 = the API
+is unreachable or the input (questions, corpus, space, code root) is invalid.
 
 Only ``httpx`` and ``PyYAML`` are used. The runner talks to the API contract in
 ``docs/ARCHITECTURE.md`` ("Phase 1: sources, index, retrieval and chat").
@@ -46,6 +47,13 @@ import yaml
 
 QUESTION_TYPES = ("answerable", "unanswerable")
 CATEGORIES = ("docs", "code", "multi", "unanswerable")
+FALSE_REFUSAL_GROUPS = ("docs", "code", "multi", "other")
+# p95 answer latency above this is flagged in the report even without --max-p95 (Gate 3).
+P95_FLAG_S = 60.0
+# A file locator is a code file unless its extension marks documentation or plain text.
+DOC_EXTENSIONS = frozenset(
+    "md markdown mdx rst txt text adoc asciidoc html htm pdf docx pptx xlsx odt rtf".split()
+)
 SOURCE_DONE = ("ready", "failed")
 EXIT_OK = 0
 EXIT_THRESHOLD = 1
@@ -556,6 +564,8 @@ class QuestionResult:
     badge: str | None = None
     top_rerank: float | None = None
     sentence_scores: list[float | None] | None = None
+    # Per sentence: "checker", "code_judge" (passed on the code judge, D-045) or None.
+    sentence_methods: list[str | None] | None = None
     regenerated: bool | None = None
     removed_sentences: int = 0
     sentence_citations: list[list[Citation]] = field(default_factory=list)  # kept sentences
@@ -589,6 +599,34 @@ class Ratio:
         return self.num / self.den if self.den else None
 
 
+def is_code_file(path: str) -> bool:
+    """A file locator path that is code: any extension except documentation and plain text."""
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    if "." not in name.strip("."):
+        return True  # Makefile, Dockerfile, LICENSE-like names count as code
+    return name.rsplit(".", 1)[1].lower() not in DOC_EXTENSIONS
+
+
+def expects_code(question: Question) -> bool:
+    """Counts towards ``--max-false-refusals-code``: category ``code``, or any question with an
+    expected file locator that is a code file (multi-source questions with code)."""
+    if question.category == "code":
+        return True
+    return any(
+        loc.file is not None and is_code_file(loc.file) for loc in question.expected_locators
+    )
+
+
+def false_refusal_group(question: Question) -> str:
+    """``docs``, ``code`` or ``multi`` by category; anything else is ``other``."""
+    return question.category if question.category in ("docs", "code", "multi") else "other"
+
+
+def false_refusals(results: Sequence[QuestionResult]) -> Ratio:
+    answerable = [r for r in results if r.question.answerable]
+    return Ratio(sum(r.outcome == "refused" for r in answerable), len(answerable))
+
+
 @dataclass(frozen=True)
 class Metrics:
     precision: Ratio
@@ -599,6 +637,8 @@ class Metrics:
     latency_p50: float | None
     latency_p95: float | None
     latency_count: int
+    false_refusal_by_group: dict[str, Ratio] = field(default_factory=dict)
+    false_refusal_code: Ratio = Ratio(0, 0)
 
 
 def compute_metrics(results: Sequence[QuestionResult]) -> Metrics:
@@ -624,6 +664,11 @@ def compute_metrics(results: Sequence[QuestionResult]) -> Metrics:
         latency_p50=percentile(latencies, 50),
         latency_p95=percentile(latencies, 95),
         latency_count=len(latencies),
+        false_refusal_by_group={
+            group: false_refusals([r for r in results if false_refusal_group(r.question) == group])
+            for group in FALSE_REFUSAL_GROUPS
+        },
+        false_refusal_code=false_refusals([r for r in results if expects_code(r.question)]),
     )
 
 
@@ -652,6 +697,18 @@ class SweepRow:
     precision: Ratio
 
 
+def sweep_scores(result: QuestionResult) -> list[float | None] | None:
+    """Sentence scores for the sweep: a sentence that passed on the code judge (D-045) passes at
+    any verify threshold, so it counts like an unchecked one (None)."""
+    scores = result.sentence_scores
+    methods = result.sentence_methods or []
+    if scores is None:
+        return None
+    return [
+        None if i < len(methods) and methods[i] == "code_judge" else s for i, s in enumerate(scores)
+    ]
+
+
 def outcome_at(result: QuestionResult, refuse: float, verify: float) -> str:
     """Estimated outcome (``answered`` | ``refused`` | ``error``) at other thresholds.
 
@@ -664,7 +721,7 @@ def outcome_at(result: QuestionResult, refuse: float, verify: float) -> str:
         return "error"
     if result.top_rerank is not None and result.top_rerank < refuse:
         return "refused"
-    scores = result.sentence_scores
+    scores = sweep_scores(result)
     if not scores:
         return result.outcome
     failing = [s is not None and s < verify for s in scores]
@@ -683,7 +740,7 @@ def kept_scores(result: QuestionResult, run_verify: float) -> list[float | None]
     kept sentence counts as unknown (None).
     """
     kept = len(result.sentence_citations)
-    scores = result.sentence_scores or []
+    scores = sweep_scores(result) or []
     if len(scores) == kept:
         return list(scores)
     passing = [s for s in scores if s is None or s >= run_verify]
@@ -744,6 +801,7 @@ def sidecar(
     Only ids, types and numbers: no question or answer text.
     """
     thresholds = info.thresholds
+    metrics = compute_metrics(results)
     return {
         "version": 1,
         "date": info.started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -762,6 +820,7 @@ def sidecar(
                 "badge": r.badge,
                 "top_rerank": r.top_rerank,
                 "sentence_scores": r.sentence_scores,
+                "sentence_methods": r.sentence_methods,
                 "regenerated": r.regenerated,
                 "removed_sentences": r.removed_sentences,
                 "citations": len(r.citations),
@@ -770,6 +829,10 @@ def sidecar(
             }
             for r in results
         ],
+        "false_refusals": {
+            group: _ratio_json(ratio) for group, ratio in metrics.false_refusal_by_group.items()
+        },
+        "false_refusals_code": _ratio_json(metrics.false_refusal_code),
         "sweep": [
             {
                 "refuse": row.refuse,
@@ -1036,6 +1099,9 @@ def read_message_extras(result: QuestionResult, message: dict[str, Any]) -> None
     scores = diagnostics.get("sentence_scores")
     if isinstance(scores, list):
         result.sentence_scores = [_score(v) for v in scores]
+    methods = diagnostics.get("sentence_methods")
+    if isinstance(methods, list):
+        result.sentence_methods = [m if isinstance(m, str) else None for m in methods]
     regenerated = diagnostics.get("regenerated")
     result.regenerated = regenerated if isinstance(regenerated, bool) else None
 
@@ -1193,6 +1259,88 @@ def setup_corpus(
 
 
 # ---------------------------------------------------------------------------------------------
+# Cited ranges (Gate 3: every cited file/line range exists at the indexed commit)
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BadRange:
+    question_id: str
+    file: str
+    start: int | None
+    end: int | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class RangeReport:
+    """Citations with ``locator.file`` checked against a checkout of the corpus."""
+
+    root: str
+    valid: Ratio
+    bad: tuple[BadRange, ...] = ()
+
+
+def _line_number(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def range_problem(root: Path, locator: dict[str, Any], lines: dict[str, int | None]) -> str | None:
+    """Why a cited file/line range does not exist under ``root`` (None when it does).
+
+    ``lines`` caches line counts per relative path (None: missing or unreadable file).
+    """
+    rel = str(locator.get("file") or "").replace("\\", "/").strip()
+    if not rel:
+        return "empty file name"
+    if rel not in lines:
+        path = (root / rel).resolve()
+        inside = path == root or root in path.parents
+        try:
+            text = path.read_text("utf-8", errors="replace") if inside and path.is_file() else None
+        except OSError:
+            text = None
+        lines[rel] = None if text is None else len(text.splitlines())
+    count = lines[rel]
+    if count is None:
+        return "file not found"
+    start, end = locator.get("start_line"), locator.get("end_line")
+    if start is None and end is None:
+        return None
+    first, last = _line_number(start), _line_number(end)
+    if first is None or last is None or first < 1 or last < first:
+        return "invalid line range"
+    if last > count:
+        return f"file has {count} lines"
+    return None
+
+
+def check_ranges(results: Sequence[QuestionResult], root: str) -> RangeReport:
+    """Every citation with a ``locator.file`` (all answered questions, unique per answer)."""
+    base = Path(root).resolve()
+    lines: dict[str, int | None] = {}
+    total = 0
+    bad: list[BadRange] = []
+    for r in results:
+        for c in r.citations:
+            if not isinstance(c.locator.get("file"), str):
+                continue
+            total += 1
+            problem = range_problem(base, c.locator, lines)
+            if problem is not None:
+                bad.append(
+                    BadRange(
+                        r.question.id,
+                        str(c.locator.get("file")),
+                        _line_number(c.locator.get("start_line")),
+                        _line_number(c.locator.get("end_line")),
+                        problem,
+                    )
+                )
+    return RangeReport(root=root, valid=Ratio(total - len(bad), total), bad=tuple(bad))
+
+
+# ---------------------------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------------------------
 
@@ -1217,6 +1365,13 @@ def _verdict(value: float | None, minimum: float | None) -> tuple[str, str]:
     return (target, "pass" if value is not None and value >= minimum else "**FAIL**")
 
 
+def _at_most(value: float | None, maximum: float | None, unit: str = "") -> tuple[str, str]:
+    if maximum is None:
+        return ("-", "-")
+    target = f"<= {maximum:g}{unit}"
+    return (target, "pass" if value is not None and value <= maximum else "**FAIL**")
+
+
 @dataclass(frozen=True)
 class RunInfo:
     base_url: str
@@ -1229,6 +1384,9 @@ class RunInfo:
     min_refusal: float | None = None
     min_must_contain: float | None = None
     thresholds: Thresholds | None = None  # None when the API did not report them
+    max_false_refusals_code: int | None = None
+    max_p95: float | None = None
+    min_ranges_valid: float | None = None
 
 
 def render_report(
@@ -1236,6 +1394,7 @@ def render_report(
     results: Sequence[QuestionResult],
     sources: dict[str, SourceInfo],
     setup: SetupReport | None = None,
+    ranges: RangeReport | None = None,
 ) -> str:
     m = compute_metrics(results)
     n_ans = sum(r.question.answerable for r in results)
@@ -1269,11 +1428,36 @@ def render_report(
     out.append(
         f"| False refusals (answerable) | {m.false_refusal.num}/{m.false_refusal.den} | - | - |"
     )
+    for group in FALSE_REFUSAL_GROUPS:
+        g = m.false_refusal_by_group.get(group, Ratio(0, 0))
+        out.append(f"| False refusals: {group} | {g.num}/{g.den} | - | - |")
+    code = m.false_refusal_code
+    c_target, c_res = _at_most(
+        None if code.den == 0 and info.max_false_refusals_code is not None else code.num,
+        info.max_false_refusals_code,
+    )
+    out.append(
+        "| False refusals on code questions (category code, or expecting a code file) "
+        f"| {code.num}/{code.den} | {c_target} | {c_res} |"
+    )
     out.append(f"| Errors | {m.errors} | - | - |")
+    l_target, l_res = _at_most(m.latency_p95, info.max_p95, " s")
+    flag = (
+        f" **above {P95_FLAG_S:g} s**"
+        if m.latency_p95 is not None and m.latency_p95 > P95_FLAG_S
+        else ""
+    )
     out.append(
         f"| Answer latency p50 / p95 ({m.latency_count} answers) | "
-        f"{_secs(m.latency_p50)} / {_secs(m.latency_p95)} | - | - |"
+        f"{_secs(m.latency_p50)} / {_secs(m.latency_p95)}{flag} | {l_target} | {l_res} |"
     )
+    if ranges is not None or info.min_ranges_valid is not None:
+        valid = ranges.valid if ranges is not None else Ratio(0, 0)
+        v_target, v_res = _verdict(valid.value, info.min_ranges_valid)
+        out.append(
+            f"| Cited ranges valid (file and lines exist in the checkout) | {_pct(valid)} "
+            f"| {v_target} | {v_res} |"
+        )
     out.append("")
     out.append(
         "| ID | Type | Category | Outcome | Citations correct/total "
@@ -1326,6 +1510,20 @@ def render_report(
         for r in answered_unans:
             out.append(f"- `{r.question.id}`: {_cell(r.answer_text[:300])}")
         out.append("")
+
+    if ranges is not None:
+        out.append("#### Cited ranges")
+        out.append("")
+        out.append(
+            f"Checked against `{ranges.root}`: {ranges.valid.num}/{ranges.valid.den} citations "
+            "with a file locator point at a file and line range that exist."
+        )
+        out.append("")
+        for b in ranges.bad:
+            span = f" lines {b.start}-{b.end}" if b.start is not None else ""
+            out.append(f"- `{b.question_id}` `{_cell(b.file)}`{span}: {b.reason}")
+        if ranges.bad:
+            out.append("")
 
     errors = [r for r in results if r.outcome == "error"]
     if errors:
@@ -1408,16 +1606,27 @@ def thresholds_met(
     min_precision: float | None,
     min_refusal: float | None,
     min_must_contain: float | None = None,
+    *,
+    max_false_refusals_code: int | None = None,
+    max_p95: float | None = None,
+    min_ranges_valid: float | None = None,
+    ranges: RangeReport | None = None,
 ) -> bool:
-    """True when every given minimum is reached (a value that can't be computed fails)."""
+    """True when every given target is met (a value that can't be computed fails)."""
     checks = (
         (m.precision.value, min_precision),
         (m.correct_refusal.value, min_refusal),
         (m.must_contain.value, min_must_contain),
+        (ranges.valid.value if ranges is not None else None, min_ranges_valid),
     )
-    return all(
+    minimums = all(
         minimum is None or (value is not None and value >= minimum) for value, minimum in checks
     )
+    code = m.false_refusal_code
+    maximums = (
+        max_false_refusals_code is None or (code.den > 0 and code.num <= max_false_refusals_code)
+    ) and (max_p95 is None or (m.latency_p95 is not None and m.latency_p95 <= max_p95))
+    return minimums and maximums
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1431,6 +1640,20 @@ def _fraction(value: str) -> float:
         v /= 100.0  # accept 90 as well as 0.9
     if not 0 <= v <= 1:
         raise argparse.ArgumentTypeError("must be between 0 and 1 (or 0 and 100)")
+    return v
+
+
+def _count(value: str) -> int:
+    n = int(value)
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return n
+
+
+def _seconds(value: str) -> float:
+    v = float(value)
+    if not math.isfinite(v) or v <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number of seconds")
     return v
 
 
@@ -1461,6 +1684,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--min-must-contain", type=_fraction, help="exit 1 if the must_contain hit rate is lower"
     )
+    p.add_argument(
+        "--max-false-refusals-code",
+        type=_count,
+        metavar="N",
+        help="exit 1 if more than N answerable code questions are refused (category code, or an "
+        "expected file locator that is a code file)",
+    )
+    p.add_argument(
+        "--max-p95",
+        type=_seconds,
+        metavar="SECONDS",
+        help=f"exit 1 if the p95 answer latency is higher (flagged above {P95_FLAG_S:g} s anyway)",
+    )
+    p.add_argument(
+        "--code-root",
+        metavar="PATH",
+        help="checkout of the corpus at the indexed commit; checks that every cited file and "
+        "line range exists there",
+    )
+    p.add_argument(
+        "--min-ranges-valid",
+        type=_fraction,
+        help="exit 1 if the share of valid cited ranges is lower (needs --code-root)",
+    )
     return p
 
 
@@ -1473,13 +1720,18 @@ def main(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.perf_counter,
 ) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.min_ranges_valid is not None and not args.code_root:
+        parser.error("--min-ranges-valid needs --code-root")
     out = out or sys.stdout
     log = log or sys.stderr
     started = datetime.now(UTC)
     try:
         questions = load_questions(args.questions)
         corpus = load_corpus(args.setup) if args.setup else None
+        if args.code_root and not Path(args.code_root).is_dir():
+            raise EvalError(f"--code-root is not a folder: {args.code_root}")
     except EvalError as exc:
         print(f"error: {exc}", file=log)
         return EXIT_UNAVAILABLE
@@ -1537,18 +1789,31 @@ def main(
         min_refusal=args.min_refusal,
         min_must_contain=args.min_must_contain,
         thresholds=run_thresholds,
+        max_false_refusals_code=args.max_false_refusals_code,
+        max_p95=args.max_p95,
+        min_ranges_valid=args.min_ranges_valid,
     )
-    report = render_report(info, results, sources, setup)
+    ranges = check_ranges(results, args.code_root) if args.code_root else None
+    report = render_report(info, results, sources, setup, ranges)
     out.write(report)
     if args.report:
         Path(args.report).write_text(report, encoding="utf-8")
         print(f"report written to {args.report}", file=log)
         data = sidecar(info, results, sweep(results, sources, run_thresholds or Thresholds()))
+        if ranges is not None:
+            data["cited_ranges"] = _ratio_json(ranges.valid)
         json_path = sidecar_path(args.report)
         json_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         print(f"scores written to {json_path}", file=log)
     if not thresholds_met(
-        compute_metrics(results), args.min_precision, args.min_refusal, args.min_must_contain
+        compute_metrics(results),
+        args.min_precision,
+        args.min_refusal,
+        args.min_must_contain,
+        max_false_refusals_code=args.max_false_refusals_code,
+        max_p95=args.max_p95,
+        min_ranges_valid=args.min_ranges_valid,
+        ranges=ranges,
     ):
         print("thresholds not met", file=log)
         return EXIT_THRESHOLD

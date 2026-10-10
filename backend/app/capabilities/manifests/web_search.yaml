@@ -12,3 +12,4 @@ providers:
   - {value: searxng, label: SearXNG (built in)}
   - {value: brave, label: Brave Search}
   - {value: tavily, label: Tavily}
+  - {value: mock, label: Test search (fixed results), mock_only: true}

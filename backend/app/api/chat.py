@@ -30,6 +30,7 @@ from app.chat.schemas import (
 )
 from app.chat.service import ChatService, EventSink
 from app.db.engine import get_engine
+from app.grounding.code_judge import CodeJudge
 from app.grounding.verify import Verifier, build_verifier, checker_scores
 from app.retrieval.service import Retrieval, retrieve
 from app.retrieval.store import source_counts
@@ -116,7 +117,10 @@ def chat_service(services: Services, space: SpaceRecord) -> ChatService:
 
     def verifier() -> Verifier:
         return build_verifier(
-            services.grounding_settings(), checker_scores(services.providers), space.folder
+            services.grounding_settings(),
+            checker_scores(services.providers),
+            space.folder,
+            CodeJudge(services.chat_adapter),
         )
 
     return ChatService(
