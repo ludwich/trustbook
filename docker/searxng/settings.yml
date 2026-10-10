@@ -1,0 +1,51 @@
+# SearXNG settings for Trustbook (SPEC §4, DECISIONS D-004).
+#
+# SearXNG itself is an unmodified, separate container. This file is baked into the app image at
+# /app/searxng/settings.yml; the one-shot `searxng-init` service copies it into the shared
+# `searxng-config` volume on first start and replaces the "ultrasecretkey" placeholder below with a
+# freshly generated secret. Edit the copy in the volume (or delete it to regenerate), not the image.
+#
+# Only differences from SearXNG's bundled defaults are listed here.
+# Docs: https://docs.searxng.org/admin/settings/index.html
+
+use_default_settings:
+  engines:
+    # General web engines that work without API keys, plus Wikipedia for reference pages.
+    # Startpage and Mojeek are left out: upstream marks them inactive (proof-of-work CAPTCHA).
+    keep_only:
+      - duckduckgo
+      - brave
+      - bing
+      - wikipedia
+
+general:
+  instance_name: "Trustbook search"
+  # Keep per-engine stats in memory only; nothing is sent anywhere.
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  # The app uses the JSON API; no autocomplete requests to third parties.
+  autocomplete: ""
+  favicon_resolver: ""
+  formats:
+    - html
+    - json
+
+server:
+  # Placeholder: replaced by `python -m app.searxng_init` before SearXNG first starts.
+  secret_key: "ultrasecretkey"
+  # Internal-only instance (port not published); the app is the only client.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"
+
+# No Valkey/Redis: the limiter is off and Trustbook adds no extra services (SPEC §15).
+valkey:
+  url: false
+
+engines:
+  # Bing ships disabled upstream; enable it as a second source when DuckDuckGo or Brave rate-limit.
+  - name: bing
+    disabled: false
