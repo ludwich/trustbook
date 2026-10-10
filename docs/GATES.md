@@ -66,3 +66,73 @@ and calibration does not run again.
 - STT speed in containers whose CPU limit is smaller than the CPUs they can see (e.g. `--cpus`, nested LXC) is
   much slower than it should be (D-019). On Docker Desktop this does not apply.
 - Web search results depend on public engines; from some IPs DuckDuckGo and Brave rate-limit (D-015).
+
+---
+
+## Gate 1 — Grounded chat
+
+**Image:** `ghcr.io/ludwich/trustbook:phase-1-rc` · **PR:** `phase-1 → main`
+
+**Criterion (SPEC §14):** citation precision ≥ 90% on the smoke set using Ludwig's chat endpoint.
+
+### Setup (once)
+
+1. In `.env` set `TRUSTBOOK_IMAGE_TAG=phase-1-rc`, then `docker compose pull` and `docker compose up -d`.
+   The image is bigger now (document parser, browser): about 3 GB to download, about 12 GB of free disk.
+   Give Docker Desktop at least **8 GB of memory** (Settings → Resources).
+2. Put the smoke corpus under your browse root (the folder must be named `requests`):
+   ```
+   git clone --depth 1 --branch v2.34.2 https://github.com/psf/requests C:/Users/<you>/trustbook-eval/requests
+   ```
+   (Commit `6e83187b`. Without git: `py eval/smoke/fetch_corpus.py C:/Users/<you>/trustbook-eval/requests`
+   from a checkout of this repo.)
+3. Wait until **Settings → Speed test** says done (first start, about 1–3 minutes).
+
+### Checklist
+
+| # | Check | How to verify | Expected |
+|---|---|---|---|
+| 1 | Gate 0 finding F1 fixed | Settings → Speed test → "This computer" line and Indexing | "uses N of N CPUs · T model threads · BF16" (BF16 if your CPU supports it). Indexing well above the 4 chunks/s you measured at Gate 0 |
+| 2 | F2, F3 | Same section; power setting High | Speech-to-text reads "N× faster than real time"; High shows at most 8 workers |
+| 3 | **Smoke set (gate)** | `docker compose exec app python /app/eval/runner.py --base-url http://127.0.0.1:8484 --space Smoke --setup /app/eval/smoke/corpus.yaml --questions /app/eval/smoke/questions.yaml --report /data/gate1-report.md --min-precision 0.9` | Exit code 0 and "Citation precision … pass" in `C:/Users/<you>/Trustbook/gate1-report.md`. The first run indexes the corpus (about 4,000 passages: roughly 5–25 min depending on the PC; progress is printed). Rerunning skips sources that are already there |
+| 4 | Answers in the UI | Open space **Smoke** → ask "How many redirects does requests follow by default?" | A streamed answer with numbered citations; clicking one opens the source viewer at the highlighted lines of `src/requests/...` |
+| 5 | Refusal | Ask "Does requests support WebSocket connections?" | "Not in your sources" with a suggestion, badge **Refused**, no LLM answer |
+| 6 | Source types | In a new space: upload a PDF, add a web page, a YouTube link, paste text, search the web and add a result | Each reaches **Ready** (or **Failed** with a reason and next step); a scanned/OCR'd PDF shows a warning; a LAN address is refused |
+| 7 | Overview and hint | The new space's chat tab | With a remote endpoint: "About N tokens will be sent…" + **Write overview** (nothing is sent before you click); afterwards 2–4 cited sentences and three suggested questions. The one-time hint can be dismissed and stays dismissed |
+| 8 | Checkboxes | Untick a source or a whole group, ask again | "Using X of Y sources" changes; answers never cite unticked sources |
+
+Report the chat model you used together with the report file.
+
+### Builder results (dev workbench, 8 CPUs, before handing over)
+
+Chat endpoint: llama-server at `192.168.155.52:8080`, model `Qwen3.6-35B-A3B-UD-Q4_K_XL`. Corpus indexed in
+19 min (requests repo + 4 doc pages; BF16, 7 threads).
+
+| Run | Answer key | Citation precision | Correct refusals | False refusals | p50 / p95 latency |
+|---|---|---|---|---|---|
+| 1 | as first written | 87.5% (21/24) | 3/3 | 0/12 | 24.8 s / 34.7 s |
+| 2 | + 3 hand-verified passages | 92.0% (23/25) | 3/3 | 0/12 | 19.5 s / 31.2 s |
+| 3 | + 2 hand-verified passages | **100.0% (24/24)** | 3/3 | 0/12 | 24.8 s / 50.3 s |
+
+Every citation flagged as wrong in runs 1–2 was checked by hand. Each one stated the answer (a test asserting
+session cookies are not persisted, the Quickstart line on dropping `Authorization` off-host, the
+`get_adapter` prefix tests). So the answer key was widened, not the system; details are in
+`eval/smoke/verification.md`. No grounding threshold or prompt was changed between runs.
+
+Other checks:
+
+| Check | Result |
+|---|---|
+| CI on `phase-1` (ruff, mypy --strict, pytest, eval tests, ESLint, typecheck, Vitest, image build check) | see PR checks |
+| Release pipeline: Playwright e2e (paste → ask → cited answer, real models, mock LLM) runs against the image before it is pushed | pass locally on a fresh container (2.3 min incl. calibration) |
+| Every source type in the container: Docling PDF (11 pages, OCR warning), web page, JavaScript-only page via headless Chromium, YouTube captions, audio upload via Whistle, LAN URL refused | pass |
+| Calibration v4 on the workbench: indexing 10.8 chunks/s (synthetic), ranking 18.4 pairs/s, BF16 for both, 7 threads | pass |
+
+### Known limits (not gate blockers)
+
+- Indexing cost grows with passage length: real code passages (~700 tokens) index at about 3.5/s on the
+  workbench versus 10.8/s for the calibration text. Phase 2 adds time estimates before big adds.
+- Doc-page questions use `requests.readthedocs.io/en/stable/`, built from v2.34.2 today. If a new requests
+  release moves `stable`, re-check `verification.md`.
+- The headless-browser fallback cannot run Chromium's sandbox inside the container (Docker's default
+  seccomp). It renders only public pages, and private addresses are blocked (D-025).

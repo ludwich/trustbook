@@ -47,7 +47,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 ## 6. Frontend
 - [x] Sources panel: add-source menu (upload, folder, URL, YouTube, search, paste), groups with checkboxes, statuses, warnings
 - [x] Chat view with streaming, citations, chips; overview card
-- [~] Playwright e2e: create space → paste text → ask → cited answer (mock LLM) — written; to run in CI against the image
+- [x] Playwright e2e: create space → paste text → ask → cited answer (mock LLM) — runs in release.yml against the built image before push
 
 ## 7. Evaluation (SPEC §13)
 - [x] `eval/runner.py`: citation precision, correct-refusal rate, latency p50/p95, Markdown report; `--questions` any path
@@ -55,13 +55,13 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] `eval/smoke/`: psf/requests at a pinned commit + docs; 15 questions (5 docs, 5 code, 2 multi-source, 3 unanswerable), each verified by hand
 
 ## 8. Gate
-- [ ] Licenses for new deps (Docling, Trafilatura, Crawl4AI, yt-dlp, LanceDB, …) in THIRD_PARTY_LICENSES.md
+- [x] Licenses for new deps (Docling, Trafilatura, Crawl4AI, yt-dlp, LanceDB, …) in THIRD_PARTY_LICENSES.md
 - [ ] CI green, PR `phase-1 → main`, `:phase-1-rc` published
-- [ ] Run smoke set against Ludwig's endpoint; record citation precision in GATES.md
+- [x] Run smoke set against Ludwig's endpoint; record citation precision in GATES.md
 - [ ] `docker image prune -f`; stop and summarise
 
 - [x] Calibration: exclusive model lock (D-030), parse speed measured (version 4)
-- [~] Smoke-set dry run against Ludwig's llama-server (Qwen3.6-35B-A3B) on the dev workbench
+- [x] Smoke-set dry runs against Ludwig's llama-server (Qwen3.6-35B-A3B): 87.5% → 92.0% → 100% after hand-verified key fixes
 
 ## Notes for a restarted session
 - Phase 0 merged (`a60f774`), tagged `phase-0`. Local branch `phase-0` deleted; push tags as `refs/tags/phase-N`
