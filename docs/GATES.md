@@ -94,7 +94,7 @@ and calibration does not run again.
 |---|---|---|---|
 | 1 | Gate 0 finding F1 fixed | Settings → Speed test → "This computer" line and Indexing | "uses N of N CPUs · T model threads · BF16" (BF16 if your CPU supports it). Indexing well above the 4 chunks/s you measured at Gate 0 |
 | 2 | F2, F3 | Same section; power setting High | Speech-to-text reads "N× faster than real time"; High shows at most 8 workers |
-| 3 | **Smoke set (gate)** | `docker compose exec app python /app/eval/runner.py --base-url http://127.0.0.1:8484 --space Smoke --setup /app/eval/smoke/corpus.yaml --questions /app/eval/smoke/questions.yaml --report /data/gate1-report.md --min-precision 0.9` | Exit code 0 and "Citation precision … pass" in `C:/Users/<you>/Trustbook/gate1-report.md`. The first run indexes the corpus (about 4,000 passages: roughly 5–25 min depending on the PC; progress is printed). Rerunning skips sources that are already there |
+| 3 | **Smoke set (gate)** | `docker compose exec app python /app/eval/runner.py --base-url http://127.0.0.1:8484 --space Smoke --setup /app/eval/smoke/corpus.yaml --questions /app/eval/smoke/questions.yaml --report /data/gate1-report.md --min-precision 0.9` | Exit code 0 and "Citation precision … pass" in `C:/Users/<you>/Trustbook/gate1-report.md`. The first run indexes the corpus (about 3,600 passages: roughly 5–25 min depending on the PC; progress is printed). Rerunning skips sources that are already there |
 | 4 | Answers in the UI | Open space **Smoke** → ask "How many redirects does requests follow by default?" | A streamed answer with numbered citations; clicking one opens the source viewer at the highlighted lines of `src/requests/...` |
 | 5 | Refusal | Ask "Does requests support WebSocket connections?" | "Not in your sources" with a suggestion, badge **Refused**, no LLM answer |
 | 6 | Source types | In a new space: upload a PDF, add a web page, a YouTube link, paste text, search the web and add a result | Each reaches **Ready** (or **Failed** with a reason and next step); a scanned/OCR'd PDF shows a warning; a LAN address is refused |
@@ -126,6 +126,7 @@ Other checks:
 | CI on `phase-1` (ruff, mypy --strict, pytest, eval tests, ESLint, typecheck, Vitest, image build check) | see PR checks |
 | Release pipeline: Playwright e2e (paste → ask → cited answer, real models, mock LLM) runs against the image before it is pushed | pass locally on a fresh container (2.3 min incl. calibration) |
 | Every source type in the container: Docling PDF (11 pages, OCR warning), web page, JavaScript-only page via headless Chromium, YouTube captions, audio upload via Whistle, LAN URL refused | pass |
+| Secret scan on the `requests` folder: 4 test TLS private keys (`tests/certs/**.key`) skipped, reported as file, line and rule ID (`private-key`) only; source shows "4 files skipped" | pass |
 | Calibration v4 on the workbench: indexing 10.8 chunks/s (synthetic), ranking 18.4 pairs/s, BF16 for both, 7 threads | pass |
 
 ### Known limits (not gate blockers)
