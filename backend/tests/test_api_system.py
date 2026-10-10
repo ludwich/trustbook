@@ -37,6 +37,7 @@ def test_settings_get_and_put(client: TestClient) -> None:
         "setup_completed": False,
         "workers": 2,
         "thresholds": {"refuse": 0.15, "verify": 0.5},
+        "hints_dismissed": [],
     }
     body = client.put("/api/settings", json={"power": "low"}).json()
     assert (body["power"], body["workers"]) == ("low", 1)

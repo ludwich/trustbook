@@ -165,6 +165,7 @@ class Settings(BaseModel):
     power: Power = "normal"
     setup_completed: bool = False
     thresholds: Thresholds = Field(default_factory=Thresholds)
+    hints_dismissed: list[str] = Field(default_factory=list)  # one-time hints, e.g. chat_grounding
     capabilities: dict[str, CapabilitySettings] = Field(default_factory=default_capabilities)
 
     def capability(self, cap_id: str) -> CapabilitySettings:

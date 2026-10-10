@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import ServicesDep
 from app.config import Power, Settings, Thresholds
@@ -27,12 +27,14 @@ class SettingsOut(BaseModel):
     setup_completed: bool
     workers: int
     thresholds: Thresholds
+    hints_dismissed: list[str]
 
 
 class SettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     power: Power | None = None
+    dismiss_hint: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
 
 
 def _settings_out(settings: Settings) -> SettingsOut:
@@ -41,6 +43,7 @@ def _settings_out(settings: Settings) -> SettingsOut:
         setup_completed=settings.setup_completed,
         workers=workers_for_power(settings.power),
         thresholds=settings.thresholds,
+        hints_dismissed=list(settings.hints_dismissed),
     )
 
 
@@ -80,6 +83,8 @@ def put_settings(body: SettingsUpdate, services: ServicesDep) -> SettingsOut:
     def apply(settings: Settings) -> None:
         if body.power is not None:
             settings.power = body.power
+        if body.dismiss_hint is not None and body.dismiss_hint not in settings.hints_dismissed:
+            settings.hints_dismissed.append(body.dismiss_hint)
 
     updated = services.settings.update(apply)
     services.pool.resize(workers_for_power(updated.power))
