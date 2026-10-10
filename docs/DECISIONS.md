@@ -520,3 +520,27 @@ grounding correctness > data safety > simplicity > performance > features.
   `partially_verified`, not refused.
 - The mock code judge and the `mock` web-search provider exist only when `TRUSTBOOK_MOCK_LLM=1`: the registry
   refuses the provider otherwise, and the adapter factory refuses to build it.
+
+### D-051 Full-text search ignores chunk headers' line numbers
+- **Finding:** code chunks start with `File: path · symbol (lines a-b)`. Full-text search indexed those numbers,
+  so "HTTP 429" first matched chunks whose *line numbers* contain 429, and the status table ranked low.
+- **Decision:** the text indexed for full-text search keeps the path and symbol but drops `(lines a-b)`.
+  The stored chunk text is unchanged. `CHUNKER_VERSION` was bumped so refreshes re-index.
+
+### D-046 (extended) The top of the fused list is guarded too
+- Besides chunks in the top 3 of **both** lists, the top 3 of the RRF-fused list are kept even when the prose
+  reranker drops them. Measured on tree-sitter chunks: the Basic-auth function chunk ranked vector #14 /
+  full-text #3, and the status table vector #8, so the stricter rule alone missed them. Rerank scores still
+  decide refusals.
+
+### D-052 Citations are pruned to the chunks that support a sentence on their own
+- **Finding:** precision fell to 86.4% because models over-cite. A true sentence about netrc look-up also
+  cited two Quickstart chunks that only mention `.netrc`, and passed on the joined premise.
+- **Decision:** when at least one cited chunk passes the checker on its own, only such chunks stay cited. When
+  only the joined or focused premise passed, all stay, because they support the sentence together. Sentences
+  rescued by the code judge keep their citations, since the evidence anchoring already ties them to cited lines.
+
+### D-053 A web or document chunk is named by the section holding most of it
+- A chunk starting in the last lines of one section was labelled with that section (ref-near-09). The
+  `heading` is now the section covering most of the chunk. When it spans several, `headings` lists them all,
+  and the eval runner accepts any of them.

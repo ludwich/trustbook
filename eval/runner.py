@@ -479,11 +479,16 @@ def locator_matches(expected: Locator, loc: dict[str, Any]) -> bool:
         values = raw if isinstance(raw, list) else [raw]
         return any(isinstance(v, int) and v in expected.pages for v in values)
     if expected.heading is not None:
-        heading = loc.get("heading")
-        if not isinstance(heading, str):
-            return False
+        # A chunk names its main section in "heading" and, when it spans several, lists them all
+        # in "headings" (D-053); any of them matches.
+        raw_all = loc.get("headings")
+        candidates = [
+            h for h in (raw_all if isinstance(raw_all, list) else []) if isinstance(h, str)
+        ]
+        if isinstance(loc.get("heading"), str):
+            candidates.insert(0, loc["heading"])
         want = norm_text(expected.heading)
-        return want == norm_text(heading) or want in _heading_parts(heading)
+        return any(want == norm_text(h) or want in _heading_parts(h) for h in candidates)
     if expected.seconds is not None:
         start, end = _num(loc.get("start_s")), _num(loc.get("end_s"))
         if start is None:

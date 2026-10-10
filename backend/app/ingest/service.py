@@ -22,7 +22,7 @@ from app.capabilities.bundled import ProviderRegistry, ProviderUnavailableError
 from app.capabilities.streams import EmbeddedBatch, embed_in_streams
 from app.chunking.tokens import TokenCounter, load_token_counter
 from app.db.models import Source
-from app.index.base import IndexedChunk, IndexRegistry, SpaceIndex
+from app.index.base import IndexedChunk, IndexRegistry, SpaceIndex, search_text
 from app.index.lance import IndexDimensionError
 from app.ingest import errors
 from app.ingest.browse_root import BrowsePathError, BrowseRootMissingError, resolve_in_root
@@ -400,7 +400,7 @@ class IngestService:
     ) -> None:
         """Store ``plan``'s rows, drop stale vectors and embed the new chunks."""
         # Read before the rows are stored: committing expires the row objects.
-        indexed = [IndexedChunk(r.id, source_id, r.text) for r in plan.new_rows]
+        indexed = [IndexedChunk(r.id, source_id, search_text(r.text)) for r in plan.new_rows]
         counts = (len(plan.new_rows), len(plan.rows) - len(plan.new_rows), len(plan.stale_ids))
         # Rows first: retrieval skips indexed ids without a row, and the source is not ready yet.
         repo.replace_chunks(source_id, plan.rows)

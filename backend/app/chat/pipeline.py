@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.chat.citations import number_citations
 from app.chat.llm import ChatAdapterFactory, generate_structured
@@ -100,15 +100,38 @@ def check_sentences(
     return verifier.check([(s.text, [chunks[i] for i in s.chunk_ids]) for s in sentences])
 
 
+def prune_citations(
+    sentence: DraftSentence, scores: tuple[float | None, ...], threshold: float | None
+) -> tuple[DraftSentence, tuple[float | None, ...]]:
+    """Keep only the cited chunks that support the sentence on their own, when any does (D-052).
+
+    Models over-cite: a sentence verified by one chunk often also cites a loosely related one.
+    When at least one cited chunk passes the threshold alone, the others are dropped; when only
+    the joined or focused premise passed, every cited chunk stays (they support it together).
+    """
+    if threshold is None or len(sentence.chunk_ids) < 2:
+        return sentence, scores
+    keep = [i for i, s in enumerate(scores) if s is not None and s >= threshold]
+    if not keep or len(keep) == len(sentence.chunk_ids):
+        return sentence, scores
+    ids = tuple(sentence.chunk_ids[i] for i in keep)
+    return replace(sentence, chunk_ids=ids), tuple(scores[i] for i in keep)
+
+
 def kept_and_removed(
-    sentences: list[DraftSentence], checked: Checked
+    sentences: list[DraftSentence], checked: Checked, threshold: float | None = None
 ) -> tuple[list[tuple[DraftSentence, tuple[float | None, ...]]], list[str]]:
-    """Passing sentences with their per-chunk scores, and the texts of the failing ones."""
+    """Passing sentences with their per-chunk scores, and the texts of the failing ones.
+
+    With ``threshold``, sentences the checker passed cite only the chunks that support them on
+    their own (when any does); see :func:`prune_citations`.
+    """
     kept: list[tuple[DraftSentence, tuple[float | None, ...]]] = []
     removed: list[str] = []
     for sentence, check in zip(sentences, checked.checks, strict=True):
         if check.passed:
-            kept.append((sentence, check.chunk_scores))
+            prune = threshold if check.method == "checker" else None
+            kept.append(prune_citations(sentence, check.chunk_scores, prune))
         else:
             removed.append(sentence.text)
     return kept, removed
@@ -206,7 +229,7 @@ def answer(
         )
         return Refused(refusal("unsupported", question), diagnostics)
 
-    kept, removed = kept_and_removed(parsed.sentences, checked)
+    kept, removed = kept_and_removed(parsed.sentences, checked, verifier.threshold)
     sentences = number_citations([s for s, _ in kept], chunks)
     scores = [
         {chunks[label].chunk_id: score for label, score in zip(s.chunk_ids, cs, strict=True)}

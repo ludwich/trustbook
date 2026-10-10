@@ -178,7 +178,7 @@ def generate_overview(
         raise OverviewError("The chat model's overview did not cite your sources.")
     check_cancelled()
     checked = check_sentences(verifier, parsed.answer.sentences, chunks)
-    kept, removed = kept_and_removed(parsed.answer.sentences, checked)
+    kept, removed = kept_and_removed(parsed.answer.sentences, checked, verifier.threshold)
     if not kept:
         raise OverviewError(UNSUPPORTED_OVERVIEW)
     if removed:

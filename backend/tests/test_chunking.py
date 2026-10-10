@@ -104,7 +104,9 @@ def test_snapshot_locators_pages_and_sections() -> None:
         _sentence(i) for i in range(100)
     )
     drafts = chunk_snapshot(text_snapshot(md), WordCounter())
-    assert drafts[0].locator["heading"] is None
+    # Named by the section holding most of it (D-053), listing every section it spans.
+    assert drafts[0].locator["heading"] == "Usage"
+    assert drafts[0].locator["headings"] == ["Install", "Usage"]
     assert drafts[0].locator["offset"] == 0
     assert any(d.locator["heading"] == "Usage" for d in drafts)
 

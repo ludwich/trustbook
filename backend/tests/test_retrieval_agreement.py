@@ -89,7 +89,8 @@ def test_ref_near_08_shape_kept_although_the_reranker_drops_it(engine: Engine) -
     result = retrieve(engine, index, KeywordEmbedder(), ByText(scores), "Digest default algorithm?")
     ids = [c.chunk_id for c in result.chunks]
     assert digest in ids and len(ids) == 8
-    assert ids[:7] == prose[:7] and ids[-1] == digest  # it replaced the 8th, keeps rerank order
+    assert ids[0] == prose[0]  # the top chunk is never replaced
+    assert ids.index(digest) == len(ids) - 1  # guarded chunks join last; rerank order kept
     assert result.ranked[-1].chunk_id == digest  # ranking and refusal scores are unchanged
     assert result.top_score == pytest.approx(0.9)
 
@@ -111,10 +112,25 @@ def test_no_agreement_means_the_reranker_alone_decides(engine: Engine) -> None:
     source = add_source(engine, "Doc")
     ids = [add_chunk(engine, index, source, f"text {i}", ordinal=i) for i in range(10)]
     index.vector = ids
-    index.text = list(reversed(ids))
+    index.text = ids  # both searches agree with the reranker: nothing to put back
     scores = {f"text {i}": 1.0 - i * 0.05 for i in range(10)}
     result = retrieve(engine, index, KeywordEmbedder(), ByText(scores), "text")
     assert [c.chunk_id for c in result.chunks] == ids[:8]
+
+
+def test_the_top_of_the_fused_list_survives_reranking(engine: Engine) -> None:
+    """Full-text #1 and vector #3 put a chunk in the fused top 3; the reranker drops it anyway."""
+    index = Pinned()
+    source = add_source(engine, "requests", source_type="folder")
+    table = add_chunk(engine, index, source, "429: (too_many_requests, too_many)", ordinal=0)
+    other = [add_chunk(engine, index, source, f"status text {i}", ordinal=i + 1) for i in range(12)]
+    index.vector = [*other[:2], table, *other[2:]]
+    index.text = [table, *other]
+    scores = {f"status text {i}": 0.9 - i * 0.01 for i in range(12)}
+    scores["429: (too_many_requests, too_many)"] = 0.05
+    result = retrieve(engine, index, KeywordEmbedder(), ByText(scores), "HTTP 429 name?")
+    assert table in [c.chunk_id for c in result.chunks]
+    assert result.top_score == pytest.approx(0.9)  # the refusal threshold still sees rerank scores
 
 
 def test_keep_agreed_respects_the_token_budget_and_protects_the_top_chunk() -> None:

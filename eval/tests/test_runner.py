@@ -787,3 +787,15 @@ def test_main_exits_1_when_must_contain_is_below_target(tmp_path: Path) -> None:
         "| must_contain hit rate (answerable with keywords) | 0.0% (0/1) | >= 80% | **FAIL** |"
         in text
     )
+
+
+def test_heading_locator_matches_any_listed_section() -> None:
+    from runner import Locator, locator_matches
+
+    expected = Locator(heading="Blocking Or Non-Blocking?")
+    spanning = {
+        "heading": "Example: Specific SSL Version",
+        "headings": ["Example: Specific SSL Version", "Blocking Or Non-Blocking?"],
+    }
+    assert locator_matches(expected, spanning)
+    assert not locator_matches(expected, {"heading": "Example: Specific SSL Version"})

@@ -205,3 +205,16 @@ def test_refusals_before_generation_carry_the_top_score() -> None:
     none = Retrieval(chunks=[], ranked=[], source_ids=[])
     outcome, _ = run(ScriptedChat(), found=none)
     assert isinstance(outcome, Refused) and outcome.diagnostics.top_rerank is None
+
+
+def test_citations_are_pruned_to_the_chunks_that_support_a_sentence_alone() -> None:
+    from app.chat.output import DraftSentence
+    from app.chat.pipeline import prune_citations
+
+    sentence = DraftSentence("netrc is read from ~/.netrc.", ("c1", "c2", "c3"))
+    pruned, scores = prune_citations(sentence, (0.9, 0.2, 0.6), 0.5)
+    assert (pruned.chunk_ids, scores) == (("c1", "c3"), (0.9, 0.6))
+    # Only the joined/focused premise passed: every cited chunk stays.
+    assert prune_citations(sentence, (0.2, 0.3, 0.1), 0.5)[0].chunk_ids == ("c1", "c2", "c3")
+    # Checker off (no threshold) or a single citation: untouched.
+    assert prune_citations(sentence, (0.9, 0.2, 0.6), None)[0] == sentence

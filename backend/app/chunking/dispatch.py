@@ -26,12 +26,18 @@ def page_locator(segments: list[Segment]) -> Locate:
 
 def section_locator(segments: list[Segment]) -> Locate:
     def locate(start: int, end: int) -> dict[str, Any]:
-        heading: str | None = None
-        for segment in segments:
-            if segment.start <= start < segment.end:
-                heading = segment.heading
-                break
-        return {"heading": heading, "offset": start}
+        # The section holding most of the chunk names it (a chunk that starts in the last lines
+        # of one section is about the next one); every section it spans is listed too (D-053).
+        spans = [
+            (min(end, s.end) - max(start, s.start), s.heading)
+            for s in _overlapping(segments, start, end)
+        ]
+        headings = list(dict.fromkeys(h for _, h in spans if h))
+        heading = max(spans, key=lambda item: item[0])[1] if spans else None
+        locator: dict[str, Any] = {"heading": heading, "offset": start}
+        if len(headings) > 1:
+            locator["headings"] = headings
+        return locator
 
     return locate
 
@@ -70,7 +76,7 @@ def _file_document_locator(text: str, entry: FileEntry, segments: list[Segment])
 
 # Changes whenever chunking a file gives different chunks; a refresh re-chunks files indexed with
 # another version instead of keeping their chunks (incremental refresh, SPEC §7.5).
-CHUNKER_VERSION = "p3-treesitter-1"
+CHUNKER_VERSION = "p3-treesitter-3"  # 2: FTS without header line numbers; 3: section = majority
 
 
 def chunk_file(snapshot: Snapshot, entry: FileEntry, counter: TokenCounter) -> list[ChunkDraft]:

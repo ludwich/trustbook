@@ -33,6 +33,7 @@ from app.retrieval.store import ChunkRow, load_chunks, usable_sources
 logger = logging.getLogger("trustbook.retrieval")
 
 AGREEMENT_TOP = 3
+FUSED_TOP = 3  # the top of the RRF list is guarded too
 
 
 @dataclass(frozen=True)
@@ -194,7 +195,10 @@ def search(
     missing = len(fused) - len(ordered)
     if missing:
         logger.warning("%d indexed chunk(s) have no row in space.db; skipped", missing)
-    agreed = [cid for cid in agreed_ids(vector_hits, text_hits) if cid in rows]
+    # Kept even if the reranker drops them: chunks both searches rank top 3, and the top of the
+    # fused list (D-046; the prose reranker under-rates code chunks).
+    guarded = agreed_ids(vector_hits, text_hits) + [f.chunk_id for f in fused[:FUSED_TOP]]
+    agreed = [cid for cid in dict.fromkeys(guarded) if cid in rows]
     return Candidates(ordered[:RERANK_TOP], agreed)
 
 

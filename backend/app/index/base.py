@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
+
+_LINES_IN_HEADER = re.compile(r"^(File: [^\n]*?)\s*\(lines \d+-\d+\)", re.MULTILINE)
+
+
+def search_text(chunk_text: str) -> str:
+    """The text indexed for full-text search: a code chunk's header keeps path and symbol but loses
+    its line numbers, so a query for "429" matches content, not "(lines 425-450)" (D-051)."""
+    return _LINES_IN_HEADER.sub(r"\1", chunk_text, count=1)
 
 
 @dataclass(frozen=True)
