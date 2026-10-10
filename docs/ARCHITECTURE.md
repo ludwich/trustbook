@@ -360,3 +360,28 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build      # → frontend/dist
   So `compose.yaml` works when downloaded alone.
 - Entry point drops privileges to the owner of `/data` when that owner is not root, so files on a
   Linux host belong to the user (Windows/macOS bind mounts are unaffected).
+
+## Phase 2 additions
+
+### Gate 1 follow-ups
+- `Settings` gains `"workers_by_power": {"low": int, "normal": int, "high": int}` (the real, capped counts).
+- `GET /api/spaces/{sid}/sources/{source_id}/secrets` → `{"files_skipped": int, "findings": [{"file": str, "line": int, "rule_id": str}]}`
+  (`404` when the source has no secrets report). Never contains secret values.
+- A source that fails is stored with `enabled: false`; a later successful refresh re-enables it. `PATCH`/`PUT enabled`
+  on a failed source → `409`.
+- `GET /api/spaces/{sid}/chunks/{chunk_id}/context` → `ChunkContext` (the source viewer; replaces client-side
+  offset slicing of the whole snapshot):
+
+```
+ChunkContext = {"chunk": {...as GET /chunks/{id}...}, "source_type": str, "view": "code"|"text",
+  "code"?: {"file": str, "commit": str|null, "language": str|null,
+            "first_line": int, "lines": [str],            // the whole file, or a window of ±200 lines for long files
+            "highlight": [int, int]},                     // inclusive 1-based line range of the cited chunk
+  "text"?: {"label": str|null,                            // "Page 3", "Pages 3–4", "Section: Install", "01:02–01:45"
+            "before": str, "highlight": str, "after": str}} // ≤ ~1,500 characters of context on each side
+```
+
+- Refusal `suggestion`: a readable sentence built from the question, e.g. `Add sources that cover “how to set a
+  base URL for Session calls”, then ask again.` (no keyword lists).
+- Web search via SearXNG sends `language=en`. Results whose URL has no path (bare homepages) move below
+  results with a path when the query has three or more words.
