@@ -204,7 +204,7 @@ def test_model_failure_mid_way_fails_cleanly(
     stream_client: TestClient, replicas: list[Replica]
 ) -> None:
     services = services_of(stream_client)
-    sid, _created = _paste(stream_client)
+    _paste(stream_client)
     services.providers.ingest_embedder(1).fail_after = 4  # type: ignore[attr-defined]
     run_jobs(services)
     source = stream_client.get(f"/api/spaces/{sid}/sources").json()[0]
@@ -246,3 +246,26 @@ def test_refresh_replaces_changed_vectors_without_duplicates(
     source = stream_client.get(f"/api/spaces/{sid}/sources").json()[0]
     assert source["stats"]["changed_files"] == 1
     assert source["stats"]["unchanged_files"] == 11
+
+
+def test_replicas_are_released_when_no_more_indexing_waits(
+    stream_client: TestClient, replicas: list[Replica]
+) -> None:
+    """Replicas hold ~0.55 GB each; idle indexing must not keep them (D-054)."""
+    services = services_of(stream_client)
+    _paste(stream_client)
+    assert run_jobs(services) == 1
+    assert len(replicas) == 3  # the job used three stream replicas
+    assert services.providers._replicas == {}  # released after the last ingest job
+    services.providers.ingest_embedder(1)  # the next indexing job loads them again
+    assert len(replicas) == 4
+
+
+def test_others_unfinished_counts_only_other_jobs_of_that_kind(
+    stream_client: TestClient,
+) -> None:
+    jobs = services_of(stream_client).jobs
+    first = jobs.enqueue("ingest", "a")
+    jobs.enqueue("ingest", "b")
+    jobs.enqueue("overview", "c")
+    assert jobs.others_unfinished("ingest", first.id) == 1

@@ -404,6 +404,22 @@ class ProviderRegistry:
                     return cast(Embedder, instance)  # settings changed while loading: don't keep it
                 return cast(Embedder, self._replicas.setdefault(slot, instance))
 
+    def release_replicas(self) -> int:
+        """Drop the indexing replicas (about 0.55 GB each in BF16) once indexing is idle (D-054).
+
+        They are loaded again on the next indexing job. Chat never uses them. Returns how many
+        were dropped.
+        """
+        with self._lock:
+            dropped = len(self._replicas)
+            self._replicas.clear()
+        if dropped:
+            import gc
+
+            gc.collect()
+            logger.info("Released %d embedding replica(s) after indexing", dropped)
+        return dropped
+
     def reranker(self) -> Reranker:
         return cast(Reranker, self._get("reranker"))
 

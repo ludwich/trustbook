@@ -298,6 +298,10 @@ class IngestService:
         except Exception:
             logger.exception("Ingest of source %s failed", source.id)
             self._fail_quietly(repo, source, fail(errors.INTERNAL))
+        finally:
+            # Indexing replicas hold GBs; keep them only while more indexing is waiting (D-054).
+            if self.jobs.others_unfinished(INGEST_KIND, ctx.job_id) == 0:
+                self.providers.release_replicas()
             raise
 
     def _fail_quietly(self, repo: SourceRepository, source: Source, exc: IngestError) -> None:

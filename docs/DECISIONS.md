@@ -544,3 +544,15 @@ grounding correctness > data safety > simplicity > performance > features.
 - A chunk starting in the last lines of one section was labelled with that section (ref-near-09). The
   `heading` is now the section covering most of the chunk. When it spans several, `headings` lists them all,
   and the eval runner accepts any of them.
+
+### D-054 Memory: release indexing replicas; score the grounding checker in small batches
+- **Finding:** in the Gate 3 dry run the app was killed by the out-of-memory killer (`OOMKilled=true`)
+  while verifying an answer right after indexing in the same container. Two causes stacked up:
+  - The embedding replicas from the parallel streams (D-038) stayed resident after indexing (~2.2 GB).
+  - The grounding checker scored all pairs of an answer in one batch, padded to the longest premise. Joined
+    premises could reach 32,000 characters, and T5 attention memory grows with the square of the length.
+- **Decision:**
+  - When an ingest job ends and no other ingest job is waiting, the replicas are released. They load again
+    for the next indexing job; chat never uses them.
+  - The grounding checker scores in length-sorted batches of 4, with premises capped at 6,000 characters
+    (~1,500 tokens; HHEM was trained on 512, and focused windows are 1,200 characters).
