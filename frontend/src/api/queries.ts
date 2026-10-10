@@ -97,12 +97,17 @@ export function useTestCapability(id: CapabilityId) {
         void qc.invalidateQueries({ queryKey: queryKeys.capabilities });
       }
     },
+    // The test sends a request to the endpoint, which the request log records (even on failure).
+    onSettled: () => void qc.invalidateQueries({ queryKey: queryKeys.requestLog }),
   });
 }
 
 export function useListModels(id: CapabilityId) {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (draft: CapabilityConfigUpdate) => api.listModels(id, draft),
+    // Listing models calls the endpoint, which the request log records.
+    onSettled: () => void qc.invalidateQueries({ queryKey: queryKeys.requestLog }),
   });
 }
 

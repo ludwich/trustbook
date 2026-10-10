@@ -140,6 +140,7 @@ describe("setup wizard", () => {
     expect(tests[0]).toMatchObject({ preset: "openai", api_key: "sk-test" });
     // Remote endpoints say where data goes.
     expect(screen.getByText(/sent to/)).toHaveTextContent("api.openai.com");
+    expect(within(screen.getByTestId("draft-locality")).getByText("Remote")).toBeInTheDocument();
   });
 
   it("loads model suggestions from the endpoint", async () => {

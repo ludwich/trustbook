@@ -1,11 +1,4 @@
-import {
-  IconArrowLeft,
-  IconArrowRight,
-  IconCheck,
-  IconDeviceLaptop,
-  IconPlugConnected,
-  IconWorldUpload,
-} from "@tabler/icons-react";
+import { IconArrowLeft, IconArrowRight, IconCheck, IconPlugConnected } from "@tabler/icons-react";
 import { useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import { ApiError } from "@/api/client";
@@ -139,17 +132,21 @@ function StepCard({
 function DraftLocality({ url }: { url: string }) {
   const loc = url ? localityOfUrl(url) : null;
   if (!loc) return null;
-  return loc.locality === "local" ? (
-    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      <IconDeviceLaptop className="size-3.5" aria-hidden />
-      Local: runs on this computer.
-    </p>
-  ) : (
-    <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      <IconWorldUpload className="size-3.5 text-warning" aria-hidden />
-      Remote: your questions and the relevant passages from your sources are sent to{" "}
-      <span className="font-mono">{loc.host}</span>.
-    </p>
+  // Badge + one inline sentence: a flex <p> would split the host and "." into separate columns.
+  return (
+    <div className="flex items-start gap-2" data-testid="draft-locality">
+      <LocalityBadge locality={loc.locality} host={loc.host} />
+      <p className="text-xs text-muted-foreground">
+        {loc.locality === "local" ? (
+          "Runs on this computer."
+        ) : (
+          <>
+            Your questions and the relevant passages from your sources are sent to{" "}
+            <span className="font-mono whitespace-nowrap">{loc.host}</span>.
+          </>
+        )}
+      </p>
+    </div>
   );
 }
 

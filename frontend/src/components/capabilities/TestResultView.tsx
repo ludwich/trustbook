@@ -3,6 +3,9 @@ import type { TestResult } from "@/api/types";
 import { formatRelative } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
+/** The chat test already says "replied in 4.8 s"; don't repeat the time in milliseconds. */
+const MENTIONS_TIME = /\d\s?(ms|s)\b/;
+
 export function TestResultView({
   result,
   previous = false,
@@ -33,7 +36,9 @@ export function TestResultView({
         <span className="text-foreground/80">
           {" — "}
           {result.message}
-          {result.latency_ms !== null && ` (${result.latency_ms.toLocaleString("en-US")} ms)`}
+          {result.latency_ms !== null &&
+            !MENTIONS_TIME.test(result.message) &&
+            ` (${result.latency_ms.toLocaleString("en-US")} ms)`}
         </span>
         {previous && (
           <span className="text-muted-foreground"> · {formatRelative(result.tested_at)}</span>

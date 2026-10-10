@@ -99,4 +99,30 @@ describe("settings", () => {
     await user.click(within(dialog).getByRole("button", { name: "Clear log" }));
     expect(await within(section).findByText("Nothing sent yet")).toBeInTheDocument();
   });
+
+  it("refreshes the request log after a capability test, which sends a logged request", async () => {
+    const user = userEvent.setup();
+    let entries: RequestLogEntry[] = [];
+    server.use(
+      http.get("*/api/request-log", () => HttpResponse.json(entries)),
+      http.post("*/api/capabilities/embeddings/test", () => {
+        entries = [entry];
+        return HttpResponse.json({
+          ok: true,
+          message: "Connected.",
+          latency_ms: 120,
+          tested_at: "2026-10-10T08:15:00Z",
+        });
+      }),
+    );
+    renderApp("/settings");
+    const section = (await screen.findByRole("heading", { name: "Request log" })).closest(
+      "section",
+    )!;
+    expect(await within(section).findByText("Nothing sent yet")).toBeInTheDocument();
+
+    const card = await screen.findByTestId("capability-card-embeddings");
+    await user.click(within(card).getByRole("button", { name: "Test" }));
+    expect(await within(section).findByText("api.openai.com")).toBeInTheDocument();
+  });
 });
