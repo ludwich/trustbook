@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatEta, plural } from "./format";
+import { formatBytes, formatComputer, formatEta, formatRealtimeFactor, plural } from "./format";
 import { localityOfUrl } from "./locality";
 import { workersFor } from "./power";
 
@@ -40,5 +40,51 @@ describe("helpers", () => {
     expect(workersFor("high", 8)).toBe("6 workers");
     expect(workersFor("high", 2)).toBe("2 workers");
     expect(workersFor("high", null)).toBe("most CPU cores");
+  });
+});
+
+describe("formatRealtimeFactor", () => {
+  it("shows faster-than-real-time as a multiple", () => {
+    expect(formatRealtimeFactor(0.04)).toBe("25× faster than real time");
+    expect(formatRealtimeFactor(0.4)).toBe("2.5× faster than real time");
+    expect(formatRealtimeFactor(0.18)).toBe("5.6× faster than real time");
+    expect(formatRealtimeFactor(0.033)).toBe("30× faster than real time");
+  });
+  it("treats values near 1 as about real time", () => {
+    expect(formatRealtimeFactor(1.0)).toBe("about real time");
+    expect(formatRealtimeFactor(0.96)).toBe("about real time");
+    expect(formatRealtimeFactor(1.05)).toBe("about real time");
+  });
+  it("shows slower-than-real-time as the factor itself", () => {
+    expect(formatRealtimeFactor(2.5)).toBe("2.5× slower than real time");
+    expect(formatRealtimeFactor(12.3)).toBe("12× slower than real time");
+  });
+  it("handles missing or invalid values", () => {
+    expect(formatRealtimeFactor(null)).toBe("Not measured");
+    expect(formatRealtimeFactor(undefined)).toBe("Not measured");
+    expect(formatRealtimeFactor(0)).toBe("Not measured");
+  });
+});
+
+describe("formatComputer", () => {
+  const cpu = { model: "AMD Ryzen AI Max+ 395", logical: 32, usable: 32 };
+  const runtime = { torch_threads: 16, embedding_dtype: "bfloat16" };
+  it("joins model, CPUs, threads and precision", () => {
+    expect(formatComputer(cpu, runtime)).toBe(
+      "AMD Ryzen AI Max+ 395 · uses 32 of 32 CPUs · 16 model threads · BF16",
+    );
+  });
+  it("omits unknown parts and defaults precision to FP32", () => {
+    expect(
+      formatComputer(
+        { model: null, logical: 8, usable: 6 },
+        { torch_threads: null, embedding_dtype: null },
+      ),
+    ).toBe("uses 6 of 8 CPUs · FP32");
+    expect(formatComputer(cpu, null)).toBe("AMD Ryzen AI Max+ 395 · uses 32 of 32 CPUs");
+  });
+  it("returns null for results without CPU or runtime details", () => {
+    expect(formatComputer(undefined, undefined)).toBeNull();
+    expect(formatComputer(null, null)).toBeNull();
   });
 });

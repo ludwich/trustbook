@@ -217,6 +217,26 @@ export interface Calibration {
   parse_pages_per_s: number | null;
   stt_realtime_factor: number | null;
   notes: string[];
+  /** Calibration v3+. Absent in older saved results. */
+  cpu?: CalibrationCpu | null;
+  /** Calibration v3+. Absent in older saved results. */
+  runtime?: CalibrationRuntime | null;
+}
+
+export interface CalibrationCpu {
+  model: string | null;
+  logical: number;
+  usable: number;
+  physical: number | null;
+  bf16: boolean;
+}
+
+export type ModelDtype = "float32" | "bfloat16";
+
+export interface CalibrationRuntime {
+  torch_threads: number | null;
+  embedding_dtype: ModelDtype | null;
+  reranker_dtype: ModelDtype | null;
 }
 
 export interface CalibrationState {
