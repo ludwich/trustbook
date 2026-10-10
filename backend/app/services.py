@@ -13,6 +13,8 @@ from app.capabilities.registry import CapabilityRegistry
 from app.config import Paths, SettingsStore, ensure_layout
 from app.db.engine import get_engine
 from app.db.migrate import migrate
+from app.index.base import IndexRegistry
+from app.index.memory import InMemoryIndexRegistry
 from app.jobs.calibration import CALIBRATE_KIND, CalibrationService
 from app.jobs.handlers import HandlerRegistry, default_handlers
 from app.jobs.pool import WorkerPool, workers_for_power
@@ -34,6 +36,7 @@ class Services:
     handlers: HandlerRegistry
     pool: WorkerPool
     calibration: CalibrationService
+    indexes: IndexRegistry
 
     def cancel_space_jobs(self, space_id: str) -> None:
         """Cancel a space's jobs; running ones are asked to stop."""
@@ -47,6 +50,7 @@ def build_services(
     providers: ProviderRegistry | None = None,
     transport: httpx.BaseTransport | None = None,
     handlers: HandlerRegistry | None = None,
+    indexes: IndexRegistry | None = None,
 ) -> Services:
     """Create the data layout, migrate global.db and wire every service together."""
     ensure_layout(paths)
@@ -94,6 +98,8 @@ def build_services(
         handlers=handlers,
         pool=pool,
         calibration=calibration,
+        # TODO(ingestion): default to the LanceDB registry once app/index/lance.py exists.
+        indexes=indexes or InMemoryIndexRegistry(),
     )
     spaces.set_cancel_jobs(services.cancel_space_jobs)
     return services

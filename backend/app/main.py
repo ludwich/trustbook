@@ -13,11 +13,23 @@ import httpx
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-from app.api import calibration, capabilities, jobs, request_log, spaces, system
+from app.api import (
+    browse,
+    calibration,
+    capabilities,
+    chat,
+    jobs,
+    overview,
+    request_log,
+    sources,
+    spaces,
+    system,
+)
 from app.api.errors import install_error_handlers
 from app.capabilities.bundled import ProviderRegistry
 from app.config import Paths
 from app.db.engine import dispose_all
+from app.index.base import IndexRegistry
 from app.jobs.handlers import HandlerRegistry
 from app.services import build_services
 
@@ -38,7 +50,18 @@ def _configure_logging() -> None:
 
 def _api_router() -> APIRouter:
     router = APIRouter(prefix="/api")
-    for module in (system, capabilities, spaces, jobs, request_log, calibration):
+    for module in (
+        system,
+        capabilities,
+        spaces,
+        jobs,
+        request_log,
+        calibration,
+        sources,
+        browse,
+        chat,
+        overview,
+    ):
         router.include_router(module.router)
     return router
 
@@ -69,6 +92,7 @@ def create_app(
     start_workers: bool = True,
     calibrate_on_start: bool = True,
     probe_search_on_start: bool = True,
+    indexes: IndexRegistry | None = None,
 ) -> FastAPI:
     """Create the app. All arguments exist so tests can inject fakes and a tmp data folder."""
     _disable_third_party_telemetry()
@@ -78,7 +102,7 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _configure_logging()
         services = build_services(
-            resolved, providers=providers, transport=transport, handlers=handlers
+            resolved, providers=providers, transport=transport, handlers=handlers, indexes=indexes
         )
         requeued = services.jobs.requeue_interrupted()
         if requeued:
