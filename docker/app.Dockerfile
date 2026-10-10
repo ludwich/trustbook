@@ -44,8 +44,8 @@ COPY --from=uv /uv /usr/local/bin/uv
 
 # Shared libraries Chromium's headless shell links against (D-025), plus one font family.
 # Playwright's --with-deps would add ~400 MB more (full font sets, X11 tools).
+# Debian package versions follow the base image; pinning them here would break rebuilds.
 # hadolint ignore=DL3008
-# (Debian package versions follow the pinned base image; pinning them here breaks rebuilds.)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libdbus-1-3 libdrm2 \
