@@ -140,3 +140,125 @@ grounding correctness > data safety > simplicity > performance > features.
   usable). Calibration stores the real RTF, so estimates stay honest. Revisit in Phase 1 when STT is used for
   audio and YouTube: if calibrated RTF > 1.0, prefer the SPEC fallback (`pywhispercpp`, which takes an
   explicit thread count) or a configured STT endpoint.
+
+## 2026-10-10 — Phase 1
+
+### D-020 Bundled models were slow in containers: thread count and FP32 (Gate 0 finding F1)
+- **Finding:** Ludwig's 32-thread laptop (Docker Desktop, WSL2) measured 4 chunks/s and 8.9 pairs/s. That
+  is the same raw throughput as the 8-CPU dev container (~470 GFLOP/s embedding, ~560–620 ranking, at
+  ~117 GFLOP per 450-token chunk). So his container effectively used about 8 cores' worth.
+- **Cause:**
+  1. Trustbook never set a model thread count. Torch picks one once, at import, from the CPU topology the
+     container shows, which inside Docker Desktop/WSL2 or nested containers need not match the CPUs the
+     process may use: here the LXC shows 2 "physical" cores for 8 usable CPUs, and Docker shows 32 CPUs
+     for 8 usable. Jobs call the models from worker threads, and OpenMP/MKL keep their thread settings per
+     calling thread, so even a correct import-time setting is not guaranteed to reach them.
+  2. Everything ran in FP32, although the CPU has native BF16 (AVX-512 BF16).
+- **Decision:**
+  - Calibration (version 3) records the CPU: model, visible CPUs, usable CPUs, physical cores, BF16.
+  - It measures embedding speed at several thread counts (all usable CPUs, physical cores, half) and keeps
+    the fastest.
+  - It compares BF16 against FP32 for embeddings and the reranker. BF16 is kept only if it is ≥ 1.25×
+    faster and gives the same results: every embedding at cosine ≥ 0.99 to its FP32 twin, every reranker
+    score within 0.03.
+  - The chosen thread count is applied in every thread that calls a model. Before calibration, the default
+    is all usable CPUs.
+  - The grounding checker always runs in FP32 (grounding correctness before speed). FP16 is never used.
+- **Result on the dev container:** indexing 2.25 → 11.05 chunks/s, ranking 6.9 → 23.8 pairs/s (7 threads,
+  BF16 for both). Ludwig's machine could not be measured from here. The Speed test now shows
+  "uses U of L CPUs · T model threads · BF16/FP32", so Gate 1 confirms the fix there.
+- **Note:** BF16 and FP32 embeddings of the same text agree at cosine ≥ 0.99, so a space indexed before a
+  recalibration stays usable.
+
+### D-021 "High" power is capped (Gate 0 finding F3)
+- **Decision:** High = max(2, usable CPUs − 2), capped at **8** workers and by memory:
+  (memory − 4 GB) / 1.5 GB, where memory is the cgroup limit or the machine total. It never goes below Normal's 2.
+- **Reason:** 30 workers on a 32-CPU laptop. The models are loaded once per process and shared, but every
+  running job holds its own document and parser state (Docling in Phase 1), and parallel model calls only
+  compete for the same cores.
+
+### D-022 Speech-to-text shown as "N× faster than real time" (Gate 0 finding F2)
+- **Decision:** the stored value stays the real-time factor (processing seconds per audio second). The UI
+  shows 1/factor as "N× faster than real time", or "N× slower than real time" when the factor is above 1.
+
+### D-023 Linked folders index code with the fallback chunker until Phase 3
+- **Decision:** in Phase 1, code files in a linked folder are chunked with the generic chunker from SPEC §7.3
+  (blank-line blocks, target 400, max 800 tokens; locator = file + lines). Phase 3 adds tree-sitter for
+  C#, TypeScript, JavaScript and Python.
+- **Reason:** Gate 1 runs the smoke set, which includes 5 code questions about `psf/requests`. The §7.3
+  chunker is already specified, and its locators are file + line ranges, as the later code checks need.
+
+### D-024 Secret scanning of linked folders starts in Phase 1
+- **Decision:** run `gitleaks detect --no-git` on every linked folder before indexing (SPEC §7.4), from
+  Phase 1 instead of Phase 3. Files with findings are skipped and reported by file, line and rule ID only.
+- **Reason:** data safety ranks above features. Without the scan, a secret in a linked folder could end up
+  in a chunk sent to a remote chat endpoint. The gitleaks binary is MIT and small.
+
+### D-025 Headless-browser fallback is plain Playwright, not Crawl4AI
+- **Decision:** when Trafilatura gets < 200 characters, render the page with Playwright 1.63 (Apache-2.0)
+  and Chromium's headless shell (BSD-3-Clause, third-party notices shipped), then run Trafilatura on the
+  rendered HTML. The browser blocks requests to private, loopback and link-local addresses and to `file:`,
+  and blocks downloads and service workers.
+- **Reason:** Crawl4AI's LICENSE adds an attribution requirement on top of Apache-2.0, so it fails the
+  license rule. It also pulls 62 packages (a LiteLLM fork, two browser drivers, nltk) and writes to HOME on
+  import. SPEC §15: the most widely used MIT/Apache option.
+
+### D-026 Phase 1 parsing and index stack
+- **Docling** `docling-slim==2.137.0` (MIT), with only the extras for PDF/DOCX/PPTX/XLSX and RapidOCR
+  (Apache-2.0, PP-OCRv6 small, torch backend). Baked models: layout
+  `docling-project/docling-layout-heron@8f39ad3c…` (Apache-2.0); TableFormer "accurate"
+  `docling-project/docling-models@2199320848…`, the commit that dual-licenses the same weights as
+  Apache-2.0 (the `v2.3.0` tag Docling asks for says CDLA-Permissive-2.0 only). Docling gets the calibrated
+  thread count (`AcceleratorOptions`), since its stages otherwise call `set_num_threads(4)` (D-020).
+  Remote services and external plugins are explicitly off. Offline use was verified with no network access.
+- **pypdf** 6.20 (BSD-3) stays as the SPEC fallback and as the fast "does this PDF have text?" check.
+- **Trafilatura** 2.3.1 (Apache-2.0); the snapshot date is the fetch date (its own guess is unreliable).
+- **yt-dlp** 2026.8.19 (Unlicense), plain install (the `[default]` extra adds GPL `mutagen`), `cachedir=False`.
+- **LanceDB** 0.40 + pyarrow 26 (Apache-2.0), native FTS, embedded; no network (verified with strace).
+- **Token counts** come from EmbeddingGemma's own `tokenizer.json` (already baked); no new dependency.
+
+### D-027 Further transitive license exceptions (extends D-009)
+- `tld` (via Trafilatura → courlan) is MPL-1.1 / GPL-2.0 / LGPL-2.1+: we take **MPL-1.1**, unmodified.
+- `opencv-python-headless` (Apache-2.0, required by Docling's TableFormer) bundles LGPL-2.1 FFmpeg
+  libraries, GCC runtime libraries (GPL-3 with the runtime exception) and OpenSSL 1.1.1k (end of life;
+  Trustbook never uses OpenCV's networking).
+- `av` (PyAV, BSD-3-Clause) decodes audio for STT (YouTube audio, mp3/m4a uploads). Its wheels bundle LGPL
+  FFmpeg, dynamically linked and unmodified. There is no allowlisted decoder for AAC/Opus.
+- Chromium's headless shell ships `LICENSE.headless_shell` with third-party (incl. LGPL) notices. It is kept
+  in the image, and Playwright's separate ffmpeg (video recording only) is deleted.
+- **Reason:** no allowlisted alternative provides these capabilities. All are used unmodified, as
+  separately replaceable shared libraries.
+
+### D-028 Phase 1 UI choices
+- **Wording:** chunks are called "passages" in the UI. "Using X of Y sources": X = ticked and ready, Y = ready.
+- **Refresh:** also offered for `search` sources (they are web pages). The home folder itself cannot be linked
+  as one source (too broad).
+- **Deferred:** the time estimate before large adds (SPEC §11) comes with the estimates work in Phase 2,
+  as SPEC §14 lists it.
+- **Bundle size:** the size warning limit is 800 kB (561 kB bundle, served from localhost only).
+- New runtime dependency `@radix-ui/react-dropdown-menu` (MIT, accessible menus). New dev dependency
+  `@playwright/test` (Apache-2.0).
+
+### D-029 Grounded chat choices (Phase 1)
+- A sentence that cites any chunk id not given in the prompt is dropped, even if its other ids are valid
+  (stricter than SPEC §8 layer 3; grounding first).
+- A reply that is unusable twice, or whose sentences all lack valid ids, is refused as "No answer with
+  citations" (`invalid_output`). An empty `sentences` list is "Not in your sources".
+- Token budget: the top chunk is always kept; chunks that don't fit are skipped and smaller ones still tried.
+- If full-text search fails, retrieval falls back to vector hits, still filtered and reranked, and still
+  subject to the refusal threshold.
+- Overview: a generic "main topics" query plus each source's first chunk, reranked, then chosen
+  round-robin across sources within 8 chunks / 6,000 tokens. Citations are forced. It is stale when the set of
+  enabled, ready sources (or their snapshot times) changes.
+- **The overview is generated automatically only when the chat endpoint is local.** When it is remote, the
+  card shows the token estimate and waits for "Write overview" (SPEC §11: estimates before the overview when
+  the endpoint is remote). It is never refreshed automatically.
+- Layer 1 is enforced by a test that follows every import reachable from `app/chat` and `app/retrieval` and
+  fails on any ingestion, parsing, search, fetching or socket code.
+
+### D-030 Calibration gets the CPU to itself
+- **Finding:** on a fresh install, calibration ran while the first sources were being indexed. The contention
+  made BF16 look no faster (so embeddings stayed FP32) and calibrated speeds came out about 3× too low.
+- **Decision:** the bundled models sit behind a writer-preferring readers-writer lock. Parsing, embedding,
+  retrieval and the overview use it shared. Calibration takes it exclusively: it waits for current model work
+  to finish, and new model work waits until calibration is done (about a minute, once).

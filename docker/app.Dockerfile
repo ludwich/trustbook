@@ -42,6 +42,28 @@ ARG BAKE_MODELS=1
 
 COPY --from=uv /uv /usr/local/bin/uv
 
+# Shared libraries Chromium's headless shell links against (D-025), plus one font family.
+# Playwright's --with-deps would add ~400 MB more (full font sets, X11 tools).
+# Debian package versions follow the base image; pinning them here would break rebuilds.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libdbus-1-3 libdrm2 \
+        libgbm1 libglib2.0-0t64 libnspr4 libnss3 libxcomposite1 libxdamage1 libxfixes3 \
+        libxkbcommon0 libxrandr2 libxi6 fonts-liberation ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# gitleaks (MIT) scans linked folders for secrets before indexing (SPEC §7.4, D-024).
+ARG GITLEAKS_VERSION=8.30.1
+ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+ADD --checksum=sha256:${GITLEAKS_SHA256} \
+    https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz \
+    /tmp/gitleaks.tar.gz
+RUN tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+    && rm /tmp/gitleaks.tar.gz \
+    && chmod 0755 /usr/local/bin/gitleaks \
+    && gitleaks version
+
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
@@ -68,6 +90,15 @@ RUN --mount=type=cache,id=trustbook-uv,target=/root/.cache/uv \
         uv sync --frozen --no-dev --no-install-project; \
     fi
 
+# --- Headless Chromium for JavaScript-only pages (Playwright, D-025). Video ffmpeg is not needed. ---
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN set -eu; \
+    if [ "$BAKE_MODELS" = "1" ]; then \
+        python -m playwright install --only-shell chromium; \
+        rm -rf /opt/pw-browsers/ffmpeg-*; \
+        chmod -R a+rX /opt/pw-browsers; \
+    fi
+
 # --- Models (pinned revisions; only network access the build needs besides package indexes) ---
 RUN --mount=type=bind,source=docker/download_models.py,target=/tmp/build/download_models.py \
     set -eu; \
@@ -83,6 +114,7 @@ ENV TRUSTBOOK_DATA=/data \
     TRUSTBOOK_BROWSE_ROOT=/host \
     TRUSTBOOK_MODELS_DIR=/opt/trustbook/models \
     TRUSTBOOK_STATIC_DIR=/app/static \
+    DOCLING_ARTIFACTS_PATH=/opt/trustbook/models/docling \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     HF_MODULES_CACHE=/tmp/trustbook-hf-modules
@@ -94,9 +126,10 @@ COPY --chmod=0644 docker/searxng/settings.yml /app/searxng/settings.yml
 # --- UI ---
 COPY --from=frontend /src/frontend/dist /app/static
 
-# --- App code ---
+# --- App code (+ the eval runner and public smoke set, so gates run with `docker compose exec`) ---
 COPY backend/app /app/app
-RUN chmod -R a+rX /app/app /app/static /app/searxng
+COPY eval /app/eval
+RUN chmod -R a+rX /app/app /app/static /app/searxng /app/eval
 
 # Prove every baked model loads offline and scores sensibly (fails the build otherwise).
 # No network: a model that tries to fetch anything at load time breaks the build here.

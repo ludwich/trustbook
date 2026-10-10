@@ -64,6 +64,7 @@ class Source(SQLModel, table=True):
     stats: str = "{}"
     created_at: str
     updated_at: str
+    job_id: str | None = None  # latest ingest job (migration 003)
 
 
 class Chunk(SQLModel, table=True):
@@ -152,6 +153,23 @@ class IdeationNode(SQLModel, table=True):
     updated_at: str
 
 
+class Overview(SQLModel, table=True):
+    """The space overview (one row, id 1). ``sentences``/``questions`` are JSON."""
+
+    __tablename__ = "overview"
+
+    id: int = Field(default=1, primary_key=True)
+    enabled: bool = True
+    status: str = "none"
+    sentences: str = "[]"
+    questions: str = "[]"
+    generated_at: str | None = None
+    sources_signature: str | None = None
+    job_id: str | None = None
+    error: str | None = None
+    updated_at: str
+
+
 SPACE_TABLES: tuple[type[SQLModel], ...] = (
     Source,
     Chunk,
@@ -161,4 +179,5 @@ SPACE_TABLES: tuple[type[SQLModel], ...] = (
     GateLog,
     IdeationSession,
     IdeationNode,
+    Overview,
 )

@@ -66,8 +66,14 @@ def test_calibration_routes(make_client: AppFactory, paths: Paths) -> None:
         "parse_pages_per_s",
         "stt_realtime_factor",
         "notes",
+        "cpu",
+        "runtime",
     }
-    assert results["parse_pages_per_s"] is None
+    assert set(results["cpu"]) == {"model", "logical", "usable", "physical", "bf16"}
+    assert results["runtime"]["torch_threads"] >= 1
+    # No Docling models in tests: the basic PDF reader is measured, and the note says so.
+    assert results["parse_pages_per_s"] > 0
+    assert "Document reading speed measured with the basic PDF reader." in results["notes"]
     assert paths.calibration_file.is_file()
 
 

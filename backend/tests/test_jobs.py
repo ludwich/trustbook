@@ -19,11 +19,16 @@ def repo(global_engine: Any) -> JobRepository:
 
 
 def test_workers_for_power() -> None:
-    assert workers_for_power("low", 16) == 1
-    assert workers_for_power("normal", 16) == 2
-    assert workers_for_power("high", 16) == 14
-    assert workers_for_power("high", 2) == 2
-    assert workers_for_power("high") >= 2
+    gib = 1024**3
+    assert workers_for_power("low", 16, 64 * gib) == 1
+    assert workers_for_power("normal", 16, 64 * gib) == 2
+    assert workers_for_power("high", 8, 64 * gib) == 6
+    assert workers_for_power("high", 32, 64 * gib) == 8  # Ludwig's 32-core laptop gave 30
+    assert workers_for_power("high", 32, 8 * gib) == 2  # (8 - 4) GB / 1.5 GB per job
+    assert workers_for_power("high", 32, 10 * gib) == 4
+    assert workers_for_power("high", 2, 64 * gib) == 2
+    assert workers_for_power("high", 32, 2 * gib) == 2  # never below normal
+    assert 2 <= workers_for_power("high") <= 8
 
 
 def test_enqueue_positions_and_get(repo: JobRepository) -> None:
@@ -244,7 +249,7 @@ def test_pool_resize_and_active_space(repo: JobRepository) -> None:
 
 
 def test_usable_cpus_respects_cgroup_quota(tmp_path: Path) -> None:
-    from app.jobs.pool import usable_cpus
+    from app.capabilities.cpu import usable_cpus
 
     cpu_max = tmp_path / "cpu.max"
     unlimited = usable_cpus(tmp_path / "missing")

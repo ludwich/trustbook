@@ -13,7 +13,7 @@ import wave
 from pathlib import Path
 
 from app.capabilities import bundled_runtime as rt
-from app.capabilities.bundled import read_models_lock
+from app.capabilities.bundled import RuntimeOptions, read_models_lock
 from app.config import Paths
 
 QUESTION = "How does the checker verify sentences against cited passages?"
@@ -38,8 +38,9 @@ def _tone_wav(path: Path, seconds: float = 1.0, rate: int = 16_000) -> None:
 
 def main() -> int:
     models = read_models_lock(Paths.from_env().models_dir)
+    options = RuntimeOptions()  # FP32, default threads: the reference configuration
 
-    embedder = rt.load_embedder(models["embeddings"])
+    embedder = rt.load_embedder(models["embeddings"], options)
     query = embedder.embed_queries([QUESTION])[0]
     docs = embedder.embed_documents([RELEVANT, IRRELEVANT])
     sims = [sum(a * b for a, b in zip(query, d, strict=True)) for d in docs]
@@ -47,12 +48,12 @@ def main() -> int:
     assert sims[0] > sims[1], f"embeddings rank wrong: {sims}"
     print(f"embeddings ok: dim={embedder.dim} sims={[round(s, 3) for s in sims]}")
 
-    reranker = rt.load_reranker(models["reranker"])
+    reranker = rt.load_reranker(models["reranker"], options)
     scores = reranker.score(QUESTION, [RELEVANT, IRRELEVANT])
     assert all(0.0 <= s <= 1.0 for s in scores) and scores[0] > scores[1], f"rerank: {scores}"
     print(f"reranker ok: {[round(s, 3) for s in scores]}")
 
-    checker = rt.load_grounding_checker(models["grounding"])
+    checker = rt.load_grounding_checker(models["grounding"], options)
     verdicts = checker.score(
         [
             (RELEVANT, "A sentence passes when its best score reaches the verify threshold."),
@@ -62,7 +63,7 @@ def main() -> int:
     assert verdicts[0] > 0.5 > verdicts[1], f"grounding: {verdicts}"
     print(f"grounding ok: {[round(s, 3) for s in verdicts]}")
 
-    transcriber = rt.load_transcriber(models["stt"])
+    transcriber = rt.load_transcriber(models["stt"], options)
     with tempfile.TemporaryDirectory() as tmp:
         wav = Path(tmp) / "tone.wav"
         _tone_wav(wav)

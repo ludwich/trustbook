@@ -192,11 +192,139 @@ RequestLogEntry = {"id":int,"timestamp":str,"capability":str,"endpoint_host":str
 - `POST /api/calibration/run` → `202 Job`
 
 ```
-Calibration = {"version":int,"measured_at":str,"cpu_count":int,
+Calibration = {"version":int,"measured_at":str,"cpu_count":int,      // version 3
                "embedding_chunks_per_s":float|null,"rerank_pairs_per_s":float|null,
                "parse_pages_per_s":float|null,"stt_realtime_factor":float|null,
-               "notes":[str]}
+               "notes":[str],
+               "cpu":{"model":str|null,"logical":int,"usable":int,"physical":int|null,"bf16":bool}|null,
+               "runtime":{"torch_threads":int|null,"embedding_dtype":"float32"|"bfloat16",
+                          "reranker_dtype":"float32"|"bfloat16"}|null}
+// stt_realtime_factor = processing seconds per audio second (UI shows "N× faster than real time").
+// runtime is chosen by measurement and applied to the bundled models at startup (DECISIONS D-020).
 ```
+
+## Phase 1: sources, index, retrieval and chat
+
+### Modules
+
+| Module | Responsibility |
+|---|---|
+| `ingest/` | One function per source type that turns an origin into a `Snapshot` (markdown text + offset map), plus the job handler that runs parse → chunk → embed → index and moves `status` along |
+| `parse/` | Docling (PDF, DOCX, PPTX, XLSX) with pypdf fallback, plain text/Markdown, Trafilatura + headless-browser fallback, yt-dlp captions, audio → STT (with a voice-activity check) |
+| `chunking/` | Document/web chunker (heading-aware, target 500, max 800, overlap 80 tokens), transcript chunker, fallback code chunker (SPEC §7.3) |
+| `index/` | `SpaceIndex`: LanceDB dataset in `<space>/vectors/`, table `chunks` (chunk_id, source_id, text, vector), vector + FTS search filtered by source ids |
+| `retrieval/` | Enabled-source filter → vector top 40 + FTS top 40 → RRF (k = 60) → rerank top 40 → top 8 within ~6,000 tokens |
+| `chat/` | Conversations, prompt, forced-citation JSON (layer 3), refusal before generation (layer 2), SSE streaming, overview + suggested questions |
+| `security/` | gitleaks scan of linked folders before indexing (pulled forward from Phase 3, DECISIONS D-024) |
+
+Token counts use the embedding model's tokenizer when the ML runtime is present, else `ceil(chars / 4)`.
+
+### Snapshot files (SPEC §4)
+
+`sources/<source_id>/snapshot.md` is the extracted text. `map.json` maps character offsets in
+`snapshot.md` to where they came from:
+
+```
+{"version": 1, "kind": "pages"|"timestamps"|"sections"|"files",
+ "segments": [{"start": int, "end": int,            // offsets in snapshot.md
+               "page"?: int, "start_s"?: float, "end_s"?: float, "speaker"?: str,
+               "heading"?: str, "file"?: str, "start_line"?: int, "end_line"?: int}]}
+```
+
+A chunk's `locator` (JSON in `chunks.locator`) is derived from the segments it overlaps:
+`{"pages":[3,4]}`, `{"start_s":61.2,"end_s":95.0,"speaker":null}`, `{"heading":"Install","offset":1234}`,
+`{"file":"src/requests/api.py","start_line":12,"end_line":58,"symbol":null}`.
+
+### Sources API
+- `GET /api/spaces/{sid}/sources` → `Source[]` (creation order)
+- `POST /api/spaces/{sid}/sources/paste` body `{"title"?: str, "text": str}` → `201 Source`
+- `POST /api/spaces/{sid}/sources/upload` multipart `files` (one or more) → `201 Source[]`
+- `POST /api/spaces/{sid}/sources/url` body `{"url": str}` → `201 Source` (YouTube URLs become `youtube` sources)
+- `POST /api/spaces/{sid}/sources/folder` body `{"path": str}` (relative to the browse root) → `201 Source`
+- `POST /api/spaces/{sid}/web-search` body `{"query": str, "limit"?: int}` → `{"results": [{"title","url","snippet"}]}`
+- `POST /api/spaces/{sid}/sources/from-search` body `{"items": [{"url": str, "title": str}]}` → `201 Source[]` (type `search`)
+- `PATCH /api/spaces/{sid}/sources/{source_id}` body `{"enabled"?: bool, "title"?: str}` → `Source`
+- `PUT /api/spaces/{sid}/sources/enabled` body `{"source_ids": [str], "enabled": bool}` → `Source[]` (group checkboxes)
+- `POST /api/spaces/{sid}/sources/{source_id}/refresh` → `Source` (url, youtube, folder: new dated snapshot)
+- `DELETE /api/spaces/{sid}/sources/{source_id}` → `204` (cancels its job, removes its folder, chunks and vectors)
+- `GET /api/spaces/{sid}/sources/{source_id}/snapshot` → `{"markdown": str, "map": Map}`
+- `GET /api/spaces/{sid}/sources/{source_id}/original` → the uploaded file
+- `GET /api/spaces/{sid}/chunks/{chunk_id}` → `{"id","source_id","source_title","text","start_offset","end_offset","locator"}`
+- `GET /api/browse?path=` → `{"path": str, "parent": str|null, "entries": [{"name","path","is_dir","size"}]}`
+  (paths relative to the read-only browse root; `..` and symlinks out of it are refused)
+
+```
+Source = {"id","type":"upload"|"folder"|"url"|"youtube"|"search"|"paste","title","origin":str|null,
+          "group":"documents"|"transcripts"|"web"|"code",
+          "status":"queued"|"reading"|"indexing"|"ready"|"failed","progress":float|null,
+          "failure_reason":str|null,"failure_next_step":str|null,"quality_warning":str|null,
+          "enabled":bool,"snapshot_at":str|null,"commit_hash":str|null,
+          "stats":{"pages"?,"files"?,"duration_s"?,"chunks"?,"chars"?,"skipped_secrets"?},
+          "created_at":str,"job_id":str|null}
+```
+
+Groups: uploads of audio, and YouTube → `transcripts`; url/search → `web`; folder code files → `code`;
+everything else → `documents`. A folder with both documents and code becomes one source in the `code`
+group if most files are code, else `documents`.
+
+### Chat API
+- `GET /api/spaces/{sid}/chat/status` → `{"enabled_sources": int, "ready_sources": int, "total_sources": int, "chat_ready": bool}`
+  ("Using X of Y sources": X = enabled and ready, Y = ready)
+- `GET /api/spaces/{sid}/conversations` → `[{"id","title","created_at","updated_at"}]` newest first
+- `POST /api/spaces/{sid}/conversations` body `{"title"?: str}` → `201 Conversation`
+- `DELETE /api/spaces/{sid}/conversations/{cid}` → `204`
+- `GET /api/spaces/{sid}/conversations/{cid}/messages` → `Message[]`
+- `POST /api/spaces/{sid}/conversations/{cid}/messages` body `{"content": str}` → `text/event-stream`:
+
+| event | data |
+|---|---|
+| `status` | `{"stage": "retrieving"|"generating"|"checking"}` |
+| `sentence` | `{"index": int, "text": str, "citations": Citation[]}` |
+| `refused` | `{"reason": "not_in_sources"|"no_sources"|"invalid_output", "message": str, "suggestion": str|null}` |
+| `done` | `{"message": Message}` |
+| `error` | `{"message": str}` |
+
+```
+Citation = {"n": int, "chunk_id": str, "source_id": str, "source_title": str, "locator": object}
+Message  = {"id","role":"user"|"assistant","created_at",
+            "content": {"text"?: str,                               // user messages; refusal message
+                        "suggestion"?: str|null,                    // refusals only
+                        "sentences"?: [{"text": str, "citations": Citation[]}]},
+            "badge": null|"verified"|"partially_verified"|"refused"|"unverified",
+            "removed_sentences": [str], "sources_used": [{"source_id","title"}]}
+```
+
+Phase 1 has no sentence verifier (layer 4 is Phase 2): `badge` is `"refused"` for refusals, else `null`.
+Every stream ends with `done` (also after `refused`, carrying the persisted refusal message) or `error`.
+Refresh applies to `url`, `youtube`, `search` and `folder` sources. The browse root itself cannot be linked.
+Citation numbers `n` are per answer, in order of first use.
+
+Chat pipeline (layers 1–3): no search or scraping code is reachable from `chat/` (layer 1). The top
+rerank score below `refuse_threshold` → `refused/not_in_sources` before any LLM call (layer 2). The LLM
+gets numbered chunks `[c1]…[c8]`, temperature 0.2, and must return
+`{"sentences":[{"text":"…","chunk_ids":["c1"]}]}` via JSON schema, else JSON mode + validation + one
+retry (layer 3). Sentences without valid chunk ids are dropped. If none remain, the answer is refused
+(`invalid_output`). A model that says the chunks don't answer the question returns `{"sentences": []}`,
+which becomes `not_in_sources`.
+
+### Overview API
+- `GET /api/spaces/{sid}/overview` → `Overview`
+- `POST /api/spaces/{sid}/overview/refresh` → `202 Job`
+- `PUT /api/spaces/{sid}/overview` body `{"enabled": bool}` → `Overview`
+
+```
+Overview = {"enabled": bool, "status": "none"|"pending"|"ready"|"failed",
+            "sentences": [{"text","citations":Citation[]}], "questions": [str],
+            "generated_at": str|null, "stale": bool,          // sources changed since
+            "estimate": {"tokens": int, "remote": bool}|null}  // shown when the chat endpoint is remote
+```
+
+The overview is generated automatically when the first source becomes ready (if enabled, default on),
+with the same forced-citation format, plus exactly three suggested questions.
+
+### Hints
+`Settings` gains `"hints_dismissed": [str]`. `PUT /api/settings` accepts `{"dismiss_hint": str}`.
+The chat hint id is `chat_grounding`.
 
 ## Frontend (`frontend/`)
 

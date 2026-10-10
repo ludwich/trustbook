@@ -1,68 +1,70 @@
-# Phase 0 — Foundations (branch `phase-0`)
+# Phase 1 — Grounded chat (branch `phase-1`)
 
-Gate 0: stack starts with one command; wizard Test succeeds against Ludwig's endpoint;
-every capability card shows correct status and badge; create/delete a space creates/removes its folder.
+Gate 1: citation precision ≥ 90% on the smoke set using Ludwig's chat endpoint.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
-## 0. Planning
-- [x] Read CLAUDE.md + SPEC.md, create branch `phase-0`
-- [x] Write this task list
-- [x] `docs/ARCHITECTURE.md` (layout, API contract, data folder, container design)
-- [x] `docs/DECISIONS.md` (license checks, Phase 0 scope calls)
+## 0. Gate 0 follow-ups (Ludwig's findings, do first)
+- [x] F1 Slow bundled models in Docker Desktop/WSL2 (4 chunks/s, 8.9 pairs/s on 32 cores): measure torch thread use inside the container (main vs worker threads), fix, log the cause in DECISIONS.md
+- [x] F2 Speed test wording: show STT as "N× faster than real time"
+- [x] F3 Cap "High" power workers at a sensible maximum (RAM per worker)
 
-## 1. Model + license verification
-- [x] Verify licenses on model cards (embeddings, reranker, grounding, STT) and record revisions
-- [x] Prove each default loads on CPU with pinned package versions (or switch to fallback)
-- [x] `docker/download_models.py` pins exact revisions, downloads into the image
-- [x] `THIRD_PARTY_LICENSES.md`
+## 1. Sources and ingestion (SPEC §7.1)
+- [x] Source model + API: list, add, enable/disable checkbox, groups (documents, transcripts, web, code), delete, refresh
+- [x] Upload: store original → Docling (PDF, DOCX, PPTX, XLSX) / text / audio → STT; pypdf fallback
+- [x] Paste text
+- [x] URL: fetch → Trafilatura → Crawl4AI fallback (< 200 chars) → dated snapshot
+- [x] YouTube: yt-dlp captions (manual, then auto) → else audio → STT; timestamps
+- [x] Web search: SearXNG / Brave / Tavily results → user ticks → URL sources
+- [x] Link folder: picker over `/host` (read-only), ignore rules, documents parsed (code chunking in Phase 3)
+- [x] Snapshots: `snapshot.md`, `map.json` (offsets → page / timestamp / file + line), originals for uploads
+- [x] Bake Docling models; bump `CALIBRATION_VERSION` with parse speed measured
+- [x] Voice-activity check before STT (D-008)
 
-## 2. Backend (`backend/`)
-- [x] `pyproject.toml` (uv), ruff, mypy --strict, pytest config
-- [x] `app/config.py`: paths, `settings.json` load/save (atomic, mode 600), key redaction
-- [x] `app/db/`: numbered SQL migration runner; `global.db` (jobs, request_log); `space.db` full §5 schema
-- [x] `app/spaces/`: create / list / get / delete, `space.json` manifest, folder layout
-- [x] `app/capabilities/`: YAML manifests (chat, gate, embeddings, reranker, grounding, stt, web_search, tts), registry, locality, status
-- [x] Adapters: openai_compatible, azure_openai, anthropic, searxng, brave, tavily, stt endpoint, mock
-- [x] Health checks per capability (chat_ping, bundled model checks, search, stt)
-- [x] Request log: every outbound endpoint call recorded (host, capability, space, bytes, excerpt; never keys)
-- [x] `app/jobs/`: global SQLite queue, worker pool sized by power setting, active-space priority, pause/cancel/reorder
-- [x] Calibration on first start → `config/calibration.json`
-- [x] `app/api/`: health, setup status, settings, capabilities (+ Test), spaces, jobs, request log, calibration
-- [x] `app/main.py`: lifespan, static frontend with SPA fallback
-- [x] Tests: unit for every module, integration for every route (mock adapter, no network)
+## 2. Chunking and index (SPEC §7.2, §2)
+- [x] Heading-aware document chunker (target 500, max 800, overlap 80; locator = pages)
+- [x] Transcript chunker (speaker turns ≤ ~500 tokens, never mid-sentence; locator = timestamps)
+- [x] Web chunker (locator = section heading + offset)
+- [x] LanceDB per space (`vectors/`), embeddings, FTS index
 
-## 3. Frontend (`frontend/`)
-- [x] Vite 8 + React 19 + TS + Tailwind + shadcn/ui + TanStack Query + React Router, pnpm 10 pinned
-- [x] ESLint, Prettier, Vitest
-- [x] Setup wizard: chat endpoint + Test → optional STT endpoint, search key → done
-- [x] Spaces list: create, open, delete (confirm)
-- [x] Space page shell: sources panel (empty), Chat | Ideation tabs (placeholders)
-- [x] Settings: capability cards from manifests (fields, Test, status, local/remote badge), power setting, request log
-- [x] Queue view + header "Processing" indicator
-- [x] Light/dark mode, works at 1024 px
-- [x] Vitest tests for API client and key components
+## 3. Processing UX (SPEC §7.5)
+- [x] Status flow queued → reading → indexing → ready | failed, progress
+- [x] Failure cause + next step; quality warnings (Whistle transcript, OCR, < 300 chars)
 
-- [x] Saved API key never follows a changed host/provider (data safety fix)
+## 4. Retrieval and grounding layers 1–3 (SPEC §8)
+- [x] Enabled-sources filter, vector top 40 + FTS top 40 → RRF (k = 60) → rerank → top 8 (≤ ~6,000 tokens)
+- [x] Layer 1: no web tool in the chat pipeline
+- [x] Layer 2: refuse before generating if top rerank score < refuse_threshold (0.15)
+- [x] Layer 3: forced citations JSON; sentences without chunk_ids dropped; JSON schema → JSON mode + validation + one retry
 
-## 4. Containers
-- [x] `docker/app.Dockerfile`: frontend build → Python runtime + baked models, non-root when possible
-- [x] `docker/searxng/settings.yml` (json on, limiter off, safe engines) + init step that writes it when missing
-- [x] `compose.yaml` (GHCR, SearXNG pinned by digest), `compose.dev.yaml`, `.env.example`
-- [x] Local smoke: `docker compose -f compose.dev.yaml up --build`, wizard Test against llama-server
+## 5. Chat (SPEC §9)
+- [x] Conversations + messages persisted; streaming at sentence granularity
+- [x] Inline numbered citations → source viewer at passage (basic viewer; full viewer is Phase 2)
+- [x] "Show sources used" chip; "Using X of Y sources"
+- [x] Space overview + three suggested questions (auto on first ready source, refresh on request, per-space toggle, token estimate when remote)
+- [x] One-time hint
 
-## 5. CI / release
-- [x] `.github/workflows/ci.yml`: ruff, mypy, pytest, ESLint, typecheck, Vitest, Docker build check
-- [x] `.github/workflows/release.yml`: branch `phase-N` → `:phase-N-rc`; tag `phase-N` → `:phase-N` + `:latest`
-- [x] CI green on `phase-0`, image `ghcr.io/ludwich/trustbook:phase-0-rc` published and pullable
+## 6. Frontend
+- [x] Sources panel: add-source menu (upload, folder, URL, YouTube, search, paste), groups with checkboxes, statuses, warnings
+- [x] Chat view with streaming, citations, chips; overview card
+- [x] Playwright e2e: create space → paste text → ask → cited answer (mock LLM) — runs in release.yml against the built image before push
 
-## 6. Gate
-- [x] README (install, `.env`, gate command, grill-me credit placeholder)
-- [x] `docs/GATES.md` Gate 0 checklist + how to verify
-- [x] PR `phase-0 → main` (#1)
-- [x] `docker image prune -f`
-- [x] Stop and summarise — **waiting for Ludwig's Gate 0 verdict**
+## 7. Evaluation (SPEC §13)
+- [x] `eval/runner.py`: citation precision, correct-refusal rate, latency p50/p95, Markdown report; `--questions` any path
+- [x] `eval/format.md`
+- [x] `eval/smoke/`: psf/requests at a pinned commit + docs; 15 questions (5 docs, 5 code, 2 multi-source, 3 unanswerable), each verified by hand
+
+## 8. Gate
+- [x] Licenses for new deps (Docling, Trafilatura, Crawl4AI, yt-dlp, LanceDB, …) in THIRD_PARTY_LICENSES.md
+- [x] CI green, PR `phase-1 → main` (#2), `:phase-1-rc` published (e2e gate passed in release.yml)
+- [x] Run smoke set against Ludwig's endpoint; record citation precision in GATES.md
+- [x] `docker image prune -f`; stop and summarise — **waiting for Ludwig's Gate 1 verdict**
+
+- [x] Calibration: exclusive model lock (D-030), parse speed measured (version 4)
+- [x] Smoke-set dry runs against Ludwig's llama-server (Qwen3.6-35B-A3B): 87.5% → 92.0% → 100% after hand-verified key fixes
+
+- [x] Exact gate command on the published `phase-1-rc`: 100% (23/23), refusals 3/3
 
 ## Notes for a restarted session
-- Gate 0 handover: docs/GATES.md. Known issues: D-019 (Whistle threads), D-015 (search rate limits).
-- After Ludwig passes Gate 0: squash-merge PR, tag `phase-0` on main, branch `phase-1`, bump `CALIBRATION_VERSION` when Docling lands.
+- Phase 0 merged (`a60f774`), tagged `phase-0`. Local branch `phase-0` deleted; push tags as `refs/tags/phase-N`
+  (a branch and tag share the name).

@@ -1,6 +1,7 @@
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { server } from "@/test/server";
+import { sseEvent, sseResponse } from "@/test/sse";
 import { api, ApiError, detailToMessage } from "./client";
 
 interface Captured {
@@ -130,5 +131,170 @@ describe("api client", () => {
   it("detailToMessage falls back when detail is unusable", () => {
     expect(detailToMessage(undefined, "x")).toBe("x");
     expect(detailToMessage([{ nope: 1 }], "y")).toBe("y");
+  });
+});
+
+describe("api client: Phase 1", () => {
+  it("uses the contract's method, path and body for every sources, chat and overview call", async () => {
+    const seen = capture(() => HttpResponse.json({}));
+    const calls: [() => Promise<unknown>, string, string, unknown][] = [
+      [() => api.listSources("s1"), "GET", "/api/spaces/s1/sources", undefined],
+      [
+        () => api.addPaste("s1", { title: "T", text: "x" }),
+        "POST",
+        "/api/spaces/s1/sources/paste",
+        { title: "T", text: "x" },
+      ],
+      [
+        () => api.addUrl("s1", "https://a.b"),
+        "POST",
+        "/api/spaces/s1/sources/url",
+        { url: "https://a.b" },
+      ],
+      [() => api.addFolder("s1", "p/q"), "POST", "/api/spaces/s1/sources/folder", { path: "p/q" }],
+      [
+        () => api.webSearch("s1", "q", 10),
+        "POST",
+        "/api/spaces/s1/web-search",
+        { query: "q", limit: 10 },
+      ],
+      [
+        () => api.addFromSearch("s1", [{ url: "https://a.b", title: "A" }]),
+        "POST",
+        "/api/spaces/s1/sources/from-search",
+        { items: [{ url: "https://a.b", title: "A" }] },
+      ],
+      [
+        () => api.updateSource("s1", "src1", { enabled: false }),
+        "PATCH",
+        "/api/spaces/s1/sources/src1",
+        { enabled: false },
+      ],
+      [
+        () => api.setSourcesEnabled("s1", ["a", "b"], true),
+        "PUT",
+        "/api/spaces/s1/sources/enabled",
+        { source_ids: ["a", "b"], enabled: true },
+      ],
+      [
+        () => api.refreshSource("s1", "src1"),
+        "POST",
+        "/api/spaces/s1/sources/src1/refresh",
+        undefined,
+      ],
+      [() => api.deleteSource("s1", "src1"), "DELETE", "/api/spaces/s1/sources/src1", undefined],
+      [
+        () => api.getSnapshot("s1", "src1"),
+        "GET",
+        "/api/spaces/s1/sources/src1/snapshot",
+        undefined,
+      ],
+      [() => api.getChunk("s1", "c1"), "GET", "/api/spaces/s1/chunks/c1", undefined],
+      [() => api.getChatStatus("s1"), "GET", "/api/spaces/s1/chat/status", undefined],
+      [() => api.listConversations("s1"), "GET", "/api/spaces/s1/conversations", undefined],
+      [
+        () => api.createConversation("s1", { title: "Q" }),
+        "POST",
+        "/api/spaces/s1/conversations",
+        { title: "Q" },
+      ],
+      [
+        () => api.deleteConversation("s1", "cv"),
+        "DELETE",
+        "/api/spaces/s1/conversations/cv",
+        undefined,
+      ],
+      [
+        () => api.listMessages("s1", "cv"),
+        "GET",
+        "/api/spaces/s1/conversations/cv/messages",
+        undefined,
+      ],
+      [() => api.getOverview("s1"), "GET", "/api/spaces/s1/overview", undefined],
+      [() => api.refreshOverview("s1"), "POST", "/api/spaces/s1/overview/refresh", undefined],
+      [
+        () => api.setOverviewEnabled("s1", false),
+        "PUT",
+        "/api/spaces/s1/overview",
+        { enabled: false },
+      ],
+      [
+        () => api.updateSettings({ dismiss_hint: "chat_grounding" }),
+        "PUT",
+        "/api/settings",
+        { dismiss_hint: "chat_grounding" },
+      ],
+    ];
+    for (const [call] of calls) await call();
+    expect(seen.map((r) => [r.method, r.path, r.body])).toEqual(
+      calls.map(([, method, path, body]) => [method, path, body]),
+    );
+  });
+
+  it("encodes the browse path as a query parameter", async () => {
+    const seen = capture(() => HttpResponse.json({ path: "", parent: null, entries: [] }));
+    await api.browse("My Documents/a&b");
+    expect(seen[0]?.path).toBe("/api/browse");
+    expect(new URLSearchParams(seen[0]?.search).get("path")).toBe("My Documents/a&b");
+  });
+
+  it("uploads files as multipart form data under 'files', keeping their names", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("[]", { status: 201 }));
+    await api.uploadFiles("s1", [new File(["a"], "a.pdf"), new File(["b"], "b.txt")]);
+    const [url, init] = fetchSpy.mock.calls[0] ?? [];
+    expect(String(url)).toMatch(/\/api\/spaces\/s1\/sources\/upload$/);
+    expect(init?.method).toBe("POST");
+    const body = init?.body as FormData;
+    expect(body).toBeInstanceOf(FormData);
+    expect(body.getAll("files").map((f) => (f as File).name)).toEqual(["a.pdf", "b.txt"]);
+    // The browser must set the multipart boundary itself.
+    expect(new Headers(init?.headers).get("content-type")).toBeNull();
+  });
+
+  it("streams typed answer events and skips unknown or malformed ones", async () => {
+    let sent: unknown;
+    server.use(
+      http.post("*/api/spaces/s1/conversations/cv/messages", async ({ request }) => {
+        sent = await request.json();
+        expect(request.headers.get("accept")).toBe("text/event-stream");
+        return sseResponse([
+          sseEvent("status", { stage: "retrieving" }),
+          "event: ping\ndata: {}\n\nevent: sentence\ndata: not json\n\n",
+          sseEvent("sentence", { index: 0, text: "A.", citations: [] }),
+          sseEvent("refused", { reason: "not_in_sources", message: "No.", suggestion: null }),
+          sseEvent("error", { message: "Boom" }),
+          sseEvent("done", { message: { id: "m1" } }),
+        ]);
+      }),
+    );
+    const events = [];
+    for await (const ev of api.streamMessage("s1", "cv", "Why?")) events.push(ev);
+    expect(sent).toEqual({ content: "Why?" });
+    expect(events).toEqual([
+      { type: "status", stage: "retrieving" },
+      { type: "sentence", index: 0, text: "A.", citations: [] },
+      { type: "refused", reason: "not_in_sources", message: "No.", suggestion: null },
+      { type: "error", message: "Boom" },
+      { type: "done", message: { id: "m1" } },
+    ]);
+  });
+
+  it("throws an ApiError when the answer request is refused before streaming", async () => {
+    server.use(
+      http.post("*/api/spaces/s1/conversations/cv/messages", () =>
+        HttpResponse.json({ detail: "Set up a chat model first." }, { status: 409 }),
+      ),
+    );
+    const run = async () => {
+      for await (const _ev of api.streamMessage("s1", "cv", "Why?")) {
+        // nothing
+      }
+    };
+    await expect(run()).rejects.toMatchObject({
+      status: 409,
+      message: "Set up a chat model first.",
+    });
   });
 });

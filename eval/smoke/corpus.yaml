@@ -1,0 +1,20 @@
+# Public smoke corpus (SPEC §13): psf/requests (Apache-2.0) at a pinned release + its docs pages.
+#
+#   release:  v2.34.2
+#   commit:   6e83187b8feb273ed4c6cdab5efd8d54901dfab3
+#
+# The folder path is relative to Trustbook's browse root (TRUSTBOOK_BROWSE_ROOT, mounted at /host).
+# Put the checkout there with `python eval/smoke/fetch_corpus.py <browse root>/trustbook-eval/requests`.
+# The folder must be named `requests`: Trustbook titles a folder source by its folder name.
+#
+# Docs: Read the Docs has no versioned build for v2.34.x, so the URLs use `stable`, which was built
+# from exactly 6e83187b (v2.34.2) when this set was written; every page says
+# "Requests 2.34.2 documentation". If a newer requests release moves `stable`, re-verify the
+# questions (eval/smoke/verification.md) before using the set for a gate.
+space_description: "Trustbook smoke set: psf/requests v2.34.2 source + documentation"
+sources:
+  - folder: trustbook-eval/requests
+  - url: https://requests.readthedocs.io/en/stable/user/quickstart/
+  - url: https://requests.readthedocs.io/en/stable/user/advanced/
+  - url: https://requests.readthedocs.io/en/stable/user/authentication/
+  - url: https://requests.readthedocs.io/en/stable/community/faq/

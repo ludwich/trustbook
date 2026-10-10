@@ -6,38 +6,33 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { formatDateTime, formatNumber } from "@/lib/format";
+import { formatComputer, formatDateTime, formatNumber, formatRealtimeFactor } from "@/lib/format";
 import { errorMessage } from "@/lib/utils";
 import { SettingsSection } from "./SettingsSection";
 
+function perSecond(n: number | null, unit: string): string {
+  return n === null ? "Not measured" : `${formatNumber(n)} ${unit} per second`;
+}
+
 function rows(c: Calibration): [string, string][] {
   return [
-    ["CPU cores", String(c.cpu_count)],
-    [
-      "Indexing",
-      c.embedding_chunks_per_s === null
-        ? "Not measured"
-        : `${formatNumber(c.embedding_chunks_per_s)} chunks per second`,
-    ],
-    [
-      "Ranking",
-      c.rerank_pairs_per_s === null
-        ? "Not measured"
-        : `${formatNumber(c.rerank_pairs_per_s)} pairs per second`,
-    ],
-    [
-      "Reading documents",
-      c.parse_pages_per_s === null
-        ? "Not measured"
-        : `${formatNumber(c.parse_pages_per_s)} pages per second`,
-    ],
-    [
-      "Speech to text",
-      c.stt_realtime_factor === null
-        ? "Not measured"
-        : `${formatNumber(c.stt_realtime_factor, 2)} × real time`,
-    ],
+    // Older results (before v3) have no CPU details; keep the plain core count for them.
+    ...(c.cpu ? [] : [["CPU cores", String(c.cpu_count)] as [string, string]]),
+    ["Indexing", perSecond(c.embedding_chunks_per_s, "chunks")],
+    ["Ranking", perSecond(c.rerank_pairs_per_s, "passages")],
+    ["Reading documents", perSecond(c.parse_pages_per_s, "pages")],
+    ["Speech-to-text", formatRealtimeFactor(c.stt_realtime_factor)],
   ];
+}
+
+function ComputerLine({ results }: { results: Calibration }) {
+  const line = formatComputer(results.cpu, results.runtime);
+  if (!line) return null;
+  return (
+    <p className="mt-2 text-xs text-muted-foreground" data-testid="calibration-computer">
+      <span className="font-medium">This computer:</span> <span>{line}</span>
+    </p>
+  );
 }
 
 export function CalibrationSection() {
@@ -88,6 +83,7 @@ export function CalibrationSection() {
                   </div>
                 ))}
               </dl>
+              <ComputerLine results={cal.data.results} />
               {cal.data.results.notes.length > 0 && (
                 <ul className="mt-2 list-disc pl-5 text-xs text-muted-foreground">
                   {cal.data.results.notes.map((n) => (

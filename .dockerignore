@@ -32,7 +32,8 @@ frontend/dist
 **/test-results
 **/.vite
 
-# Models and eval data are fetched/handled at build time, never copied from the host
+# Models are fetched at build time, never copied from the host. Only the public eval runner and
+# smoke set go into the image (private golden sets never live in the repo).
 models/
-eval/
+eval/tests/
 docs/

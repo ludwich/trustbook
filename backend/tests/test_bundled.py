@@ -10,6 +10,7 @@ from app.capabilities.bundled import (
     ModelInfo,
     ProviderRegistry,
     ProviderUnavailableError,
+    RuntimeOptions,
     get_providers,
     read_models_lock,
     set_providers,
@@ -80,7 +81,7 @@ def test_factory_used_once(tmp_path: Path) -> None:
     write_models_lock(tmp_path)
     calls: list[ModelInfo] = []
 
-    def factory(info: ModelInfo) -> Any:
+    def factory(info: ModelInfo, _options: RuntimeOptions) -> Any:
         calls.append(info)
         return FakeEmbedder()
 
@@ -94,7 +95,7 @@ def test_factory_used_once(tmp_path: Path) -> None:
 def test_import_error_unavailable(tmp_path: Path) -> None:
     write_models_lock(tmp_path)
 
-    def factory(_info: ModelInfo) -> Any:
+    def factory(_info: ModelInfo, _options: RuntimeOptions) -> Any:
         raise ImportError("no torch")
 
     registry = ProviderRegistry(tmp_path, factories={"grounding": factory})
@@ -111,3 +112,44 @@ def test_set_and_get_providers(tmp_path: Path) -> None:
         set_providers(None)
     with pytest.raises(RuntimeError):
         get_providers()
+
+
+def test_model_use_lock_gives_calibration_the_cpu_alone() -> None:
+    import threading
+    import time
+
+    from app.capabilities.bundled import ModelUseLock
+
+    lock = ModelUseLock()
+    events: list[str] = []
+    reader_in = threading.Event()
+    release_reader = threading.Event()
+
+    def reader(name: str, hold: threading.Event | None = None) -> None:
+        with lock.shared():
+            events.append(f"{name}+")
+            if hold is not None:
+                reader_in.set()
+                hold.wait(2)
+            events.append(f"{name}-")
+
+    def writer() -> None:
+        with lock.exclusive():
+            events.append("W+")
+            time.sleep(0.05)
+            events.append("W-")
+
+    first = threading.Thread(target=reader, args=("r1", release_reader))
+    first.start()
+    reader_in.wait(2)
+    w = threading.Thread(target=writer)
+    w.start()
+    time.sleep(0.05)  # the writer is now waiting for r1
+    late = threading.Thread(target=reader, args=("r2",))
+    late.start()
+    time.sleep(0.05)
+    assert "r2+" not in events  # a waiting writer blocks new readers
+    release_reader.set()
+    for t in (first, w, late):
+        t.join(2)
+    assert events.index("r1-") < events.index("W+") < events.index("W-") < events.index("r2+")

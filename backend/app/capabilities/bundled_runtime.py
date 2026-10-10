@@ -14,16 +14,27 @@ Model folders are written by ``docker/download_models.py`` (see docs/DECISIONS.m
 
 from __future__ import annotations
 
+import gc
 import math
 import os
 import tempfile
 import threading
+import time
 import wave
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from app.capabilities.bundled import ModelInfo, ProviderUnavailableError, Transcript
+from app.capabilities.bundled import (
+    ModelInfo,
+    ProviderRegistry,
+    ProviderUnavailableError,
+    RuntimeOptions,
+    Transcript,
+    TuneResult,
+    default_threads,
+)
+from app.capabilities.cpu import CpuInfo
 
 # EmbeddingGemma 2 prompt names (model card); the bge fallback uses its own query instruction.
 _GEMMA_QUERY_PROMPT = "QuestionAnswering"
@@ -61,21 +72,46 @@ def _unit_interval(values: list[float]) -> list[float]:
     return [1.0 / (1.0 + math.exp(-v)) for v in values]
 
 
+def _torch_dtype(name: str) -> Any:
+    import torch
+
+    return torch.bfloat16 if name == "bfloat16" else torch.float32
+
+
+class _Threads:
+    """Applies the model thread count in whichever thread calls the model.
+
+    Jobs call models from worker threads. OpenMP and MKL keep their thread settings per calling
+    thread, so a count set once at import does not reliably reach them (DECISIONS D-020).
+    """
+
+    def __init__(self, options: RuntimeOptions) -> None:
+        self.count = options.torch_threads or default_threads()
+
+    def apply(self) -> None:
+        import torch
+
+        if torch.get_num_threads() != self.count:
+            torch.set_num_threads(self.count)
+
+
 class SentenceTransformerEmbedder:
     """Embeddings via sentence-transformers on CPU in FP32 (never FP16, SPEC §2)."""
 
-    def __init__(self, info: ModelInfo) -> None:
+    def __init__(self, info: ModelInfo, options: RuntimeOptions, dtype: str | None = None) -> None:
         _offline_env()
-        import torch
         from sentence_transformers import SentenceTransformer
 
+        self._threads = _Threads(options)
+        self._threads.apply()
+        self.dtype = dtype or options.embedding_dtype
         self._gemma = not info.fallback
         config_kwargs = {"vision_config": None, "audio_config": None} if self._gemma else {}
         self._model = SentenceTransformer(
             str(info.path),
             device="cpu",
             local_files_only=True,
-            model_kwargs={"dtype": torch.float32},
+            model_kwargs={"dtype": _torch_dtype(self.dtype)},
             config_kwargs=config_kwargs,
         )
         self._model.max_seq_length = _EMBED_MAX_TOKENS
@@ -90,6 +126,7 @@ class SentenceTransformerEmbedder:
 
     def embed_queries(self, texts: Sequence[str]) -> list[list[float]]:
         with self._lock:
+            self._threads.apply()
             if self._gemma:
                 vectors = self._model.encode(
                     list(texts), prompt_name=_GEMMA_QUERY_PROMPT, normalize_embeddings=True
@@ -102,6 +139,7 @@ class SentenceTransformerEmbedder:
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         with self._lock:
+            self._threads.apply()
             if self._gemma:
                 vectors = self._model.encode(
                     list(texts),
@@ -117,16 +155,18 @@ class SentenceTransformerEmbedder:
 class CrossEncoderReranker:
     """Reranker via sentence-transformers ``CrossEncoder``; it already applies a sigmoid (0..1)."""
 
-    def __init__(self, info: ModelInfo) -> None:
+    def __init__(self, info: ModelInfo, options: RuntimeOptions, dtype: str | None = None) -> None:
         _offline_env()
-        import torch
         from sentence_transformers import CrossEncoder
 
+        self._threads = _Threads(options)
+        self._threads.apply()
+        self.dtype = dtype or options.reranker_dtype
         self._model = CrossEncoder(
             str(info.path),
             device="cpu",
             local_files_only=True,
-            model_kwargs={"dtype": torch.float32},
+            model_kwargs={"dtype": _torch_dtype(self.dtype)},
         )
         self._lock = threading.Lock()
 
@@ -134,6 +174,7 @@ class CrossEncoderReranker:
         if not docs:
             return []
         with self._lock:
+            self._threads.apply()
             raw = self._model.predict([(query, doc) for doc in docs], batch_size=16)
         return _unit_interval(_floats(raw))
 
@@ -141,11 +182,13 @@ class CrossEncoderReranker:
 class HHEMGroundingChecker:
     """HHEM-2.1-Open (``trust_remote_code`` from the pinned local copy) or the NLI fallback."""
 
-    def __init__(self, info: ModelInfo) -> None:
+    def __init__(self, info: ModelInfo, options: RuntimeOptions) -> None:
         _offline_env()
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+        self._threads = _Threads(options)
+        self._threads.apply()
         self._fallback = info.fallback
         self._tokenizer: Any = None
         if self._fallback:
@@ -175,6 +218,7 @@ class HHEMGroundingChecker:
 
         capped = [(p[:_GROUNDING_MAX_PREMISE_CHARS], h) for p, h in pairs]
         with self._lock, torch.no_grad():
+            self._threads.apply()
             if not self._fallback:
                 # predict() = softmax(logits)[:, 1]; label 1 means "consistent".
                 return _unit_interval(_floats(self._model.predict(capped)))
@@ -190,9 +234,12 @@ class HHEMGroundingChecker:
 
 
 class WhistleTranscriber:
-    """Whistle speech-to-text via the pinned Needle engine, offline, telemetry off (D-008)."""
+    """Whistle speech-to-text via the pinned Needle engine, offline, telemetry off (D-008).
 
-    def __init__(self, info: ModelInfo) -> None:
+    The engine picks its own thread count (D-019); ``options`` is accepted for a uniform API.
+    """
+
+    def __init__(self, info: ModelInfo, options: RuntimeOptions) -> None:
         _offline_env()
         folder = info.path if info.path.is_dir() else info.path.parent
         weights = folder / "whistle.cact"
@@ -215,17 +262,128 @@ class WhistleTranscriber:
         return Transcript(text=str(result.get("text") or "").strip(), duration_s=duration)
 
 
-def load_embedder(info: ModelInfo) -> SentenceTransformerEmbedder:
-    return SentenceTransformerEmbedder(info)
+def load_embedder(info: ModelInfo, options: RuntimeOptions) -> SentenceTransformerEmbedder:
+    return SentenceTransformerEmbedder(info, options)
 
 
-def load_reranker(info: ModelInfo) -> CrossEncoderReranker:
-    return CrossEncoderReranker(info)
+def load_reranker(info: ModelInfo, options: RuntimeOptions) -> CrossEncoderReranker:
+    return CrossEncoderReranker(info, options)
 
 
-def load_grounding_checker(info: ModelInfo) -> HHEMGroundingChecker:
-    return HHEMGroundingChecker(info)
+def load_grounding_checker(info: ModelInfo, options: RuntimeOptions) -> HHEMGroundingChecker:
+    return HHEMGroundingChecker(info, options)
 
 
-def load_transcriber(info: ModelInfo) -> WhistleTranscriber:
-    return WhistleTranscriber(info)
+def load_transcriber(info: ModelInfo, options: RuntimeOptions) -> WhistleTranscriber:
+    return WhistleTranscriber(info, options)
+
+
+# --- calibration: choose threads and dtypes by measurement (DECISIONS D-020) ------------------
+
+# BF16 is used only when it is clearly faster and gives the same results as FP32.
+BF16_MIN_SPEEDUP = 1.25
+BF16_MIN_COSINE = 0.99  # every embedding vs its FP32 twin
+BF16_MAX_SCORE_DIFF = 0.03  # every reranker score vs FP32, on the 0..1 scale
+
+
+def _rate(action: Any, items: int, repeats: int = 2) -> float:
+    """Items per second, best of ``repeats`` runs (the first run also warms caches)."""
+    best = math.inf
+    for _ in range(repeats):
+        started = time.perf_counter()
+        action()
+        best = min(best, time.perf_counter() - started)
+    return items / max(best, 1e-6)
+
+
+def thread_candidates(cpu: CpuInfo) -> list[int]:
+    """Physical cores, all usable CPUs and half of them (deduplicated, ascending)."""
+    options = {cpu.usable, max(1, cpu.usable // 2)}
+    if cpu.physical:
+        options.add(cpu.physical)
+    return sorted(n for n in options if 1 <= n <= cpu.usable)
+
+
+def _measure_embedder(
+    info: ModelInfo, options: RuntimeOptions, dtype: str, texts: list[str]
+) -> tuple[float, list[list[float]]]:
+    """Load, warm up and time one embedder variant; it is freed when this returns."""
+    model = SentenceTransformerEmbedder(info, options, dtype)
+    model.embed_documents(texts[:2])
+    rate = _rate(lambda: model.embed_documents(texts), len(texts))
+    return rate, model.embed_documents(texts)
+
+
+def _measure_reranker(
+    info: ModelInfo, options: RuntimeOptions, dtype: str, query: str, texts: list[str]
+) -> tuple[float, list[float]]:
+    model = CrossEncoderReranker(info, options, dtype)
+    model.score(query, texts[:2])
+    rate = _rate(lambda: model.score(query, texts), len(texts))
+    return rate, model.score(query, texts)
+
+
+def _thread_rates(info: ModelInfo, cpu: CpuInfo, texts: list[str]) -> dict[int, float]:
+    model = SentenceTransformerEmbedder(info, RuntimeOptions(), "float32")
+    model.embed_documents(texts[:2])
+    rates: dict[int, float] = {}
+    for threads in thread_candidates(cpu):
+        model._threads.count = threads
+        rates[threads] = _rate(lambda: model.embed_documents(texts), len(texts))
+    return rates
+
+
+def tune_runtime(
+    registry: ProviderRegistry, cpu: CpuInfo, sample_texts: Sequence[str]
+) -> TuneResult:
+    """Measure thread counts, then BF16 against FP32, for embeddings and the reranker."""
+    import torch
+
+    texts = list(sample_texts)
+    embed_info = registry.info("embeddings")
+    rerank_info = registry.info("reranker")
+    query = "Which supplier risks were found in the audit?"
+    notes: list[str] = []
+
+    rates = _thread_rates(embed_info, cpu, texts)
+    gc.collect()
+    best = max(rates, key=lambda n: rates[n])
+    notes.append(f"Uses {best} model threads (fastest of {', '.join(map(str, rates))}).")
+    options = RuntimeOptions(torch_threads=best)
+    if not cpu.bf16:
+        notes.append("This processor has no native BF16, so models run in FP32.")
+        torch.set_num_threads(best)
+        return TuneResult(options, notes)
+
+    fp32_rate, reference = _measure_embedder(embed_info, options, "float32", texts)
+    gc.collect()
+    bf16_rate, vectors = _measure_embedder(embed_info, options, "bfloat16", texts)
+    gc.collect()
+    cosine = min(
+        sum(a * b for a, b in zip(x, y, strict=True))
+        for x, y in zip(reference, vectors, strict=True)
+    )
+    speedup = bf16_rate / fp32_rate
+    if speedup >= BF16_MIN_SPEEDUP and cosine >= BF16_MIN_COSINE:
+        options = options.model_copy(update={"embedding_dtype": "bfloat16"})
+        notes.append(
+            f"Indexing uses BF16: {speedup:.1f}× faster, same results (similarity {cosine:.3f})."
+        )
+    else:
+        notes.append(f"Indexing stays FP32 (BF16 {speedup:.1f}× speed, similarity {cosine:.3f}).")
+
+    fp32_rate, reference_scores = _measure_reranker(rerank_info, options, "float32", query, texts)
+    gc.collect()
+    bf16_rate, scores = _measure_reranker(rerank_info, options, "bfloat16", query, texts)
+    gc.collect()
+    diff = max(abs(a - b) for a, b in zip(reference_scores, scores, strict=True))
+    speedup = bf16_rate / fp32_rate
+    if speedup >= BF16_MIN_SPEEDUP and diff <= BF16_MAX_SCORE_DIFF:
+        options = options.model_copy(update={"reranker_dtype": "bfloat16"})
+        notes.append(f"Ranking uses BF16: {speedup:.1f}× faster, scores within {diff:.3f}.")
+    else:
+        notes.append(
+            f"Ranking stays FP32 (BF16 {speedup:.1f}× speed, scores differ by {diff:.3f})."
+        )
+    torch.set_num_threads(best)
+    return TuneResult(options, notes)

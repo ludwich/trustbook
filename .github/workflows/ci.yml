@@ -55,6 +55,13 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
+      - name: Eval runner (ruff, mypy, pytest)
+        run: |
+          uv run ruff check ../eval
+          uv run ruff format --check ../eval
+          uv run mypy --strict ../eval/runner.py ../eval/smoke/fetch_corpus.py
+          uv run pytest ../eval/tests
+
   frontend:
     name: Frontend (lint, typecheck, test, build)
     runs-on: ubuntu-24.04

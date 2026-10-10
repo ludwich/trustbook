@@ -12,6 +12,7 @@ Writes plain model folders plus ``models.lock.json``:
     grounding/flan-t5-base/   tokenizer + config only (HHEM's remote code needs it; pinned here)
     stt/          whistle.cact + libneedle3.so (Needle engine extracted from its pinned wheel)
                   + calibration.wav (public-domain speech for the speed calibration)
+    docling/      layout (heron), TableFormer (accurate) and RapidOCR models for document parsing
 
 Every revision is a full commit hash, so a rebuild always gets byte-identical weights.
 """
@@ -78,6 +79,30 @@ STT_ENGINE = Pinned(
 )
 STT_ENGINE_WHEEL = "python/cactus_needle-3.3.0-py3-none-manylinux2014_x86_64.whl"
 
+# Docling (D-026). Folder names follow Docling's artifacts_path layout.
+DOCLING_LAYOUT = Pinned(
+    "docling-project/docling-layout-heron",
+    "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8",
+    ("config.json", "preprocessor_config.json", "model.safetensors"),
+    "Apache-2.0",
+)
+DOCLING_TABLEFORMER = Pinned(  # commit that dual-licenses the v2.3.0 weights as Apache-2.0
+    "docling-project/docling-models",
+    "2199320848bb9a8a519d22e4b528185a4f9a6f64",
+    ("config.json", "model_artifacts/tableformer/accurate/*"),
+    "Apache-2.0",
+)
+# RapidOCR PP-OCRv6 small (torch, English) is fetched by Docling's own helper from ModelScope;
+# it has no revision pinning, so every file is checked against these hashes.
+RAPIDOCR_SHA256 = {
+    "PP-OCRv6_det_small.pth": "fbdc74c97ea7b770ab22cbdc1bba01a52bdf1975efcf3442057356d622b05d54",
+    "PP-OCRv6_rec_small.pth": "0107b2ad694ccc9b1db7cf9ed3ffbc93d1795d9e08d9cf823127243a87bce516",
+    "ch_ppocr_mobile_v2.0_cls_mobile.pth": (
+        "bfe13860824b3365c0c7f7ccfcddc8ff11645c60051739ff18bc9913f60c98e1"
+    ),
+    "ppocrv6_dict.txt": "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
+}
+
 # 11 s of real speech for the speech-to-text calibration (Whistle skips non-speech, so synthetic
 # audio would measure nothing). JFK's 1961 inaugural address is a US public-domain work; the file
 # ships with whisper.cpp (MIT). Pinned by commit and checked by hash.
@@ -120,6 +145,19 @@ def fetch_speech_sample(folder: Path) -> None:
     print(f"speech sample -> {folder / 'calibration.wav'}", flush=True)
 
 
+def fetch_docling(folder: Path) -> None:
+    fetch(DOCLING_LAYOUT, folder / "docling-project--docling-layout-heron")
+    fetch(DOCLING_TABLEFORMER, folder / "docling-project--docling-models")
+    from docling.models.stages.ocr.rapid_ocr_model import RapidOcrModel
+
+    ocr = folder / "RapidOcr"
+    RapidOcrModel.download_models("torch", local_dir=ocr, lang="en")
+    found = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in ocr.rglob("*") if p.is_file()}
+    if found != RAPIDOCR_SHA256:
+        raise SystemExit(f"RapidOCR models differ from the pinned set: {sorted(found)}")
+    print(f"rapidocr (hash-checked) -> {ocr}", flush=True)
+
+
 def entry(model: Pinned, folder: Path, dest: Path) -> dict[str, object]:
     return {
         "model_id": model.repo,
@@ -143,6 +181,7 @@ def main() -> int:
     fetch(STT_WEIGHTS, dest / "stt")
     fetch_engine(dest / "stt")
     fetch_speech_sample(dest / "stt")
+    fetch_docling(dest / "docling")
 
     lock = {
         "models": {
@@ -156,6 +195,13 @@ def main() -> int:
                                     "revision": GROUNDING_TOKENIZER.revision},
             "stt_engine": {"model_id": STT_ENGINE.repo, "revision": STT_ENGINE.revision,
                            "file": STT_ENGINE_WHEEL},
+            "docling_layout": {"model_id": DOCLING_LAYOUT.repo, "revision": DOCLING_LAYOUT.revision,
+                               "license": DOCLING_LAYOUT.license},
+            "docling_tableformer": {"model_id": DOCLING_TABLEFORMER.repo,
+                                    "revision": DOCLING_TABLEFORMER.revision,
+                                    "license": DOCLING_TABLEFORMER.license},
+            "docling_ocr": {"model_id": "RapidAI/RapidOCR PP-OCRv6 small (torch, en)",
+                            "sha256": RAPIDOCR_SHA256, "license": "Apache-2.0"},
             "stt_calibration_sample": {"url": SPEECH_SAMPLE_URL, "sha256": SPEECH_SAMPLE_SHA256,
                                        "license": "Public domain (US government work)"},
         },

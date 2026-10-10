@@ -1,5 +1,5 @@
 import { http, HttpResponse } from "msw";
-import { allCapabilities, jobList } from "./fixtures";
+import { allCapabilities, jobList, overview } from "./fixtures";
 
 /** Baseline API: setup done, nothing running, no spaces. Tests override with server.use(). */
 export function defaultHandlers() {
@@ -15,9 +15,22 @@ export function defaultHandlers() {
         setup_completed: true,
         workers: 2,
         thresholds: { refuse: 0.15, verify: 0.5 },
+        hints_dismissed: [],
       }),
     ),
     http.get("*/api/calibration", () => HttpResponse.json({ status: "done", results: null })),
     http.get("*/api/request-log", () => HttpResponse.json([])),
+    // Phase 1: an empty space.
+    http.get("*/api/spaces/:sid/sources", () => HttpResponse.json([])),
+    http.get("*/api/spaces/:sid/chat/status", () =>
+      HttpResponse.json({
+        enabled_sources: 0,
+        ready_sources: 0,
+        total_sources: 0,
+        chat_ready: false,
+      }),
+    ),
+    http.get("*/api/spaces/:sid/conversations", () => HttpResponse.json([])),
+    http.get("*/api/spaces/:sid/overview", () => HttpResponse.json(overview())),
   ];
 }

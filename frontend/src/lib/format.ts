@@ -68,3 +68,66 @@ export function formatNumber(n: number | null | undefined, digits = 1): string {
   if (n === null || n === undefined) return "Not measured";
   return n.toLocaleString("en-US", { maximumFractionDigits: digits });
 }
+
+function roundSpeed(n: number): string {
+  return n >= 10
+    ? Math.round(n).toLocaleString("en-US")
+    : n.toLocaleString("en-US", { maximumFractionDigits: 1 });
+}
+
+/**
+ * Speech-to-text speed from a real-time factor (seconds of processing per second of audio).
+ * 0.04 → "25× faster than real time", 2.5 → "2.5× slower than real time".
+ */
+export function formatRealtimeFactor(factor: number | null | undefined): string {
+  if (factor === null || factor === undefined || !Number.isFinite(factor) || factor <= 0) {
+    return "Not measured";
+  }
+  if (factor >= 0.95 && factor <= 1.05) return "about real time";
+  if (factor < 1) return `${roundSpeed(1 / factor)}× faster than real time`;
+  return `${roundSpeed(factor)}× slower than real time`;
+}
+
+interface ComputerCpu {
+  model: string | null;
+  logical: number;
+  usable: number;
+}
+
+interface ComputerRuntime {
+  torch_threads: number | null;
+  embedding_dtype: string | null;
+}
+
+/**
+ * Compact "This computer" summary, e.g.
+ * "AMD Ryzen AI Max+ 395 · uses 32 of 32 CPUs · 16 model threads · BF16".
+ * Returns null when neither part is known (results from before calibration v3).
+ */
+export function formatComputer(
+  cpu: ComputerCpu | null | undefined,
+  runtime: ComputerRuntime | null | undefined,
+): string | null {
+  if (!cpu && !runtime) return null;
+  const parts: string[] = [];
+  if (cpu) {
+    const model = cpu.model?.trim();
+    if (model) parts.push(model);
+    parts.push(`uses ${cpu.usable} of ${plural(cpu.logical, "CPU")}`);
+  }
+  if (runtime) {
+    if (runtime.torch_threads !== null) parts.push(plural(runtime.torch_threads, "model thread"));
+    parts.push(runtime.embedding_dtype === "bfloat16" ? "BF16" : "FP32");
+  }
+  return parts.join(" · ");
+}
+
+/** Seconds as a clock: 75 → "01:15", 3725 → "1:02:05". */
+export function formatClock(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${String(m).padStart(2, "0")}:${ss}`;
+}

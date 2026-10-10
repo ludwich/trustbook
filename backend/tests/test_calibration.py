@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from app.capabilities.audio import wav_bytes
-from app.capabilities.bundled import ProviderRegistry
+from app.capabilities.bundled import ProviderRegistry, RuntimeOptions, TuneResult
+from app.capabilities.cpu import CpuInfo
 from app.config import Paths, ensure_layout
 from app.jobs.calibration import (
     CALIBRATE_KIND,
     CALIBRATION_VERSION,
-    PARSE_NOTE,
     SPEECH_SAMPLE,
     CalibrationService,
     synthetic_chunks,
 )
 from app.jobs.handlers import JobCancelledError, JobContext
 from app.jobs.repository import JobRepository
-from tests.fakes import BrokenProvider
+from tests.fakes import BrokenProvider, FakeEmbedder, FakeReranker, FakeTranscriber
 
 
 class Clock:
@@ -69,7 +71,7 @@ def test_run_with_fakes(
     assert result.parse_pages_per_s is None
     assert result.notes == [
         "Speech-to-text speed measured on synthetic audio; it may be too low.",
-        PARSE_NOTE,
+        "Document reading speed not measured: the document parser is not set up.",
     ]
     assert progress[0] == 0.0 and progress[-1] == 1.0
     saved = json.loads(paths.calibration_file.read_text())
@@ -86,7 +88,9 @@ def test_stt_uses_baked_speech_sample(
     sample.write_bytes(wav_bytes(5.0))
     result = CalibrationService(paths, fake_providers, repo, clock=Clock()).run(_ctx()[0])
     assert result.stt_realtime_factor == 0.05  # 0.25 s / 5 s of real speech
-    assert result.notes == [PARSE_NOTE]
+    assert result.notes == [
+        "Document reading speed not measured: the document parser is not set up."
+    ]
 
 
 def test_old_calibration_is_redone(
@@ -112,7 +116,7 @@ def test_run_without_models(paths: Paths, repo: JobRepository) -> None:
         "Embedding speed not measured: model files are missing from this install.",
         "Reranking speed not measured: it failed (RuntimeError).",
         "Speech-to-text speed not measured: model files are missing from this install.",
-        PARSE_NOTE,
+        "Document reading speed not measured: the document parser is not set up.",
     ]
 
 
@@ -148,3 +152,67 @@ def test_unreadable_file(
     ensure_layout(paths)
     paths.calibration_file.write_text("{}")
     assert CalibrationService(paths, fake_providers, repo).read() is None
+
+
+def test_tuning_result_is_saved_and_applied(
+    paths: Paths, fake_providers: ProviderRegistry, repo: JobRepository
+) -> None:
+    ensure_layout(paths)
+    seen: list[tuple[CpuInfo, int]] = []
+
+    def tuner(_registry: ProviderRegistry, cpu: CpuInfo, texts: Sequence[str]) -> TuneResult:
+        seen.append((cpu, len(texts)))
+        return TuneResult(
+            RuntimeOptions(torch_threads=6, embedding_dtype="bfloat16"),
+            ["Uses 6 model threads (fastest of 4, 6, 8)."],
+        )
+
+    providers = ProviderRegistry(paths.models_dir, factories={}, tuner=tuner)
+    providers.override(
+        embedder=FakeEmbedder(), reranker=FakeReranker(), transcriber=FakeTranscriber()
+    )
+    result = CalibrationService(paths, providers, repo, clock=Clock()).run(_ctx()[0])
+    assert seen and seen[0][1] == 12
+    assert result.runtime == RuntimeOptions(torch_threads=6, embedding_dtype="bfloat16")
+    assert providers.options == result.runtime
+    assert result.cpu is not None and result.cpu.usable >= 1
+    assert result.notes[0] == "Uses 6 model threads (fastest of 4, 6, 8)."
+    saved = json.loads(paths.calibration_file.read_text())
+    assert saved["runtime"]["embedding_dtype"] == "bfloat16"
+
+
+def test_tuning_failure_falls_back_to_defaults(
+    paths: Paths, fake_providers: ProviderRegistry, repo: JobRepository
+) -> None:
+    ensure_layout(paths)
+
+    def tuner(_registry: ProviderRegistry, _cpu: CpuInfo, _texts: Sequence[str]) -> TuneResult:
+        raise RuntimeError("boom")
+
+    providers = ProviderRegistry(paths.models_dir, factories={}, tuner=tuner)
+    providers.override(
+        embedder=FakeEmbedder(), reranker=FakeReranker(), transcriber=FakeTranscriber()
+    )
+    result = CalibrationService(paths, providers, repo, clock=Clock()).run(_ctx()[0])
+    assert result.runtime is not None and result.runtime.embedding_dtype == "float32"
+    assert result.notes[0] == "Model settings not tuned: it failed (RuntimeError)."
+
+
+def test_parse_speed_uses_the_document_parser(
+    paths: Paths, fake_providers: ProviderRegistry, repo: JobRepository
+) -> None:
+    ensure_layout(paths)
+    service = CalibrationService(paths, fake_providers, repo, clock=Clock())
+    parsed: list[int] = []
+
+    def parse(path: Path) -> None:
+        from pypdf import PdfReader
+
+        parsed.append(len(PdfReader(path).pages))
+
+    service.parse_pdf = parse
+    service.parser_name = lambda: "the basic PDF reader"
+    result = service.run(_ctx()[0])
+    assert parsed == [1, 6]  # warm-up page, then the timed document
+    assert result.parse_pages_per_s == 24.0  # 6 pages / 0.25 s
+    assert "Document reading speed measured with the basic PDF reader." in result.notes
