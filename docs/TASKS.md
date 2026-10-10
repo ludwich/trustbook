@@ -1,70 +1,50 @@
-# Phase 1 — Grounded chat (branch `phase-1`)
+# Phase 2 — Trust and flow (branch `phase-2`)
 
-Gate 1: citation precision ≥ 90% on the smoke set using Ludwig's chat endpoint.
+Gate 2: correct-refusal rate ≥ 95% on unanswerable questions, with citation precision still ≥ 90%.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
-## 0. Gate 0 follow-ups (Ludwig's findings, do first)
-- [x] F1 Slow bundled models in Docker Desktop/WSL2 (4 chunks/s, 8.9 pairs/s on 32 cores): measure torch thread use inside the container (main vs worker threads), fix, log the cause in DECISIONS.md
-- [x] F2 Speed test wording: show STT as "N× faster than real time"
-- [x] F3 Cap "High" power workers at a sensible maximum (RAM per worker)
+## 0. Gate 1 follow-ups (Ludwig's findings, do first; each logged in DECISIONS.md)
+- [ ] G1 Power "High" label shows the real (capped) worker count
+- [ ] G2 Indexing one large source uses all cores: parallel parsing/chunking per file, concurrent embedding streams (tuned by calibration), batched LanceDB writes
+- [ ] G3 Code answers include definitions of referenced module-level constants; `must_contain` becomes a tracked metric in the eval report
+- [ ] G4 Secrets warning shown once and clickable: report (file, line, rule ID) viewable in the UI
+- [ ] G5 Refusal card: no repeated title; suggestion is a readable topic
+- [ ] G6 Code viewer: exact highlight, monospace, line numbers, no flash of the file top
+- [ ] G7 Failed sources: unticked, not tickable, not counted
+- [ ] G8 Web search: `language=en` sent to SearXNG (config/params only), bare homepages demoted for specific queries
+- [ ] E2E tests for what Ludwig did not verify at Gate 1: PDF upload (incl. OCR warning), overview + one-time hint, checkbox scoping
+- [x] Backlog items written to docs/BACKLOG.md (not built)
 
-## 1. Sources and ingestion (SPEC §7.1)
-- [x] Source model + API: list, add, enable/disable checkbox, groups (documents, transcripts, web, code), delete, refresh
-- [x] Upload: store original → Docling (PDF, DOCX, PPTX, XLSX) / text / audio → STT; pypdf fallback
-- [x] Paste text
-- [x] URL: fetch → Trafilatura → Crawl4AI fallback (< 200 chars) → dated snapshot
-- [x] YouTube: yt-dlp captions (manual, then auto) → else audio → STT; timestamps
-- [x] Web search: SearXNG / Brave / Tavily results → user ticks → URL sources
-- [x] Link folder: picker over `/host` (read-only), ignore rules, documents parsed (code chunking in Phase 3)
-- [x] Snapshots: `snapshot.md`, `map.json` (offsets → page / timestamp / file + line), originals for uploads
-- [x] Bake Docling models; bump `CALIBRATION_VERSION` with parse speed measured
-- [x] Voice-activity check before STT (D-008)
+## 1. Grounding layers 4–6 (SPEC §8)
+- [ ] Layer 4: sentence verification with the grounding checker (max score over cited chunks ≥ verify_threshold 0.5); failing sentences removed; one regeneration if more than half fail; then the refusal rule
+- [ ] Refusal rule: refuse if > 50% of sentences fail or the first sentence fails
+- [ ] Layer 5: deterministic code checks (cited file/line ranges exist in the indexed snapshot; every backticked identifier occurs in its cited chunks)
+- [ ] Grounding disabled → badge "Unverified"
+- [ ] Badges: Verified · Partially verified (N removed; drawer "Unverified, not from your sources") · Refused · Unverified
+- [ ] Layer 6: eval runner records scores; private-set support; threshold tuning report
 
-## 2. Chunking and index (SPEC §7.2, §2)
-- [x] Heading-aware document chunker (target 500, max 800, overlap 80; locator = pages)
-- [x] Transcript chunker (speaker turns ≤ ~500 tokens, never mid-sentence; locator = timestamps)
-- [x] Web chunker (locator = section heading + offset)
-- [x] LanceDB per space (`vectors/`), embeddings, FTS index
+## 2. Source viewer (SPEC §9, §12)
+- [ ] Full viewer: documents by page, transcripts with timestamps, web by section, code with line numbers + commit
 
-## 3. Processing UX (SPEC §7.5)
-- [x] Status flow queued → reading → indexing → ready | failed, progress
-- [x] Failure cause + next step; quality warnings (Whistle transcript, OCR, < 300 chars)
+## 3. Processing, cost and flow (SPEC §11)
+- [ ] Estimates before adds above 2 minutes ("About N files, roughly M min on this PC") → confirm/cancel
+- [ ] Queue view: ETA from calibration, pause / reorder / cancel across spaces; header "about M min left"
 
-## 4. Retrieval and grounding layers 1–3 (SPEC §8)
-- [x] Enabled-sources filter, vector top 40 + FTS top 40 → RRF (k = 60) → rerank → top 8 (≤ ~6,000 tokens)
-- [x] Layer 1: no web tool in the chat pipeline
-- [x] Layer 2: refuse before generating if top rerank score < refuse_threshold (0.15)
-- [x] Layer 3: forced citations JSON; sentences without chunk_ids dropped; JSON schema → JSON mode + validation + one retry
+## 4. Gate logging (SPEC §5, §6)
+- [ ] `gate` capability used as a fixed-choice router; every decision logged to `gate_log` (input, decision, confidence, user correction)
 
-## 5. Chat (SPEC §9)
-- [x] Conversations + messages persisted; streaming at sentence granularity
-- [x] Inline numbered citations → source viewer at passage (basic viewer; full viewer is Phase 2)
-- [x] "Show sources used" chip; "Using X of Y sources"
-- [x] Space overview + three suggested questions (auto on first ready source, refresh on request, per-space toggle, token estimate when remote)
-- [x] One-time hint
+## 5. Evaluation and tuning
+- [ ] Runner: per-question top rerank score and verifier scores in a JSON sidecar; threshold sweep table
+- [ ] Tune refuse/verify thresholds on the smoke set + Ludwig's private set; record in GATES.md
 
-## 6. Frontend
-- [x] Sources panel: add-source menu (upload, folder, URL, YouTube, search, paste), groups with checkboxes, statuses, warnings
-- [x] Chat view with streaming, citations, chips; overview card
-- [x] Playwright e2e: create space → paste text → ask → cited answer (mock LLM) — runs in release.yml against the built image before push
-
-## 7. Evaluation (SPEC §13)
-- [x] `eval/runner.py`: citation precision, correct-refusal rate, latency p50/p95, Markdown report; `--questions` any path
-- [x] `eval/format.md`
-- [x] `eval/smoke/`: psf/requests at a pinned commit + docs; 15 questions (5 docs, 5 code, 2 multi-source, 3 unanswerable), each verified by hand
-
-## 8. Gate
-- [x] Licenses for new deps (Docling, Trafilatura, Crawl4AI, yt-dlp, LanceDB, …) in THIRD_PARTY_LICENSES.md
-- [x] CI green, PR `phase-1 → main` (#2), `:phase-1-rc` published (e2e gate passed in release.yml)
-- [x] Run smoke set against Ludwig's endpoint; record citation precision in GATES.md
-- [x] `docker image prune -f`; stop and summarise — **waiting for Ludwig's Gate 1 verdict**
-
-- [x] Calibration: exclusive model lock (D-030), parse speed measured (version 4)
-- [x] Smoke-set dry runs against Ludwig's llama-server (Qwen3.6-35B-A3B): 87.5% → 92.0% → 100% after hand-verified key fixes
-
-- [x] Exact gate command on the published `phase-1-rc`: 100% (23/23), refusals 3/3
+## 6. Gate
+- [ ] CI green, PR `phase-2 → main`, `:phase-2-rc` published (e2e gate passes)
+- [ ] Smoke set: refusal ≥ 95%, precision ≥ 90%; GATES.md checklist
+- [ ] `docker image prune -f`; stop and summarise
 
 ## Notes for a restarted session
-- Phase 0 merged (`a60f774`), tagged `phase-0`. Local branch `phase-0` deleted; push tags as `refs/tags/phase-N`
-  (a branch and tag share the name).
+- Phase 1 merged (`65d07c7`), tagged `phase-1`. Push tags as `refs/tags/phase-N`.
+- Never `git commit -a` while agents edit the tree; stage explicit paths.
+- ML work outside CI: use a separate venv (`UV_PROJECT_ENVIRONMENT=<scratch>/mlvenv uv sync --extra ml`) so
+  agents' `uv run` doesn't fight over backend/.venv.
