@@ -588,8 +588,13 @@ class CapabilityRegistry:
         self,
         cap_id: str,
         draft: CapabilityConfigUpdate | None = None,
+        *,
+        require_model: bool = True,
     ) -> EndpointConfig:
-        """Resolve the endpoint to call for ``cap_id`` (gate with use_chat → chat's endpoint)."""
+        """Resolve the endpoint to call for ``cap_id`` (gate with use_chat → chat's endpoint).
+
+        ``require_model=False`` is for listing models, which is how users find the name.
+        """
         settings = self.effective(cap_id, draft)
         source_id = cap_id
         if cap_id == "gate" and settings.use_chat:
@@ -597,7 +602,11 @@ class CapabilityRegistry:
             settings = self.stored("chat")
         if not self._uses_endpoint(source_id, settings):
             raise ConfigError(f"{self.manifest(cap_id).label} does not use an endpoint.")
-        missing = self.missing_fields(source_id, settings)
+        missing = [
+            name
+            for name in self.missing_fields(source_id, settings)
+            if require_model or name != "model"
+        ]
         if missing:
             evaluation = self._evaluate_endpoint(source_id, settings)
             raise ConfigError(evaluation.detail)

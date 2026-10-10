@@ -239,6 +239,18 @@ def test_list_models(registry: CapabilityRegistry, checker: HealthChecker, route
     assert checker.list_models("stt", draft) == ["whisper"]
 
 
+def test_list_models_needs_no_model_name(
+    registry: CapabilityRegistry, checker: HealthChecker, router: Router
+) -> None:
+    """Fresh install: the wizard lists models before the user knows the name."""
+    router.json("GET", f"{LLM}/models", {"data": [{"id": "qwen"}]})
+    draft = Update(preset="llama_server", base_url=LLM, model=None)
+    assert checker.list_models("chat", draft) == ["qwen"]
+    assert "(none yet)" not in str(router.requests[-1].url)
+    with pytest.raises(ConfigError, match="model name"):
+        registry.endpoint("chat", draft)  # calling the model still needs one
+
+
 def test_searxng_probe_retries_then_marks_ready(
     registry: CapabilityRegistry, checker: HealthChecker, router: Router
 ) -> None:

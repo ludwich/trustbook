@@ -6,6 +6,7 @@ import logging
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from app.capabilities.adapters.base import AdapterError
@@ -25,6 +26,7 @@ from app.config import TestResult
 logger = logging.getLogger("trustbook.health")
 
 PING_PROMPT = "Reply with OK"
+LIST_MODELS_PLACEHOLDER = "(none yet)"
 PING_TIMEOUT_S = 30.0
 PING_MAX_TOKENS = 256  # reasoning models may spend tokens thinking before they answer
 
@@ -117,7 +119,9 @@ class HealthChecker:
             raise ConfigError("Switch speech-to-text to an endpoint to list its models.")
         if manifest.contract not in ("openai_chat", "openai_transcriptions", "openai_speech"):
             raise ConfigError(f"{manifest.label} has no model list.")
-        endpoint = self._registry.endpoint(cap_id, draft)
+        endpoint = self._registry.endpoint(cap_id, draft, require_model=False)
+        # Listing never sends the model name, but the adapters are built around one.
+        endpoint = replace(endpoint, model=endpoint.model or LIST_MODELS_PLACEHOLDER)
         if cap_id == "stt":
             return build_stt_adapter(endpoint, self._http).list_models()
         return build_chat_adapter(endpoint, self._http, timeout=PING_TIMEOUT_S).list_models()
