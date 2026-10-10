@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import wave
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -44,8 +45,9 @@ class FakeTranscriber:
 
     def transcribe(self, wav_path: Path) -> Transcript:
         self.paths.append(wav_path)
-        assert wav_path.exists()
-        return Transcript(text="", duration_s=1.0)
+        with wave.open(str(wav_path), "rb") as audio:
+            duration = audio.getnframes() / float(audio.getframerate())
+        return Transcript(text="", duration_s=duration)
 
 
 class BrokenProvider:

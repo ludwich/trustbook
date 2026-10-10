@@ -68,7 +68,10 @@ def main() -> int:
         _tone_wav(wav)
         transcript = transcriber.transcribe(wav)
     assert abs(transcript.duration_s - 1.0) < 0.01, "stt duration"
-    print(f"stt ok: {transcript.duration_s:.1f}s transcribed")
+    speech = models["stt"].path / "calibration.wav"
+    spoken = transcriber.transcribe(speech).text.lower()
+    assert "ask not what your country" in spoken, f"stt: {spoken!r}"
+    print(f"stt ok: {spoken!r}")
     print("ALL BUNDLED MODELS OK")
     return 0
 

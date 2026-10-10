@@ -123,3 +123,11 @@ grounding correctness > data safety > simplicity > performance > features.
   for its build step only, not copied into the image. The model self-check runs with `--network=none`.
 - **Podman:** `service_completed_successfully` (used by `searxng-init`) needs podman-compose ≥ 1.1 or Podman
   with the docker-compose provider. This is noted in the README.
+
+### D-018 Calibration measures what this container can really use
+- **Decision:** CPU count = affinity mask capped by the cgroup quota (`/sys/fs/cgroup/cpu.max`), not
+  `os.cpu_count()`, which reports the host's cores inside containers. STT speed is timed on an 11 s public-domain
+  speech clip (JFK inaugural, from whisper.cpp at a pinned commit, SHA-256 checked) baked next to the Whistle
+  model, because Whistle skips non-speech almost instantly (a tone measured RTF 0.002). Calibration re-runs when
+  `CALIBRATION_VERSION` rises (now 2). Phase 1 bumps it when the document parser arrives.
+- **Also:** the image build's self-check transcribes that clip and requires the exact words.

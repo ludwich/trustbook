@@ -5,11 +5,14 @@ from typing import Any
 
 import pytest
 
+from app.capabilities.audio import wav_bytes
 from app.capabilities.bundled import ProviderRegistry
 from app.config import Paths, ensure_layout
 from app.jobs.calibration import (
     CALIBRATE_KIND,
+    CALIBRATION_VERSION,
     PARSE_NOTE,
+    SPEECH_SAMPLE,
     CalibrationService,
     synthetic_chunks,
 )
@@ -59,16 +62,42 @@ def test_run_with_fakes(
     service = CalibrationService(paths, fake_providers, repo, clock=Clock())
     ctx, progress = _ctx()
     result = service.run(ctx)
-    assert result.version == 1
+    assert result.version == CALIBRATION_VERSION
     assert result.embedding_chunks_per_s == 256.0  # 64 chunks / 0.25 s
     assert result.rerank_pairs_per_s == 128.0
-    assert result.stt_realtime_factor == 0.025  # 0.25 s / 10 s
+    assert result.stt_realtime_factor == 0.025  # 0.25 s / 10 s of synthetic audio
     assert result.parse_pages_per_s is None
-    assert result.notes == [PARSE_NOTE]
+    assert result.notes == [
+        "Speech-to-text speed measured on synthetic audio; it may be too low.",
+        PARSE_NOTE,
+    ]
     assert progress[0] == 0.0 and progress[-1] == 1.0
     saved = json.loads(paths.calibration_file.read_text())
     assert saved["cpu_count"] >= 1
     assert service.read() == result
+
+
+def test_stt_uses_baked_speech_sample(
+    paths: Paths, fake_providers: ProviderRegistry, repo: JobRepository
+) -> None:
+    ensure_layout(paths)
+    sample = paths.models_dir / "stt" / SPEECH_SAMPLE
+    sample.parent.mkdir(parents=True, exist_ok=True)
+    sample.write_bytes(wav_bytes(5.0))
+    result = CalibrationService(paths, fake_providers, repo, clock=Clock()).run(_ctx()[0])
+    assert result.stt_realtime_factor == 0.05  # 0.25 s / 5 s of real speech
+    assert result.notes == [PARSE_NOTE]
+
+
+def test_old_calibration_is_redone(
+    paths: Paths, fake_providers: ProviderRegistry, repo: JobRepository
+) -> None:
+    ensure_layout(paths)
+    service = CalibrationService(paths, fake_providers, repo, clock=Clock())
+    current = service.run(_ctx()[0])
+    assert service.ensure_first_run() is None
+    paths.calibration_file.write_text(json.dumps({**current.model_dump(), "version": 1}))
+    assert service.ensure_first_run() is not None
 
 
 def test_run_without_models(paths: Paths, repo: JobRepository) -> None:

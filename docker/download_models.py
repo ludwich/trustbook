@@ -11,6 +11,7 @@ Writes plain model folders plus ``models.lock.json``:
     grounding/    vectara/hallucination_evaluation_model
     grounding/flan-t5-base/   tokenizer + config only (HHEM's remote code needs it; pinned here)
     stt/          whistle.cact + libneedle3.so (Needle engine extracted from its pinned wheel)
+                  + calibration.wav (public-domain speech for the speed calibration)
 
 Every revision is a full commit hash, so a rebuild always gets byte-identical weights.
 """
@@ -18,9 +19,11 @@ Every revision is a full commit hash, so a rebuild always gets byte-identical we
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
+import urllib.request
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +78,15 @@ STT_ENGINE = Pinned(
 )
 STT_ENGINE_WHEEL = "python/cactus_needle-3.3.0-py3-none-manylinux2014_x86_64.whl"
 
+# 11 s of real speech for the speech-to-text calibration (Whistle skips non-speech, so synthetic
+# audio would measure nothing). JFK's 1961 inaugural address is a US public-domain work; the file
+# ships with whisper.cpp (MIT). Pinned by commit and checked by hash.
+SPEECH_SAMPLE_URL = (
+    "https://raw.githubusercontent.com/ggml-org/whisper.cpp/"
+    "d1be6fde11ac6e0407606b4e42fe72d34add8037/samples/jfk.wav"
+)
+SPEECH_SAMPLE_SHA256 = "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e"
+
 
 def fetch(model: Pinned, folder: Path) -> None:
     folder.mkdir(parents=True, exist_ok=True)
@@ -96,6 +108,16 @@ def fetch_engine(folder: Path) -> None:
     with zipfile.ZipFile(wheel) as archive:
         (folder / "libneedle3.so").write_bytes(archive.read("needle/libneedle3.so"))
     print(f"needle engine -> {folder / 'libneedle3.so'}", flush=True)
+
+
+def fetch_speech_sample(folder: Path) -> None:
+    with urllib.request.urlopen(SPEECH_SAMPLE_URL, timeout=60) as response:  # noqa: S310
+        data = response.read()
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != SPEECH_SAMPLE_SHA256:
+        raise SystemExit(f"speech sample hash mismatch: {digest}")
+    (folder / "calibration.wav").write_bytes(data)
+    print(f"speech sample -> {folder / 'calibration.wav'}", flush=True)
 
 
 def entry(model: Pinned, folder: Path, dest: Path) -> dict[str, object]:
@@ -120,6 +142,7 @@ def main() -> int:
     fetch(GROUNDING_TOKENIZER, dest / "grounding" / "flan-t5-base")
     fetch(STT_WEIGHTS, dest / "stt")
     fetch_engine(dest / "stt")
+    fetch_speech_sample(dest / "stt")
 
     lock = {
         "models": {
@@ -133,6 +156,8 @@ def main() -> int:
                                     "revision": GROUNDING_TOKENIZER.revision},
             "stt_engine": {"model_id": STT_ENGINE.repo, "revision": STT_ENGINE.revision,
                            "file": STT_ENGINE_WHEEL},
+            "stt_calibration_sample": {"url": SPEECH_SAMPLE_URL, "sha256": SPEECH_SAMPLE_SHA256,
+                                       "license": "Public domain (US government work)"},
         },
     }
     (dest / "models.lock.json").write_text(json.dumps(lock, indent=2) + "\n", "utf-8")

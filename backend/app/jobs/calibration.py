@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import tempfile
 import time
 from collections.abc import Callable
@@ -19,15 +18,17 @@ from app.config import Paths
 from app.db.models import Job
 from app.fsutil import atomic_write_json
 from app.jobs.handlers import JobContext
+from app.jobs.pool import usable_cpus
 from app.jobs.repository import JobRepository
 from app.timeutil import utc_now_iso
 
 logger = logging.getLogger("trustbook.calibration")
 
-CALIBRATION_VERSION = 1
+CALIBRATION_VERSION = 2  # 2: real speech sample for STT, usable CPUs
 CALIBRATE_KIND = "calibrate"
 CALIBRATE_TITLE = "Measure this computer's speed"
 EMBED_CHUNKS = 64
+SPEECH_SAMPLE = "calibration.wav"  # public-domain speech, see docker/download_models.py
 RERANK_PAIRS = 32
 STT_SECONDS = 10.0
 PARSE_NOTE = "Document parser arrives in Phase 1."
@@ -118,8 +119,9 @@ class CalibrationService:
         return self._jobs.enqueue(CALIBRATE_KIND, CALIBRATE_TITLE)
 
     def ensure_first_run(self) -> Job | None:
-        """On first start (no calibration.json), queue a calibration run."""
-        if self._paths.calibration_file.exists():
+        """Queue a calibration run on first start or when the saved one is outdated."""
+        saved = self.read()
+        if saved is not None and saved.version >= CALIBRATION_VERSION:
             return None
         return self.enqueue()
 
@@ -133,13 +135,13 @@ class CalibrationService:
         rerank = self._guard("Reranking speed", self._measure_rerank, notes)
         ctx.check_cancelled()
         ctx.progress(0.6)
-        stt = self._guard("Speech-to-text speed", self._measure_stt, notes)
+        stt = self._guard("Speech-to-text speed", lambda: self._measure_stt(notes), notes)
         ctx.check_cancelled()
         notes.append(PARSE_NOTE)
         result = Calibration(
             version=CALIBRATION_VERSION,
             measured_at=utc_now_iso(),
-            cpu_count=os.cpu_count() or 1,
+            cpu_count=usable_cpus(),
             embedding_chunks_per_s=embed,
             rerank_pairs_per_s=rerank,
             parse_pages_per_s=None,
@@ -182,12 +184,21 @@ class CalibrationService:
         query = "Which supplier risks were found in the audit?"
         return RERANK_PAIRS / self._timed(lambda: reranker.score(query, docs))
 
-    def _measure_stt(self) -> float:
+    def _measure_stt(self, notes: list[str]) -> float:
         transcriber = self._providers.transcriber()
+        # Whistle short-circuits on non-speech, so time a real speech clip baked into the image
+        # (docker/download_models.py); synthetic audio is only a last resort.
+        sample = self._providers.models_dir / "stt" / SPEECH_SAMPLE
         with tempfile.TemporaryDirectory(prefix="trustbook-calibrate-") as folder:
-            path = Path(folder) / "sample.wav"
-            path.write_bytes(wav_bytes(1.0))
-            transcriber.transcribe(path)  # warm up
-            path.write_bytes(wav_bytes(STT_SECONDS, noise=True))
-            elapsed = self._timed(lambda: transcriber.transcribe(path))
-        return elapsed / STT_SECONDS
+            warm = Path(folder) / "warm.wav"
+            warm.write_bytes(wav_bytes(1.0))
+            transcriber.transcribe(warm)  # model load is not part of the speed
+            if not sample.is_file():
+                notes.append("Speech-to-text speed measured on synthetic audio; it may be too low.")
+                sample = Path(folder) / "sample.wav"
+                sample.write_bytes(wav_bytes(STT_SECONDS, noise=True))
+            durations: list[float] = []
+            elapsed = self._timed(
+                lambda: durations.append(transcriber.transcribe(sample).duration_s)
+            )
+        return elapsed / max(durations[0], 1e-6)

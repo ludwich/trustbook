@@ -6,6 +6,7 @@ from dataclasses import replace
 from fastapi.testclient import TestClient
 
 from app.config import Paths
+from app.jobs.calibration import CALIBRATION_VERSION
 from tests.conftest import AppFactory, wait_for
 
 
@@ -60,7 +61,7 @@ def test_first_start_calibration_runs(make_client: AppFactory, paths: Paths) -> 
     client = make_client(start_workers=True, calibrate_on_start=True)
     wait_for(lambda: client.get("/api/calibration").json()["status"] == "done")
     results = client.get("/api/calibration").json()["results"]
-    assert results["version"] == 1
+    assert results["version"] == CALIBRATION_VERSION
     assert results["embedding_chunks_per_s"] > 0
     assert paths.calibration_file.is_file()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -240,3 +241,15 @@ def test_pool_resize_and_active_space(repo: JobRepository) -> None:
     finally:
         pool.stop()
     assert set(order) == {"A", "B"}
+
+
+def test_usable_cpus_respects_cgroup_quota(tmp_path: Path) -> None:
+    from app.jobs.pool import usable_cpus
+
+    cpu_max = tmp_path / "cpu.max"
+    unlimited = usable_cpus(tmp_path / "missing")
+    assert unlimited >= 1
+    cpu_max.write_text("max 100000\n")
+    assert usable_cpus(cpu_max) == unlimited
+    cpu_max.write_text("150000 100000\n")  # docker --cpus=1.5
+    assert usable_cpus(cpu_max) == min(unlimited, 2)

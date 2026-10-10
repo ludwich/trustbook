@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi.testclient import TestClient
 
 from app.capabilities.http import space_context
 from app.config import Paths
+from app.jobs.calibration import CALIBRATION_VERSION
 from tests.conftest import AppFactory, wait_for
 from tests.fakes import Router
 
@@ -71,6 +73,19 @@ def test_calibration_routes(make_client: AppFactory, paths: Paths) -> None:
 
 def test_calibration_not_requeued_when_done(make_client: AppFactory, paths: Paths) -> None:
     paths.config_dir.mkdir(parents=True)
-    paths.calibration_file.write_text("{}")
+    paths.calibration_file.write_text(
+        json.dumps(
+            {
+                "version": CALIBRATION_VERSION,
+                "measured_at": "2026-10-10T10:00:00.000Z",
+                "cpu_count": 4,
+                "embedding_chunks_per_s": 3.0,
+                "rerank_pairs_per_s": 9.0,
+                "parse_pages_per_s": None,
+                "stt_realtime_factor": 0.1,
+                "notes": [],
+            }
+        )
+    )
     client = make_client(calibrate_on_start=True)
     assert client.get("/api/jobs").json()["jobs"] == []
