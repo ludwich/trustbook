@@ -468,7 +468,8 @@ only if **all** of the following hold:
 
 The setting `grounding.code_judge` (default on) lives in the grounding capability card ("Check code claims
 with the chat model"). Off → checker only (Phase 2 behaviour). `diagnostics.sentence_methods` records
-`"checker" | "code_judge" | null` per sentence. The judge call is logged in the request log like every
+`"checker" | "code_judge" | null` per sentence, aligned with `sentence_scores` (all sentences the model
+returned, removed ones included; `null` for failed ones). The judge call is logged in the request log like every
 chat call.
 
 ### Retrieval agreement guard (D-046)
@@ -481,7 +482,7 @@ token budget. The refusal threshold still uses rerank scores.
   (prefixed `File: path · symbol` plus a line range); symbols over 1,500 tokens are split at statement
   boundaries; module-level code is grouped up to 500 tokens; `locator.symbol` is filled. Other languages use the
   SPEC §7.3 fallback chunker.
-- `Source` gains `"ahead": {"indexed_commit": str, "head_commit": str, "commits_ahead": int}|null`, filled when
+- `Source` gains `"ahead": {"indexed_commit": str, "head_commit": str, "commits_ahead": int|null}|null`, filled when
   the linked folder's HEAD differs from the indexed commit. Commits are counted from the commit graph with a
   permissively licensed library (no GPL `git` binary). The UI shows "Indexed at <short>, folder is N commits
   ahead. Refresh?".
