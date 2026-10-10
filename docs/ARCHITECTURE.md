@@ -94,6 +94,9 @@ Settings = {
   Tests the saved config merged with the (optional, unsaved) body, so the wizard can test before saving.
   A missing `api_key` in the body means "use the saved key". The result is stored as `last_test`
   only when no draft body was given.
+- `POST /api/capabilities/{id}/models` body `CapabilityConfigUpdate | {}` → `{"models":[str]}`
+  Lists model ids the endpoint offers (OpenAI-compatible/Anthropic `GET /models`; Azure returns `[]`).
+  Used by the wizard to suggest a model name. Errors → `502 {"detail": plain-English reason}`.
 
 ```
 Capability = {
