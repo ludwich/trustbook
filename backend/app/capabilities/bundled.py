@@ -78,9 +78,15 @@ class ModelInfo:
 
 _DEFAULTS: dict[BundledKind, tuple[str, str]] = {
     "embeddings": ("google/embeddinggemma-2", "914f7f89142e33e77833254d9c9b90c3cef7303b"),
-    "reranker": ("mixedbread-ai/mxbai-rerank-xsmall-v1", "b5c6e9da73ab"),
-    "grounding": ("vectara/hallucination_evaluation_model", "de9a5e6ba9ba"),
-    "stt": ("Cactus-Compute/whistle", "ca5287601bef"),
+    "reranker": (
+        "mixedbread-ai/mxbai-rerank-xsmall-v1",
+        "b5c6e9da73abc3711f593f705371cdbe9e0fe422",
+    ),
+    "grounding": (
+        "vectara/hallucination_evaluation_model",
+        "de9a5e6ba9ba49531a022dba17e35ffeb2a6fad8",
+    ),
+    "stt": ("Cactus-Compute/whistle", "ca5287601bef25af26dcf2e1b2bdc0843a7c19e5"),
 }
 
 

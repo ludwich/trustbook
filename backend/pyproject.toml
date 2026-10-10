@@ -15,11 +15,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Verified together on CPU, offline (docs/DECISIONS.md D-011). Bump only with a re-run of
+# `python -m app.capabilities.bundled_check` against the baked models.
 ml = [
-    "torch",
-    "sentence-transformers",
-    "transformers",
-    "cactus-needle",
+    "torch==2.14.1",
+    "torchvision==0.29.1",  # EmbeddingGemma 2's processor imports it even for text-only use
+    "pillow==12.3.0",
+    "transformers==5.19.0",
+    "sentence-transformers==6.1.0",
+    "tokenizers==0.23.3",
+    "huggingface-hub==1.33.0",
+    "safetensors==0.8.0",
+    "numpy==2.5.3",
+    "cactus-needle==3.2.0",
 ]
 
 [dependency-groups]
@@ -37,6 +45,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
 
 [tool.uv]
 package = false
