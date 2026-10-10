@@ -33,8 +33,17 @@ from app.capabilities.bundled import (
     Transcript,
     TuneResult,
     default_threads,
+    streams_that_fit,
 )
 from app.capabilities.cpu import CpuInfo
+from app.capabilities.streams import (
+    EMBED_BATCH,
+    StreamLayout,
+    choose_streams,
+    embed_in_streams,
+    stream_candidates,
+    synthetic_code_chunks,
+)
 
 # EmbeddingGemma 2 prompt names (model card); the bge fallback uses its own query instruction.
 _GEMMA_QUERY_PROMPT = "QuestionAnswering"
@@ -43,6 +52,10 @@ _BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 _EMBED_MAX_TOKENS = 2048
 # HHEM does not truncate; cited context is capped at ~6,000 tokens (SPEC §8), so this is a guard.
 _GROUNDING_MAX_PREMISE_CHARS = 32_000
+# Building a model is not thread-safe: transformers switches torch's process-wide default dtype
+# while it creates the weights, so two loads at once (e.g. indexing-stream replicas, or a BF16
+# reranker next to an FP32 checker) can end up with mixed BF16/FP32 layers. Loads take turns.
+_LOAD_LOCK = threading.Lock()
 
 
 def _offline_env() -> None:
@@ -107,13 +120,14 @@ class SentenceTransformerEmbedder:
         self.dtype = dtype or options.embedding_dtype
         self._gemma = not info.fallback
         config_kwargs = {"vision_config": None, "audio_config": None} if self._gemma else {}
-        self._model = SentenceTransformer(
-            str(info.path),
-            device="cpu",
-            local_files_only=True,
-            model_kwargs={"dtype": _torch_dtype(self.dtype)},
-            config_kwargs=config_kwargs,
-        )
+        with _LOAD_LOCK:
+            self._model = SentenceTransformer(
+                str(info.path),
+                device="cpu",
+                local_files_only=True,
+                model_kwargs={"dtype": _torch_dtype(self.dtype)},
+                config_kwargs=config_kwargs,
+            )
         self._model.max_seq_length = _EMBED_MAX_TOKENS
         self._lock = threading.Lock()
 
@@ -162,12 +176,13 @@ class CrossEncoderReranker:
         self._threads = _Threads(options)
         self._threads.apply()
         self.dtype = dtype or options.reranker_dtype
-        self._model = CrossEncoder(
-            str(info.path),
-            device="cpu",
-            local_files_only=True,
-            model_kwargs={"dtype": _torch_dtype(self.dtype)},
-        )
+        with _LOAD_LOCK:
+            self._model = CrossEncoder(
+                str(info.path),
+                device="cpu",
+                local_files_only=True,
+                model_kwargs={"dtype": _torch_dtype(self.dtype)},
+            )
         self._lock = threading.Lock()
 
     def score(self, query: str, docs: Sequence[str]) -> list[float]:
@@ -184,32 +199,35 @@ class HHEMGroundingChecker:
 
     def __init__(self, info: ModelInfo, options: RuntimeOptions) -> None:
         _offline_env()
-        import torch
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
         self._threads = _Threads(options)
         self._threads.apply()
         self._fallback = info.fallback
         self._tokenizer: Any = None
-        if self._fallback:
-            self._model = AutoModelForSequenceClassification.from_pretrained(
-                str(info.path), local_files_only=True, dtype=torch.float32
-            )
-            self._tokenizer = AutoTokenizer.from_pretrained(str(info.path), local_files_only=True)
-        else:
-            foundation = info.path / "flan-t5-base"
-            if not foundation.is_dir():
-                raise ProviderUnavailableError("The answer checker's tokenizer files are missing.")
-            # Without ``foundation`` the remote code would fetch flan-t5-base unpinned from the hub.
-            self._model = AutoModelForSequenceClassification.from_pretrained(
-                str(info.path),
-                local_files_only=True,
-                trust_remote_code=True,
-                dtype=torch.float32,
-                foundation=str(foundation),
-            )
+        with _LOAD_LOCK:
+            self._model: Any = self._load(info)
         self._model.eval()
         self._lock = threading.Lock()
+
+    def _load(self, info: ModelInfo) -> Any:
+        import torch
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+        if self._fallback:
+            self._tokenizer = AutoTokenizer.from_pretrained(str(info.path), local_files_only=True)
+            return AutoModelForSequenceClassification.from_pretrained(
+                str(info.path), local_files_only=True, dtype=torch.float32
+            )
+        foundation = info.path / "flan-t5-base"
+        if not foundation.is_dir():
+            raise ProviderUnavailableError("The answer checker's tokenizer files are missing.")
+        # Without ``foundation`` the remote code would fetch flan-t5-base unpinned from the hub.
+        return AutoModelForSequenceClassification.from_pretrained(
+            str(info.path),
+            local_files_only=True,
+            trust_remote_code=True,
+            dtype=torch.float32,
+            foundation=str(foundation),
+        )
 
     def score(self, pairs: Sequence[tuple[str, str]]) -> list[float]:
         if not pairs:
@@ -284,6 +302,7 @@ def load_transcriber(info: ModelInfo, options: RuntimeOptions) -> WhistleTranscr
 BF16_MIN_SPEEDUP = 1.25
 BF16_MIN_COSINE = 0.99  # every embedding vs its FP32 twin
 BF16_MAX_SCORE_DIFF = 0.03  # every reranker score vs FP32, on the 0..1 scale
+STREAM_TUNE_CHUNKS = 32  # code chunks per stream layout (more when there are many streams)
 
 
 def _rate(action: Any, items: int, repeats: int = 2) -> float:
@@ -333,16 +352,68 @@ def _thread_rates(info: ModelInfo, cpu: CpuInfo, texts: list[str]) -> dict[int, 
     return rates
 
 
+def _stream_rate(
+    info: ModelInfo,
+    options: RuntimeOptions,
+    replicas: list[SentenceTransformerEmbedder],
+    layout: StreamLayout,
+) -> float:
+    """Chunks/s of indexing ~700-token code chunks with ``layout`` (replicas are reused)."""
+    while len(replicas) < layout.streams:
+        replicas.append(SentenceTransformerEmbedder(info, options, options.embedding_dtype))
+    for replica in replicas:
+        replica._threads.count = layout.threads
+    # Equal-length chunks: one batch per stream already keeps every stream busy to the end.
+    texts = synthetic_code_chunks(max(STREAM_TUNE_CHUNKS, layout.streams * EMBED_BATCH))
+
+    def run(sample: list[str], batch: int) -> None:
+        embed_in_streams(
+            sample,
+            embedder_for=lambda i: replicas[i],
+            streams=layout.streams,
+            on_batch=lambda _batch: None,
+            batch_size=batch,
+        )
+
+    run(texts[: layout.streams], 1)  # warm up every replica in its own thread
+    started = time.perf_counter()
+    run(texts, EMBED_BATCH)
+    return len(texts) / max(time.perf_counter() - started, 1e-6)
+
+
+def _tune_streams(
+    info: ModelInfo, options: RuntimeOptions, cpu: CpuInfo, memory: int | None
+) -> tuple[RuntimeOptions, str]:
+    """Pick parallel indexing streams × threads per stream by measurement (Gate 1 G2)."""
+    single = options.torch_threads or cpu.usable
+    layouts = stream_candidates(
+        cpu.usable,
+        single,
+        lambda n: streams_that_fit(n, options.embedding_dtype, memory) >= n,
+    )
+    if len(layouts) == 1:
+        return options, f"Indexing uses 1 stream × {single} threads."
+    replicas: list[SentenceTransformerEmbedder] = []
+    try:
+        choice = choose_streams(layouts, lambda lay: _stream_rate(info, options, replicas, lay))
+    finally:
+        replicas.clear()
+        gc.collect()
+    best = choice.layout
+    tuned = options.model_copy(
+        update={"embedding_streams": best.streams, "stream_threads": best.threads}
+    )
+    return tuned, choice.note
+
+
 def tune_runtime(
     registry: ProviderRegistry, cpu: CpuInfo, sample_texts: Sequence[str]
 ) -> TuneResult:
-    """Measure thread counts, then BF16 against FP32, for embeddings and the reranker."""
+    """Measure thread counts, BF16 against FP32 (embeddings, reranker), then indexing streams."""
     import torch
 
     texts = list(sample_texts)
     embed_info = registry.info("embeddings")
-    rerank_info = registry.info("reranker")
-    query = "Which supplier risks were found in the audit?"
     notes: list[str] = []
 
     rates = _thread_rates(embed_info, cpu, texts)
@@ -352,9 +423,21 @@ def tune_runtime(
     options = RuntimeOptions(torch_threads=best)
     if not cpu.bf16:
         notes.append("This processor has no native BF16, so models run in FP32.")
-        torch.set_num_threads(best)
-        return TuneResult(options, notes)
+    else:
+        options = _tune_bf16(registry, options, texts, notes)
+    options, note = _tune_streams(embed_info, options, cpu, registry.memory())
+    notes.append(note)
+    torch.set_num_threads(best)
+    return TuneResult(options, notes)
 
+
+def _tune_bf16(
+    registry: ProviderRegistry, options: RuntimeOptions, texts: list[str], notes: list[str]
+) -> RuntimeOptions:
+    """Keep BF16 for embeddings and the reranker only where it is faster with the same results."""
+    embed_info = registry.info("embeddings")
+    rerank_info = registry.info("reranker")
+    query = "Which supplier risks were found in the audit?"
     fp32_rate, reference = _measure_embedder(embed_info, options, "float32", texts)
     gc.collect()
     bf16_rate, vectors = _measure_embedder(embed_info, options, "bfloat16", texts)
@@ -385,5 +468,4 @@ def tune_runtime(
         notes.append(
             f"Ranking stays FP32 (BF16 {speedup:.1f}× speed, scores differ by {diff:.3f})."
         )
-    torch.set_num_threads(best)
-    return TuneResult(options, notes)
+    return options

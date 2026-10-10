@@ -3,7 +3,8 @@
 Columns: chunk_id, source_id, text, vector (fixed size, set by the first rows added). Full-text
 index on ``text`` and a BTree on ``source_id``. Vector search is exact (no ANN index) with cosine
 distance; scores are ``1 - distance`` for vectors and the BM25 ``_score`` for full text.
-Writes to one space are serialised; every search is filtered to the given source ids.
+Writes to one space are serialised; every search is filtered to the given source ids. Bulk
+indexing appends in batches and folds them into the full-text index once at the end.
 """
 
 from __future__ import annotations
@@ -86,6 +87,17 @@ class LanceSpaceIndex:
         return int(table.schema.field("vector").type.list_size)
 
     def add(self, chunks: Sequence[IndexedChunk], vectors: Sequence[Sequence[float]]) -> None:
+        with self._lock:
+            self.append(chunks, vectors)
+            self.refresh_text_index()
+
+    def refresh_text_index(self) -> None:
+        with self._lock:
+            table = self._open()
+            if table is not None:
+                table.optimize()  # fold new rows into the full-text index
+
+    def append(self, chunks: Sequence[IndexedChunk], vectors: Sequence[Sequence[float]]) -> None:
         if len(chunks) != len(vectors):
             raise ValueError("chunks and vectors differ in length")
         if not chunks:
@@ -111,7 +123,6 @@ class LanceSpaceIndex:
                     "This space was indexed with a different embedding model."
                 )
             table.add(rows)
-            table.optimize()  # fold the new rows into the full-text index
 
     def delete_source(self, source_id: str) -> None:
         if not _SAFE_ID.match(source_id):

@@ -21,6 +21,7 @@ from app.capabilities.bundled import (
     default_threads,
 )
 from app.capabilities.cpu import CpuInfo, cpu_info
+from app.capabilities.streams import EMBED_BATCH, embed_in_streams, synthetic_code_chunks
 from app.config import Paths
 from app.db.models import Job
 from app.fsutil import atomic_write_json
@@ -31,10 +32,12 @@ from app.timeutil import utc_now_iso
 
 logger = logging.getLogger("trustbook.calibration")
 
-CALIBRATION_VERSION = 4  # 2: real speech STT, usable CPUs; 3: tuned threads + BF16; 4: parsing
+# 2: real speech STT, usable CPUs; 3: tuned threads + BF16; 4: parsing; 5: indexing streams, code
+CALIBRATION_VERSION = 5
 CALIBRATE_KIND = "calibrate"
 CALIBRATE_TITLE = "Measure this computer's speed"
 EMBED_CHUNKS = 64
+EMBED_CODE_CHUNKS = 32
 SPEECH_SAMPLE = "calibration.wav"  # public-domain speech, see docker/download_models.py
 RERANK_PAIRS = 32
 TUNE_CHUNKS = 12
@@ -54,7 +57,9 @@ class Calibration(BaseModel):
     version: int
     measured_at: str
     cpu_count: int
-    embedding_chunks_per_s: float | None
+    embedding_chunks_per_s: float | None  # ~350-token prose, one model call at a time
+    # ~700-token code chunks, indexed the way ingestion does it (parallel streams); version 5+
+    embedding_chunks_per_s_code: float | None = None
     rerank_pairs_per_s: float | None
     parse_pages_per_s: float | None
     stt_realtime_factor: float | None
@@ -148,6 +153,13 @@ class CalibrationService:
         ctx.progress(0.3)
         embed = self._guard("Embedding speed", self._measure_embeddings, notes)
         ctx.check_cancelled()
+        ctx.progress(0.35)
+        embed_code = (  # one note is enough when the embedding model cannot run at all
+            self._guard("Code indexing speed", self._measure_code_embeddings, notes)
+            if embed is not None
+            else None
+        )
+        ctx.check_cancelled()
         ctx.progress(0.4)
         rerank = self._guard("Reranking speed", self._measure_rerank, notes)
         ctx.check_cancelled()
@@ -161,6 +173,7 @@ class CalibrationService:
             measured_at=utc_now_iso(),
             cpu_count=cpu.usable,
             embedding_chunks_per_s=embed,
+            embedding_chunks_per_s_code=embed_code,
             rerank_pairs_per_s=rerank,
             parse_pages_per_s=parse,
             stt_realtime_factor=stt,
@@ -210,6 +223,24 @@ class CalibrationService:
         embedder.embed_documents(["warm up"])  # model load is not part of the speed
         chunks = synthetic_chunks(EMBED_CHUNKS)
         return EMBED_CHUNKS / self._timed(lambda: embedder.embed_documents(chunks))
+
+    def _measure_code_embeddings(self) -> float:
+        """Code chunks/s through the indexing streams (no model lock: calibration holds it)."""
+        providers = self._providers
+        streams = providers.ingest_streams()
+        chunks = synthetic_code_chunks(max(EMBED_CODE_CHUNKS, streams * EMBED_BATCH))
+
+        def run(texts: list[str], batch_size: int = EMBED_BATCH) -> None:
+            embed_in_streams(
+                texts,
+                embedder_for=providers.ingest_embedder,
+                streams=streams,
+                on_batch=lambda _batch: None,
+                batch_size=batch_size,
+            )
+
+        run(chunks[:streams], 1)  # loads and warms every stream's model
+        return len(chunks) / self._timed(lambda: run(chunks))
 
     def _measure_rerank(self) -> float:
         reranker = self._providers.reranker()

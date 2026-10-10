@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.api.deps import ServicesDep
 from app.db.models import Job
+from app.jobs.eta import queue_eta, remaining_seconds
 
 router = APIRouter()
 
@@ -28,6 +29,7 @@ class JobOut(BaseModel):
     created_at: str
     started_at: str | None
     finished_at: str | None
+    eta_seconds: int | None = None  # remaining estimate for queued/running jobs
 
     @classmethod
     def build(cls, job: Job, names: dict[str, str]) -> JobOut:
@@ -44,7 +46,12 @@ class JobOut(BaseModel):
             created_at=job.created_at,
             started_at=job.started_at,
             finished_at=job.finished_at,
+            eta_seconds=_rounded(remaining_seconds(job)),
         )
+
+
+def _rounded(seconds: float | None) -> int | None:
+    return None if seconds is None else max(1, round(seconds))
 
 
 class QueueSummary(BaseModel):
@@ -72,14 +79,16 @@ def job_out(services: ServicesDep, job: Job) -> JobOut:
 def list_jobs(services: ServicesDep) -> JobsOut:
     names = services.spaces.names()
     counts = services.jobs.counts()
+    jobs = services.jobs.list_for_view()
+    workers = services.pool.workers
     return JobsOut(
-        jobs=[JobOut.build(job, names) for job in services.jobs.list_for_view()],
+        jobs=[JobOut.build(job, names) for job in jobs],
         summary=QueueSummary(
             queued=counts.get("queued", 0),
             running=counts.get("running", 0),
             paused=counts.get("paused", 0),
-            eta_seconds=None,
-            workers=services.pool.workers,
+            eta_seconds=queue_eta(jobs, workers),
+            workers=workers,
         ),
     )
 

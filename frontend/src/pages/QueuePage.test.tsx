@@ -71,4 +71,38 @@ describe("queue view", () => {
     await user.click(within(screen.getByTestId("job-q2")).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(actions).toEqual(["resume p", "pause r", "cancel q2"]));
   });
+
+  it("shows each job's remaining estimate when the server sends one", async () => {
+    server.use(
+      http.get("*/api/jobs", () =>
+        HttpResponse.json(
+          jobList(
+            [
+              job({ id: "r", title: "Indexing repo", status: "running", eta_seconds: 600 }),
+              job({ id: "q", title: "Reading a.pdf", eta_seconds: 30 }),
+              job({ id: "n", title: "Reading b.pdf", eta_seconds: null }),
+              job({
+                id: "d",
+                title: "Old job",
+                status: "done",
+                eta_seconds: 90,
+                finished_at: "2026-10-10T07:00:00Z",
+              }),
+            ],
+            { eta_seconds: 630 },
+          ),
+        ),
+      ),
+    );
+    renderApp("/queue");
+    expect(await screen.findByTestId("job-eta-r")).toHaveTextContent("about 10 min left");
+    expect(screen.getByTestId("job-eta-q")).toHaveTextContent("less than a minute left");
+    expect(screen.queryByTestId("job-eta-n")).not.toBeInTheDocument();
+    // Finished jobs have nothing left.
+    expect(screen.queryByTestId("job-eta-d")).not.toBeInTheDocument();
+    // Pause and cancel stay available.
+    const running = screen.getByTestId("job-r");
+    expect(within(running).getByRole("button", { name: "Pause" })).toBeInTheDocument();
+    expect(within(running).getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+  });
 });

@@ -72,6 +72,7 @@ class ChatAdapter(Protocol):
         temperature: float = 0.2,
         max_tokens: int = 1024,
         json_schema: dict[str, Any] | None = None,
+        think: bool = True,
     ) -> ChatResult: ...
 
     def list_models(self) -> list[str]: ...

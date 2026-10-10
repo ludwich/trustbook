@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { plural } from "@/lib/format";
 import { type AddDialogProps, FormError } from "./dialogParts";
+import { useEstimateConfirm } from "./useEstimateConfirm";
 
 export function SearchDialog({ spaceId, open, onOpenChange }: AddDialogProps) {
   return (
@@ -48,6 +49,7 @@ function displayUrl(url: string): string {
 function WebSearch({ spaceId, onDone }: { spaceId: string; onDone: () => void }) {
   const search = useWebSearch(spaceId);
   const add = useAddFromSearch(spaceId);
+  const estimate = useEstimateConfirm(spaceId);
   const [query, setQuery] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const results: WebSearchResult[] = search.data?.results ?? [];
@@ -72,7 +74,9 @@ function WebSearch({ spaceId, onDone }: { spaceId: string; onDone: () => void })
     const items = results
       .filter((r) => picked.has(r.url))
       .map((r) => ({ url: r.url, title: r.title }));
-    add.mutate(items, { onSuccess: onDone });
+    void estimate.check([{ kind: "url", count: items.length }], () =>
+      add.mutate(items, { onSuccess: onDone }),
+    );
   };
 
   return (
@@ -128,15 +132,21 @@ function WebSearch({ spaceId, onDone }: { spaceId: string; onDone: () => void })
       <FormError error={add.error} />
       {results.length > 0 && (
         <DialogFooter>
-          <Button disabled={picked.size === 0 || add.isPending} onClick={addPicked}>
+          <Button
+            disabled={picked.size === 0 || add.isPending || estimate.checking}
+            onClick={addPicked}
+          >
             {add.isPending
               ? "Adding…"
-              : picked.size === 0
-                ? "Tick pages to add"
-                : `Add ${plural(picked.size, "source")}`}
+              : estimate.checking
+                ? "Estimating…"
+                : picked.size === 0
+                  ? "Tick pages to add"
+                  : `Add ${plural(picked.size, "source")}`}
           </Button>
         </DialogFooter>
       )}
+      {estimate.dialog}
     </div>
   );
 }

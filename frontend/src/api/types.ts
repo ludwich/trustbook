@@ -21,6 +21,8 @@ export interface Settings {
   setup_completed: boolean;
   /** Effective worker count for the current power setting. */
   workers: number;
+  /** Real (capped) worker count per power level. Phase 2; absent on older backends. */
+  workers_by_power?: Record<Power, number>;
   thresholds: { refuse: number; verify: number };
   /** One-time hints the user has dismissed, e.g. "chat_grounding". */
   hints_dismissed: string[];
@@ -179,6 +181,11 @@ export interface Job {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /**
+   * Remaining estimate of this job in seconds. Not in the contract yet (Phase 2 asks for it:
+   * "ingest jobs store their estimate"); absent or null → the queue view shows no per-job time.
+   */
+  eta_seconds?: number | null;
 }
 
 export interface QueueSummary {
@@ -216,7 +223,10 @@ export interface Calibration {
   version: number;
   measured_at: string;
   cpu_count: number;
+  /** Prose chunks per second (~350 tokens, one model call at a time). */
   embedding_chunks_per_s: number | null;
+  /** Code chunks per second, indexed the way ingestion does it (parallel streams). v5+. */
+  embedding_chunks_per_s_code?: number | null;
   rerank_pairs_per_s: number | null;
   parse_pages_per_s: number | null;
   stt_realtime_factor: number | null;
@@ -241,6 +251,10 @@ export interface CalibrationRuntime {
   torch_threads: number | null;
   embedding_dtype: ModelDtype | null;
   reranker_dtype: ModelDtype | null;
+  /** Concurrent embedding model replicas used for indexing. Absent on older results. */
+  embedding_streams?: number | null;
+  /** Threads per embedding stream. Absent on older results. */
+  stream_threads?: number | null;
 }
 
 export interface CalibrationState {
@@ -356,6 +370,48 @@ export interface Snapshot {
   map: SnapshotMap;
 }
 
+/** One gitleaks finding. Never contains the secret value. */
+export interface SecretFinding {
+  file: string;
+  line: number;
+  rule_id: string;
+}
+
+/** GET …/sources/{id}/secrets (404 when the source has no report). */
+export interface SecretsReport {
+  files_skipped: number;
+  findings: SecretFinding[];
+}
+
+export interface CodeContext {
+  file: string;
+  commit: string | null;
+  language: string | null;
+  /** 1-based line number of `lines[0]`. */
+  first_line: number;
+  /** The whole file, or a window around the cited lines for long files. */
+  lines: string[];
+  /** Inclusive 1-based line range of the cited chunk. */
+  highlight: [number, number];
+}
+
+export interface TextContext {
+  /** "Page 3", "Pages 3–4", "Section: Install", "01:02–01:45". */
+  label: string | null;
+  before: string;
+  highlight: string;
+  after: string;
+}
+
+/** GET …/chunks/{id}/context: everything the source viewer shows. */
+export interface ChunkContext {
+  chunk: Chunk;
+  source_type: string;
+  view: "code" | "text";
+  code?: CodeContext;
+  text?: TextContext;
+}
+
 export interface BrowseEntry {
   name: string;
   path: string;
@@ -414,6 +470,11 @@ export interface MessageContent {
   sentences?: AnswerSentence[];
   /** Refused answers: what to add. Not in the contract yet (see the Phase 1 frontend notes). */
   suggestion?: string | null;
+  /**
+   * The gate thought the question was brainstorming: the UI points to the Ideation tab.
+   * Phase 2 contract says only "adds a hint"; the field name is the frontend's assumption.
+   */
+  hint?: "ideation" | null;
 }
 
 export interface Message {
@@ -427,7 +488,7 @@ export interface Message {
 }
 
 export type ChatStage = "retrieving" | "generating" | "checking";
-export type RefusalReason = "not_in_sources" | "no_sources" | "invalid_output";
+export type RefusalReason = "not_in_sources" | "no_sources" | "invalid_output" | "unsupported";
 
 export interface Refusal {
   reason: RefusalReason;
@@ -457,4 +518,38 @@ export interface Overview {
   stale: boolean;
   /** Present when the chat endpoint is remote. */
   estimate: { tokens: number; remote: boolean } | null;
+}
+
+// ---- Phase 2: estimates -------------------------------------------------------
+
+export type SourceEstimateItem =
+  | { kind: "folder"; path: string }
+  | { kind: "upload"; files: { name: string; bytes: number }[] }
+  | { kind: "url" | "youtube" | "paste"; count: number };
+
+/** POST …/sources/estimate. `confirm` is true above 120 s. */
+export interface SourceEstimate {
+  seconds: number;
+  files: number | null;
+  /** "About 4,200 files, roughly 25 min on this PC" */
+  summary: string;
+  confirm: boolean;
+}
+
+// ---- Phase 2: gate log --------------------------------------------------------
+
+export type GateDecision = "sources" | "brainstorm" | "chitchat";
+
+/**
+ * One gate decision (GET …/gate-log). The contract does not spell out the entry shape; the client
+ * normalises the DB column names (`created`, `input`, `user_correction`) to these.
+ */
+export interface GateLogEntry {
+  id: number;
+  created_at: string;
+  question: string;
+  decision: GateDecision;
+  /** null when the gate was off, not set up or failed (the decision is then "sources"). */
+  confidence: number | null;
+  correction: GateDecision | null;
 }

@@ -77,9 +77,15 @@ class ScriptedChat:
         temperature: float = 0.2,
         max_tokens: int = 1024,
         json_schema: dict[str, Any] | None = None,
+        think: bool = True,
     ) -> ChatResult:
         self.calls.append(
-            {"messages": list(messages), "temperature": temperature, "schema": json_schema}
+            {
+                "messages": list(messages),
+                "temperature": temperature,
+                "schema": json_schema,
+                "think": think,
+            }
         )
         if not self.replies:
             raise AssertionError("ScriptedChat ran out of replies")

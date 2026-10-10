@@ -22,10 +22,19 @@ class SetupOut(BaseModel):
     chat_ready: bool
 
 
+class WorkersByPower(BaseModel):
+    """Real worker counts per power setting, after the caps (DECISIONS D-021)."""
+
+    low: int
+    normal: int
+    high: int
+
+
 class SettingsOut(BaseModel):
     power: Power
     setup_completed: bool
     workers: int
+    workers_by_power: WorkersByPower
     thresholds: Thresholds
     hints_dismissed: list[str]
 
@@ -42,6 +51,11 @@ def _settings_out(settings: Settings) -> SettingsOut:
         power=settings.power,
         setup_completed=settings.setup_completed,
         workers=workers_for_power(settings.power),
+        workers_by_power=WorkersByPower(
+            low=workers_for_power("low"),
+            normal=workers_for_power("normal"),
+            high=workers_for_power("high"),
+        ),
         thresholds=settings.thresholds,
         hints_dismissed=list(settings.hints_dismissed),
     )

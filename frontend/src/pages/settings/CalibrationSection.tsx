@@ -19,6 +19,12 @@ function rows(c: Calibration): [string, string][] {
     // Older results (before v3) have no CPU details; keep the plain core count for them.
     ...(c.cpu ? [] : [["CPU cores", String(c.cpu_count)] as [string, string]]),
     ["Indexing", perSecond(c.embedding_chunks_per_s, "chunks")],
+    // Calibration v5+ measures code separately (bigger chunks, parallel streams).
+    ...(c.embedding_chunks_per_s_code === undefined
+      ? []
+      : [
+          ["Indexing code", perSecond(c.embedding_chunks_per_s_code, "chunks")] as [string, string],
+        ]),
     ["Ranking", perSecond(c.rerank_pairs_per_s, "passages")],
     ["Reading documents", perSecond(c.parse_pages_per_s, "pages")],
     ["Speech-to-text", formatRealtimeFactor(c.stt_realtime_factor)],

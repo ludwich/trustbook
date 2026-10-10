@@ -360,3 +360,92 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build      # → frontend/dist
   So `compose.yaml` works when downloaded alone.
 - Entry point drops privileges to the owner of `/data` when that owner is not root, so files on a
   Linux host belong to the user (Windows/macOS bind mounts are unaffected).
+
+## Phase 2 additions
+
+### Gate 1 follow-ups
+- `Settings` gains `"workers_by_power": {"low": int, "normal": int, "high": int}` (the real, capped counts).
+- `GET /api/spaces/{sid}/sources/{source_id}/secrets` → `{"files_skipped": int, "findings": [{"file": str, "line": int, "rule_id": str}]}`
+  (`404` when the source has no secrets report). Never contains secret values.
+- A source that fails is stored with `enabled: false`; a later successful refresh re-enables it. `PATCH`/`PUT enabled`
+  on a failed source → `409`.
+- `GET /api/spaces/{sid}/chunks/{chunk_id}/context` → `ChunkContext` (the source viewer; replaces client-side
+  offset slicing of the whole snapshot):
+
+```
+ChunkContext = {"chunk": {...as GET /chunks/{id}...}, "source_type": str, "view": "code"|"text",
+  "code"?: {"file": str, "commit": str|null, "language": str|null,
+            "first_line": int, "lines": [str],            // the whole file, or a window of ±200 lines for long files
+            "highlight": [int, int]},                     // inclusive 1-based line range of the cited chunk
+  "text"?: {"label": str|null,                            // "Page 3", "Pages 3–4", "Section: Install", "01:02–01:45"
+            "before": str, "highlight": str, "after": str}} // ≤ ~1,500 characters of context on each side
+```
+
+- Refusal `suggestion`: a readable sentence built from the question, e.g. `Add sources that cover “how to set a
+  base URL for Session calls”, then ask again.` (no keyword lists).
+- Web search via SearXNG sends `language=en`. Results whose URL has no path (bare homepages) move below
+  results with a path when the query has three or more words.
+
+### Grounding layers 4–5, badges (SPEC §8)
+
+Pipeline after layer 3 (forced citations), per answer and per overview:
+
+1. **Layer 4: verification.** For each sentence, score `(premise = cited chunk text, hypothesis = sentence)` with
+   the grounding checker for every cited chunk; the sentence score is the maximum. Pass if
+   ≥ `thresholds.verify` (0.5).
+2. **Layer 5: code checks.** For sentences citing code chunks (locator has `file`): every `` `identifier` `` in the
+   sentence must occur verbatim in at least one cited chunk; every cited chunk's `file` and line range must
+   exist in the indexed snapshot. A failure fails the sentence.
+3. If more than half the sentences fail, regenerate **once** (same chunks, plus a note that only statements the
+   chunks support are allowed) and verify again.
+4. **Refusal rule:** refuse if more than 50% of the sentences fail or the first sentence fails
+   (`refused`, reason `unsupported`, message "Not in your sources", the usual suggestion).
+5. Otherwise failing sentences are removed. Badge: `verified` (none removed) or `partially_verified`
+   (`removed_sentences` holds their text). The UI shows them in a collapsed drawer: "Unverified, not from your
+   sources".
+6. Grounding checker disabled → no layer 4 (layer 5 still runs); badge `unverified`.
+
+Sentences stream only after they pass (SSE `status` stage `checking` while verifying). Citations store
+`verifier_score`. Refusal reasons gain `unsupported`.
+
+`Message` gains `"diagnostics": {"top_rerank": float|null, "sentence_scores": [float|null], "regenerated": bool}`.
+The eval runner reads it for threshold tuning; the UI ignores it.
+
+### Estimates and queue (SPEC §11)
+- `POST /api/spaces/{sid}/sources/estimate` body `{"items": [{"kind": "folder", "path": str} | {"kind": "upload",
+  "files": [{"name": str, "bytes": int}]} | {"kind": "url"|"youtube"|"paste", "count": int}]}` →
+  `{"seconds": int, "files": int|null, "summary": str, "confirm": bool}`. `confirm` is true above 120 s.
+  The summary reads like "About 4,200 files, roughly 25 min on this PC". It is based on calibration
+  (code/prose chunk rates, parse pages/s, STT RTF, embedding streams).
+- Ingest jobs store their estimate. `QueueSummary.eta_seconds` = the remaining estimate of queued and running jobs,
+  divided across workers. The header shows "about M min left".
+
+### Gate router and log (SPEC §5, §6)
+- The `gate` capability (default: the chat endpoint) classifies each chat question with a fixed-choice JSON output
+  `{"decision": "sources"|"brainstorm"|"chitchat", "confidence": 0..1}` before retrieval (temperature 0, only the
+  question is sent, at most 5 s; the request log attributes the call to `gate` and the space). It never changes the
+  grounded pipeline and never opens an ungrounded answer path. Every decision is written to `gate_log`.
+- `sources`: the grounded pipeline as usual.
+- `brainstorm`: the grounded pipeline as usual, plus `content.hint: "ideation"` on the assistant message (answer or
+  refusal), so the UI can point to the Ideation tab.
+- `chitchat`: no answer call. The fixed reply "I answer questions from the sources in this space. Ask about
+  something in them." is stored as `content.text` with `badge: null` and sent only in `done` (no `sentence` or
+  `refused` events; the stream is `status` `retrieving` → `done`).
+- The gate disabled, not configured, or failing (error, unusable reply, over 5 s) → decision `sources`, logged with
+  `confidence: null`.
+- `Message` gains `"gate_log_id": int|null` (top level): the gate decision behind an assistant message, so the UI
+  can offer "That's not right" on it. `null` on user messages.
+- `GET /api/spaces/{sid}/gate-log?limit=` (1–1000, default 100) → `GateLogEntry[]`, a bare list, newest first.
+- `POST /api/spaces/{sid}/gate-log/{id}/correct` body `{"decision": "sources"|"brainstorm"|"chitchat"|null}` →
+  `GateLogEntry`. Stores the user's correction ("That's not right"); `null` clears it. Unknown id → `404`,
+  other values → `422`.
+
+```
+GateLogEntry = {"id": int, "created": str, "input": str,          // input = the question
+                "decision": "sources"|"brainstorm"|"chitchat", "confidence": float|null,
+                "user_correction": "sources"|"brainstorm"|"chitchat"|null}
+```
+
+Contract additions summarised: `refused.reason` gains `"unsupported"` (layers 4–5: more than half of the
+sentences, or the first one, not supported; message "Not in your sources" with the usual suggestion);
+`Message.content` gains `"hint"?: "ideation"`; `Message` gains `diagnostics` (above) and `gate_log_id`.

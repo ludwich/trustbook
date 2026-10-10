@@ -24,8 +24,18 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { formatDate, plural } from "@/lib/format";
 import { cn, errorMessage } from "@/lib/utils";
-import { canRefresh, isWebSnapshot, STATUS_TEXT, statsLine, TYPE_LABELS } from "./sourceMeta";
+import { SecretsDialog } from "./SecretsDialog";
+import {
+  canRefresh,
+  isWebSnapshot,
+  STATUS_TEXT,
+  statsLine,
+  TYPE_LABELS,
+  visibleQualityWarning,
+} from "./sourceMeta";
 import { SourceTypeIcon } from "./SourceTypeIcon";
+
+const FAILED_TOOLTIP = "This source failed to load";
 
 export function SourceRow({
   spaceId,
@@ -39,10 +49,12 @@ export function SourceRow({
   const refresh = useRefreshSource(spaceId);
   const remove = useDeleteSource(spaceId);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [secretsOpen, setSecretsOpen] = useState(false);
   const busy = isSourceBusy(source);
   const failed = source.status === "failed";
   const stats = source.status === "ready" ? statsLine(source) : "";
   const skipped = source.stats.skipped_secrets ?? 0;
+  const warning = visibleQualityWarning(source);
   const actionError = refresh.error ?? remove.error;
   const snapshot =
     isWebSnapshot(source) && source.snapshot_at ? `Snapshot ${formatDate(source.snapshot_at)}` : "";
@@ -55,18 +67,23 @@ export function SourceRow({
       data-testid={`source-${source.id}`}
     >
       <div className="flex items-start gap-2">
-        <Checkbox
-          checked={source.enabled}
-          onChange={(e) => onToggle(e.target.checked)}
-          aria-label={`Use ${source.title}`}
-          className="mt-0.5"
-        />
+        {/* A failed source can't be used: unticked and disabled (G7). The wrapper carries the
+            tooltip because browsers don't show one for a disabled input reliably. */}
+        <span className="mt-0.5 inline-flex" title={failed ? FAILED_TOOLTIP : undefined}>
+          <Checkbox
+            checked={failed ? false : source.enabled}
+            disabled={failed}
+            onChange={(e) => onToggle(e.target.checked)}
+            aria-label={`Use ${source.title}`}
+            title={failed ? FAILED_TOOLTIP : undefined}
+          />
+        </span>
         <SourceTypeIcon source={source} className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
         <div className="min-w-0 flex-1">
           <p
             className={cn(
               "truncate text-sm leading-snug",
-              !source.enabled && "text-muted-foreground",
+              (failed || !source.enabled) && "text-muted-foreground",
             )}
             title={source.origin ? `${source.title}\n${source.origin}` : source.title}
           >
@@ -102,18 +119,24 @@ export function SourceRow({
             </div>
           )}
 
-          {source.quality_warning && (
+          {warning && (
             <p className="mt-1 flex items-start gap-1 text-xs text-warning">
               <IconAlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
-              <span>{source.quality_warning}</span>
+              <span>{warning}</span>
             </p>
           )}
 
           {skipped > 0 && (
-            <p className="mt-1 flex items-start gap-1 text-xs text-warning">
+            <button
+              type="button"
+              onClick={() => setSecretsOpen(true)}
+              aria-haspopup="dialog"
+              data-testid="secrets-button"
+              className="mt-1 flex items-start gap-1 rounded-sm text-left text-xs text-warning underline-offset-2 hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+            >
               <IconLock className="mt-px size-3.5 shrink-0" aria-hidden />
               <span>{plural(skipped, "file")} skipped: possible secrets</span>
-            </p>
+            </button>
           )}
 
           {(meta || source.commit_hash) && (
@@ -160,6 +183,15 @@ export function SourceRow({
           </Button>
         </div>
       </div>
+
+      {skipped > 0 && (
+        <SecretsDialog
+          spaceId={spaceId}
+          source={source}
+          open={secretsOpen}
+          onOpenChange={setSecretsOpen}
+        />
+      )}
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <AlertDialogContent>

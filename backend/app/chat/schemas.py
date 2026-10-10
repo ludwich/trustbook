@@ -7,7 +7,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Badge = Literal["verified", "partially_verified", "refused", "unverified"]
-RefusalReason = Literal["not_in_sources", "no_sources", "invalid_output"]
+RefusalReason = Literal["not_in_sources", "no_sources", "invalid_output", "unsupported"]
+Hint = Literal["ideation"]
+GateDecision = Literal["sources", "brainstorm", "chitchat"]
+GATE_DECISIONS: tuple[GateDecision, ...] = ("sources", "brainstorm", "chitchat")
 Stage = Literal["retrieving", "generating", "checking"]
 OverviewStatus = Literal["none", "pending", "ready", "failed"]
 
@@ -42,6 +45,20 @@ class MessageContent(BaseModel):
     text: str | None = Field(default=None, exclude_if=lambda v: v is None)
     suggestion: str | None = Field(default=None, exclude_if=lambda v: v is None)
     sentences: list[SentenceOut] | None = Field(default=None, exclude_if=lambda v: v is None)
+    # "ideation" when the gate saw a brainstorming request (the UI points to the Ideation tab).
+    hint: Hint | None = Field(default=None, exclude_if=lambda v: v is None)
+
+
+class Diagnostics(BaseModel):
+    """Scores behind an answer, for threshold tuning (the eval runner reads them; the UI doesn't).
+
+    ``sentence_scores`` follows the model's cited sentences, removed ones included: the grounding
+    checker's best score per sentence, 0.0 when a code check failed, None when the checker is off.
+    """
+
+    top_rerank: float | None = None
+    sentence_scores: list[float | None] = Field(default_factory=list)
+    regenerated: bool = False
 
 
 class MessageOut(BaseModel):
@@ -52,6 +69,8 @@ class MessageOut(BaseModel):
     badge: Badge | None
     removed_sentences: list[str]
     sources_used: list[SourceUsed]
+    diagnostics: Diagnostics | None = None  # assistant messages only
+    gate_log_id: int | None = None  # the gate decision behind an assistant message
 
 
 class ConversationOut(BaseModel):
@@ -91,6 +110,23 @@ class Refusal(BaseModel):
     reason: RefusalReason
     message: str
     suggestion: str | None
+
+
+class GateLogOut(BaseModel):
+    id: int
+    created: str
+    input: str
+    decision: str
+    confidence: float | None
+    user_correction: str | None
+
+
+class GateCorrection(BaseModel):
+    """``decision`` null clears the correction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: GateDecision | None
 
 
 class OverviewEstimate(BaseModel):

@@ -238,7 +238,10 @@ def test_remote_estimate_and_request_log(env: Env, router: Router) -> None:
         body = json.loads(request.content)
         assert body["temperature"] == 0.2
         data = {
-            "sentences": [{"text": "Requests is an HTTP library.", "chunk_ids": ["c1"]}],
+            # Cites every chunk, so the one it quotes passes verification whatever the order.
+            "sentences": [
+                {"text": "Requests is an HTTP library.", "chunk_ids": ["c1", "c2", "c3"]}
+            ],
             "questions": ["What is Requests?", "What do sessions keep?", "What changed in 2.0?"],
         }
         return httpx.Response(200, json=chat_reply(json.dumps(data)))
@@ -277,3 +280,67 @@ def test_disabling_cancels_a_waiting_job(make_client: AppFactory, fake_providers
     assert client.post(f"{url}/refresh").json()["id"] == job["id"]  # no duplicate job
     assert client.put(url, json={"enabled": False}).json()["status"] == "none"
     assert client.get("/api/jobs").json()["jobs"][0]["status"] == "cancelled"
+
+
+def overview_reply(*sentences: tuple[str, list[str]]) -> str:
+    return json.dumps(
+        {
+            "sentences": [{"text": t, "chunk_ids": ids} for t, ids in sentences],
+            "questions": ["What is Requests?", "What do sessions keep?", "What changed in 2.0?"],
+        }
+    )
+
+
+ALL_LABELS = ["c1", "c2", "c3"]
+
+
+def test_overview_leaves_out_unsupported_sentences(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fill(env)
+    reply = overview_reply(
+        ("Requests is an HTTP library for Python.", ALL_LABELS),
+        ("It was written on the moon.", ALL_LABELS),
+        ("Version 2.0 added SOCKS proxy support.", ALL_LABELS),
+    )
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: ScriptedChat(reply))
+    env.client.post(env.url("/refresh"))
+    data = env.wait_status("ready", "failed")
+    assert data["status"] == "ready"
+    assert [s["text"] for s in data["sentences"]] == [
+        "Requests is an HTTP library for Python.",
+        "Version 2.0 added SOCKS proxy support.",
+    ]
+    # Citation numbers count only the kept sentences, in order of first use.
+    assert [c["n"] for c in data["sentences"][0]["citations"]] == [1, 2, 3]
+
+
+def test_overview_with_no_supported_sentence_fails(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fill(env)
+    reply = overview_reply(("It was written on the moon.", ALL_LABELS))
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: ScriptedChat(reply))
+    env.client.post(env.url("/refresh"))
+    data = env.wait_status("failed", "ready")
+    assert data["status"] == "failed" and data["sentences"] == []
+    job = env.client.get("/api/jobs").json()["jobs"][0]
+    assert job["error"] == (
+        "None of the overview's sentences were supported by your sources, so it was not saved. "
+        "Try again, or add more sources."
+    )
+
+
+def test_overview_with_grounding_off_still_runs_code_checks(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fill(env)
+    env.client.put("/api/capabilities/grounding", json={"enabled": False})
+    reply = overview_reply(
+        ("It was written on the moon.", ALL_LABELS),  # not checked: the checker is off
+        ("It defines `moon_landing`.", ALL_LABELS),  # layer 5 still fails it
+    )
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: ScriptedChat(reply))
+    env.client.post(env.url("/refresh"))
+    data = env.wait_status("ready", "failed")
+    assert [s["text"] for s in data["sentences"]] == ["It was written on the moon."]

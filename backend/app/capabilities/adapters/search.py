@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -14,6 +15,15 @@ from app.capabilities.http import OutboundHttp
 BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 TAVILY_URL = "https://api.tavily.com/search"
 _TAG_RE = re.compile(r"<[^>]+>")
+# SearXNG's search language. A query parameter, so SearXNG itself stays unmodified.
+SEARXNG_LANGUAGE = "en"
+# A query this many words long is "specific": bare homepages rarely answer it.
+SPECIFIC_QUERY_WORDS = 3
+# A path that is only a locale ("/en", "/en-us/", "/sv_SE/") or an index page is a homepage too.
+_HOMEPAGE_PATH = re.compile(
+    r"^/?(?:[a-z]{2}(?:[-_][a-z]{2,4})?/?)?(?:index\.(?:html?|php|aspx?)|default\.aspx?)?$",
+    re.IGNORECASE,
+)
 
 
 def clean_snippet(text: Any) -> str:
@@ -21,7 +31,27 @@ def clean_snippet(text: Any) -> str:
     return " ".join(html.unescape(_TAG_RE.sub("", str(text or ""))).split())
 
 
-def _results(items: Any, snippet_key: str, limit: int) -> list[SearchResult]:
+def is_homepage(url: str) -> bool:
+    """True for a bare site address: no path, "/", or only a locale segment like ``/sv-se/``."""
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return False
+    return bool(_HOMEPAGE_PATH.match(path))
+
+
+def demote_homepages(query: str, results: list[SearchResult]) -> list[SearchResult]:
+    """For specific queries (3+ words), move bare homepages below the other results.
+
+    The sort is stable: the provider's order is kept within both groups.
+    """
+    if len(query.split()) < SPECIFIC_QUERY_WORDS:
+        return list(results)
+    return sorted(results, key=lambda r: is_homepage(r.url))
+
+
+def _results(items: Any, snippet_key: str, limit: int, query: str) -> list[SearchResult]:
+    """Valid results, homepages demoted for specific queries, then cut to ``limit``."""
     if not isinstance(items, list):
         raise AdapterError("bad_response", "The search service did not return a result list.")
     results: list[SearchResult] = []
@@ -35,9 +65,7 @@ def _results(items: Any, snippet_key: str, limit: int) -> list[SearchResult]:
                 snippet=clean_snippet(item.get(snippet_key)),
             )
         )
-        if len(results) >= limit:
-            break
-    return results
+    return demote_homepages(query, results)[:limit]
 
 
 class SearxngAdapter:
@@ -58,7 +86,7 @@ class SearxngAdapter:
         request = httpx.Request(
             "GET",
             f"{self._base_url}/search",
-            params={"q": query, "format": "json"},
+            params={"q": query, "format": "json", "language": SEARXNG_LANGUAGE},
             headers={"Accept": "application/json"},
         )
         with self._http.client("web_search", timeout=self._timeout) as client:
@@ -73,7 +101,9 @@ class SearxngAdapter:
                     ) from exc
                 raise
         data = parse_json(response, what="search service")
-        return _results(data.get("results") if isinstance(data, dict) else None, "content", limit)
+        return _results(
+            data.get("results") if isinstance(data, dict) else None, "content", limit, query
+        )
 
 
 class BraveAdapter:
@@ -96,7 +126,7 @@ class BraveAdapter:
         data = parse_json(response, what="search service")
         web = data.get("web") if isinstance(data, dict) else None
         items = web.get("results", []) if isinstance(web, dict) else []
-        return _results(items, "description", limit)
+        return _results(items, "description", limit, query)
 
 
 class TavilyAdapter:
@@ -120,4 +150,6 @@ class TavilyAdapter:
         with self._http.client("web_search", timeout=self._timeout) as client:
             response = send(client, request, secret=self._api_key)
         data = parse_json(response, what="search service")
-        return _results(data.get("results") if isinstance(data, dict) else None, "content", limit)
+        return _results(
+            data.get("results") if isinstance(data, dict) else None, "content", limit, query
+        )

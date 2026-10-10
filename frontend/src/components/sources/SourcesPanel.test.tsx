@@ -1,9 +1,12 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { SOURCES_POLL_BUSY_MS, SOURCES_POLL_IDLE_MS, sourcesPollInterval } from "@/api/queries";
+import { groupChecked, visibleQualityWarning } from "./sourceMeta";
 import { source } from "@/test/fixtures";
 import { renderApp } from "@/test/render";
+import { server } from "@/test/server";
 import { spaceBackend } from "@/test/spaceBackend";
 
 const SPACE = "/spaces/sp_1";
@@ -137,7 +140,9 @@ describe("sources panel", () => {
     ).toBeInTheDocument();
 
     const code = screen.getByTestId("source-c1");
-    expect(within(code).getByText("2 files skipped: possible secrets")).toBeInTheDocument();
+    expect(
+      within(code).getByRole("button", { name: "2 files skipped: possible secrets" }),
+    ).toBeInTheDocument();
     expect(within(code).getByText("40 files · 210 passages")).toBeInTheDocument();
     expect(within(code).getByText("a1b2c3d")).toBeInTheDocument();
   });
@@ -167,6 +172,172 @@ describe("sources panel", () => {
   });
 });
 
+describe("skipped secrets (G4)", () => {
+  function codeSource() {
+    return source({
+      id: "c1",
+      type: "folder",
+      group: "code",
+      title: "billing-service",
+      stats: { files: 40, chunks: 210, skipped_secrets: 2 },
+      // The backend also puts the sentence in the quality warning; it must show only once.
+      quality_warning:
+        "2 files skipped: possible secrets. Some text was read from images (OCR) and may contain errors.",
+    });
+  }
+
+  it("shows the warning once, as a button, and keeps other warnings", async () => {
+    spaceBackend({ sources: [codeSource()] });
+    renderApp(SPACE);
+    const row = await screen.findByTestId("source-c1");
+    expect(within(row).getAllByText(/skipped: possible secrets/)).toHaveLength(1);
+    expect(
+      within(row).getByRole("button", { name: "2 files skipped: possible secrets" }),
+    ).toBeInTheDocument();
+    expect(within(row).getByText(/^Some text was read from images \(OCR\)/)).toBeInTheDocument();
+  });
+
+  it("opens a report of file, line and rule ID", async () => {
+    const user = userEvent.setup();
+    const { state } = spaceBackend({
+      sources: [codeSource()],
+      secrets: {
+        c1: {
+          files_skipped: 2,
+          findings: [
+            { file: "config/prod.env", line: 3, rule_id: "generic-api-key" },
+            { file: "src/billing/stripe_keys.py", line: 12, rule_id: "stripe-access-token" },
+          ],
+        },
+      },
+    });
+    renderApp(SPACE);
+    // Not fetched until asked for.
+    await screen.findByTestId("source-c1");
+    expect(state.calls.secrets).toEqual([]);
+
+    await user.click(screen.getByRole("button", { name: "2 files skipped: possible secrets" }));
+    const dialog = await screen.findByRole("dialog", { name: "Files skipped: possible secrets" });
+    expect(
+      within(dialog).getByText(
+        "These files were not indexed. Secret values are never stored or shown.",
+      ),
+    ).toBeInTheDocument();
+    const table = await within(dialog).findByRole("table", { name: "Possible secrets" });
+    const rows = within(table).getAllByRole("row");
+    expect(rows.map((r) => r.textContent)).toEqual([
+      "FileLineRule",
+      "config/prod.env3generic-api-key",
+      "src/billing/stripe_keys.py12stripe-access-token",
+    ]);
+    expect(within(table).getByText("config/prod.env")).toHaveClass("font-mono");
+    expect(state.calls.secrets).toEqual(["c1"]);
+  });
+
+  it("explains when there is no report", async () => {
+    const user = userEvent.setup();
+    spaceBackend({ sources: [codeSource()] });
+    renderApp(SPACE);
+    await user.click(
+      await screen.findByRole("button", { name: "2 files skipped: possible secrets" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText(/No report is available/)).toBeInTheDocument();
+  });
+
+  it("drops only the secrets sentence from the quality warning", () => {
+    const s = codeSource();
+    expect(visibleQualityWarning(s)).toBe(
+      "Some text was read from images (OCR) and may contain errors.",
+    );
+    expect(
+      visibleQualityWarning({ ...s, quality_warning: "1 file skipped: possible secrets." }),
+    ).toBeNull();
+    // Without a count in stats there is no button, so the warning stays as sent.
+    expect(
+      visibleQualityWarning({
+        ...s,
+        stats: {},
+        quality_warning: "3 files skipped: possible secrets.",
+      }),
+    ).toBe("3 files skipped: possible secrets.");
+    expect(visibleQualityWarning({ ...s, quality_warning: null })).toBeNull();
+  });
+});
+
+describe("failed sources (G7)", () => {
+  function sourcesWithFailure() {
+    return [
+      source({ id: "d1", title: "Contract.pdf", enabled: true }),
+      source({ id: "d2", title: "Minutes.docx", enabled: true }),
+      // An older backend may still say enabled: true for a failed source.
+      source({
+        id: "f1",
+        title: "Scan.pdf",
+        status: "failed",
+        enabled: true,
+        failure_reason: "This PDF has no text, only images.",
+      }),
+      source({
+        id: "f2",
+        type: "url",
+        group: "web",
+        title: "Blocked page",
+        status: "failed",
+        enabled: false,
+      }),
+    ];
+  }
+
+  it("shows failed sources unticked and disabled with a tooltip", async () => {
+    spaceBackend({ sources: sourcesWithFailure() });
+    renderApp(SPACE);
+    const box = await screen.findByRole("checkbox", { name: "Use Scan.pdf" });
+    expect(box).not.toBeChecked();
+    expect(box).toBeDisabled();
+    expect(box).toHaveAttribute("title", "This source failed to load");
+    expect(box.parentElement).toHaveAttribute("title", "This source failed to load");
+    expect(screen.getByRole("checkbox", { name: "Use Contract.pdf" })).toBeEnabled();
+  });
+
+  it("leaves failed sources out of group state, group toggles and counts", async () => {
+    const user = userEvent.setup();
+    const { state } = spaceBackend({ sources: sourcesWithFailure() });
+    renderApp(SPACE);
+
+    const docs = await screen.findByRole("checkbox", { name: "Use all documents" });
+    // Both usable documents are ticked → all, even though Scan.pdf is not.
+    expect(docs).toBeChecked();
+    expect(docs).not.toBePartiallyChecked();
+    expect(screen.getByTestId("group-count-documents")).toHaveTextContent("2");
+    expect(screen.getByTestId("sources-count")).toHaveTextContent("2");
+
+    // A group with only failed sources: no count, and its checkbox can't be used.
+    expect(screen.queryByTestId("group-count-web")).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Use all web" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Use all web" })).not.toBeChecked();
+
+    // The group toggle sends only the usable sources.
+    await user.click(docs);
+    await waitFor(() =>
+      expect(state.calls.enabled).toEqual([{ source_ids: ["d1", "d2"], enabled: false }]),
+    );
+    await waitFor(() => expect(docs).not.toBeChecked());
+    expect(screen.getByRole("checkbox", { name: "Use Scan.pdf" })).not.toBeChecked();
+  });
+
+  it("computes group state over usable sources only", () => {
+    const ok = source({ id: "a", enabled: false });
+    const failedOn = source({ id: "b", status: "failed", enabled: true });
+    expect(groupChecked([ok, failedOn])).toBe(false);
+    expect(groupChecked([{ ...ok, enabled: true }, failedOn])).toBe(true);
+    expect(groupChecked([failedOn])).toBe(false);
+    expect(
+      groupChecked([{ ...ok, enabled: true }, source({ id: "c", enabled: false }), failedOn]),
+    ).toBe("mixed");
+  });
+});
+
 describe("sources polling", () => {
   it("polls fast while a source is being processed and slowly otherwise", () => {
     expect(sourcesPollInterval(undefined)).toBe(SOURCES_POLL_IDLE_MS);
@@ -179,5 +350,55 @@ describe("sources polling", () => {
     }
     expect(SOURCES_POLL_BUSY_MS).toBe(2_000);
     expect(SOURCES_POLL_IDLE_MS).toBe(15_000);
+  });
+
+  it("changes ticks at once, before the server answers (source and group)", async () => {
+    const user = userEvent.setup();
+    spaceBackend({
+      sources: [
+        source({ id: "s1", title: "Contract.pdf" }),
+        source({ id: "s2", title: "Minutes.docx" }),
+      ],
+    });
+    // Hold every write until released, like a slow server.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const slow = async () => {
+      await held;
+      return HttpResponse.json([]);
+    };
+    server.use(
+      http.patch("*/api/spaces/:sid/sources/:id", slow),
+      http.put("*/api/spaces/:sid/sources/enabled", slow),
+    );
+    renderApp(SPACE);
+
+    const box = await screen.findByRole("checkbox", { name: "Use Contract.pdf" });
+    const group = screen.getByRole("checkbox", { name: "Use all documents" });
+    await user.click(box);
+    // No waitFor: the checkbox must not snap back while the request is open.
+    expect(box).not.toBeChecked();
+    expect(group).toBePartiallyChecked();
+
+    await user.click(group);
+    expect(group).toBeChecked();
+    expect(box).toBeChecked();
+    release();
+  });
+
+  it("puts the tick back and explains when the server refuses it", async () => {
+    const user = userEvent.setup();
+    spaceBackend({ sources: [source({ id: "s1", title: "Contract.pdf" })] });
+    server.use(
+      http.patch("*/api/spaces/:sid/sources/:id", () =>
+        HttpResponse.json({ detail: "The source is busy." }, { status: 409 }),
+      ),
+    );
+    renderApp(SPACE);
+
+    const box = await screen.findByRole("checkbox", { name: "Use Contract.pdf" });
+    await user.click(box);
+    expect(await screen.findByText("The source is busy.")).toBeInTheDocument();
+    await waitFor(() => expect(box).toBeChecked());
   });
 });

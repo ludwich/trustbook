@@ -16,6 +16,8 @@ from app.chat.schemas import (
     TITLE_CHARS,
     Badge,
     ConversationOut,
+    Diagnostics,
+    Hint,
     MessageContent,
     MessageOut,
     Refusal,
@@ -41,10 +43,30 @@ def _conversation_out(row: Conversation) -> ConversationOut:
     )
 
 
-def message_out(row: Message) -> MessageOut:
-    """API shape of a stored message (``sources_used`` comes from its citations)."""
+def _diagnostics(raw: Any) -> Diagnostics | None:
+    if not isinstance(raw, dict):
+        return None
     try:
-        content = MessageContent.model_validate(json.loads(row.content or "{}"))
+        return Diagnostics.model_validate(raw)
+    except ValidationError:
+        return None
+
+
+def message_out(row: Message) -> MessageOut:
+    """API shape of a stored message (``sources_used`` comes from its citations).
+
+    ``diagnostics`` and ``gate_log_id`` are stored inside the content JSON and returned beside it.
+    """
+    diagnostics: Diagnostics | None = None
+    gate_log_id: int | None = None
+    try:
+        data: Any = json.loads(row.content or "{}")
+        content = MessageContent.model_validate(data)
+        if isinstance(data, dict):
+            diagnostics = _diagnostics(data.get("diagnostics"))
+            raw_id = data.get("gate_log_id")
+            if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+                gate_log_id = raw_id
     except (ValueError, ValidationError):
         content = MessageContent(text="")
     try:
@@ -61,7 +83,24 @@ def message_out(row: Message) -> MessageOut:
         badge=badge,
         removed_sentences=removed,
         sources_used=sources_used(content.sentences or []),
+        diagnostics=diagnostics if row.role == "assistant" else None,
+        gate_log_id=gate_log_id if row.role == "assistant" else None,
     )
+
+
+def _with_extras(
+    content: dict[str, Any],
+    diagnostics: Diagnostics | None,
+    hint: Hint | None,
+    gate_log_id: int | None,
+) -> dict[str, Any]:
+    if hint is not None:
+        content["hint"] = hint
+    if diagnostics is not None:
+        content["diagnostics"] = diagnostics.model_dump()
+    if gate_log_id is not None:
+        content["gate_log_id"] = gate_log_id
+    return content
 
 
 class ChatStore:
@@ -128,21 +167,70 @@ class ChatStore:
         return self._add(conversation_id, "user", content, badge=None, title_from=text)
 
     def add_answer(
-        self, conversation_id: str, sentences: Sequence[SentenceOut], removed: Sequence[str] = ()
+        self,
+        conversation_id: str,
+        sentences: Sequence[SentenceOut],
+        removed: Sequence[str] = (),
+        *,
+        badge: Badge | None = None,
+        scores: Sequence[dict[str, float | None]] = (),
+        diagnostics: Diagnostics | None = None,
+        hint: Hint | None = None,
+        gate_log_id: int | None = None,
     ) -> MessageOut:
-        """Store an answer with one ``citations`` row per (sentence, chunk)."""
+        """Store an answer with one ``citations`` row per (sentence, chunk).
+
+        ``scores[i]`` maps the chunk ids of sentence ``i`` to their grounding checker score,
+        stored as ``citations.verifier_score``.
+        """
         content: dict[str, Any] = {"sentences": [s.model_dump() for s in sentences]}
         return self._add(
-            conversation_id, "assistant", content, badge=None, sentences=sentences, removed=removed
+            conversation_id,
+            "assistant",
+            _with_extras(content, diagnostics, hint, gate_log_id),
+            badge=badge,
+            sentences=sentences,
+            removed=removed,
+            scores=scores,
         )
 
-    def add_refusal(self, conversation_id: str, refusal: Refusal) -> MessageOut:
+    def add_refusal(
+        self,
+        conversation_id: str,
+        refusal: Refusal,
+        *,
+        diagnostics: Diagnostics | None = None,
+        hint: Hint | None = None,
+        gate_log_id: int | None = None,
+    ) -> MessageOut:
         content: dict[str, Any] = {
             "text": refusal.message,
             "suggestion": refusal.suggestion,
             "sentences": [],
         }
-        return self._add(conversation_id, "assistant", content, badge="refused")
+        return self._add(
+            conversation_id,
+            "assistant",
+            _with_extras(content, diagnostics, hint, gate_log_id),
+            badge="refused",
+        )
+
+    def add_reply(
+        self,
+        conversation_id: str,
+        text: str,
+        *,
+        diagnostics: Diagnostics | None = None,
+        gate_log_id: int | None = None,
+    ) -> MessageOut:
+        """A fixed assistant reply that is not an answer (the gate's chitchat reply): no badge."""
+        content: dict[str, Any] = {"text": text}
+        return self._add(
+            conversation_id,
+            "assistant",
+            _with_extras(content, diagnostics, None, gate_log_id),
+            badge=None,
+        )
 
     def _add(
         self,
@@ -153,6 +241,7 @@ class ChatStore:
         badge: Badge | None,
         sentences: Sequence[SentenceOut] = (),
         removed: Sequence[str] = (),
+        scores: Sequence[dict[str, float | None]] = (),
         title_from: str | None = None,
     ) -> MessageOut:
         now = utc_now_iso()
@@ -176,10 +265,14 @@ class ChatStore:
             session.add(row)
             session.flush()
             for index, sentence in enumerate(sentences):
+                sentence_scores = scores[index] if index < len(scores) else {}
                 for citation in sentence.citations:
                     session.add(
                         Citation(
-                            message_id=row.id, sentence_index=index, chunk_id=citation.chunk_id
+                            message_id=row.id,
+                            sentence_index=index,
+                            chunk_id=citation.chunk_id,
+                            verifier_score=sentence_scores.get(citation.chunk_id),
                         )
                     )
             session.commit()

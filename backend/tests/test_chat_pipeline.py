@@ -10,6 +10,7 @@ from app.chat.output import InvalidOutputError, parse_answer
 from app.chat.pipeline import NO_CITED_ANSWER, NOT_IN_SOURCES, Answered, Refused, answer
 from app.chat.prompt import ANSWER_SCHEMA, RETRY_INSTRUCTION, TEMPERATURE
 from app.chat.schemas import Stage
+from app.grounding.verify import Verifier
 from app.retrieval.service import Retrieval, RetrievedChunk
 from tests.chat_helpers import ScriptedChat, answer_json
 
@@ -22,6 +23,11 @@ def chunk(cid: str, score: float, source: str = "s1") -> RetrievedChunk:
 
 def retrieval(*chunks: RetrievedChunk) -> Retrieval:
     return Retrieval(chunks=list(chunks), ranked=list(chunks), source_ids=["s1"])
+
+
+def pass_all() -> Verifier:
+    """Layers 4-5 that pass every sentence (these tests are about layers 2-3)."""
+    return Verifier(lambda pairs: [1.0] * len(pairs), threshold=0.5)
 
 
 def run(
@@ -40,6 +46,7 @@ def run(
         retrieve=lambda _q: found,
         chat_adapter=factory,
         refuse_threshold=threshold,
+        verifier=pass_all(),
         on_stage=stages.append,
     )
     return outcome, stages, built
@@ -51,7 +58,7 @@ def test_no_usable_sources_refuses_without_calling_the_model() -> None:
     assert isinstance(outcome, Refused)
     assert outcome.refusal.reason == "no_sources"
     assert outcome.refusal.message == NOT_IN_SOURCES
-    assert "proxies configured requests" in (outcome.refusal.suggestion or "")
+    assert outcome.refusal.suggestion == "Add or tick at least one ready source, then ask again."
     assert (stages, built, chat.calls) == (["retrieving"], 0, [])
 
 
@@ -64,7 +71,7 @@ def test_low_top_score_refuses_before_generating(top: float) -> None:
     assert outcome.refusal.message == "Not in your sources"
     assert (
         outcome.refusal.suggestion
-        == "Add sources about “proxies configured requests” and ask again."
+        == "Add sources that cover “how are proxies configured in requests”, then ask again."
     )
     assert (stages, built, chat.calls) == (["retrieving"], 0, [])
 

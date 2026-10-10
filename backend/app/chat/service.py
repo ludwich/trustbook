@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from app.chat.gate import CHITCHAT_REPLY, Gate, GateResult
 from app.chat.llm import ChatAdapterFactory
 from app.chat.pipeline import Refused, answer
 from app.chat.repository import ChatStore
-from app.chat.schemas import MessageOut, Stage
+from app.chat.schemas import Diagnostics, Hint, MessageOut, Stage
+from app.grounding.verify import Verifier
 from app.retrieval.service import Retrieval
 
 EventSink = Callable[[str, dict[str, Any]], None]
@@ -16,7 +18,7 @@ EventSink = Callable[[str, dict[str, Any]], None]
 
 
 class ChatService:
-    """Runs the grounded pipeline for one space and stores the outcome."""
+    """Runs the gate and the grounded pipeline for one space and stores the outcome."""
 
     def __init__(
         self,
@@ -25,36 +27,76 @@ class ChatService:
         retrieve: Callable[[str], Retrieval],
         chat_adapter: ChatAdapterFactory,
         refuse_threshold: float,
+        verifier: Callable[[], Verifier],
+        gate: Gate | None = None,
     ) -> None:
         self._store = store
         self._retrieve = retrieve
         self._chat_adapter = chat_adapter
         self._refuse_threshold = refuse_threshold
+        self._verifier = verifier
+        self._gate = gate
 
     def respond(self, conversation_id: str, question: str, emit: EventSink) -> MessageOut:
         """Answer ``question`` (already stored as the user message) and emit the events.
 
         Every successful run ends with ``done`` carrying the stored assistant message, also
-        after ``refused``. Exceptions (endpoint errors and the like) propagate to the caller.
+        after ``refused``. Sentences are emitted only after they passed verification.
+        Exceptions (endpoint errors and the like) propagate to the caller.
         """
+        last: list[Stage] = []
 
         def on_stage(stage: Stage) -> None:
-            emit("status", {"stage": stage})
+            if not last or last[-1] != stage:
+                last.append(stage)
+                emit("status", {"stage": stage})
+
+        on_stage("retrieving")
+        routed = (
+            self._gate.route(question) if self._gate is not None else GateResult("sources", None)
+        )
+        if routed.decision == "chitchat":
+            message = self._store.add_reply(
+                conversation_id,
+                CHITCHAT_REPLY,
+                diagnostics=Diagnostics(),
+                gate_log_id=routed.log_id,
+            )
+            emit("done", {"message": message.model_dump()})
+            return message
+        hint: Hint | None = "ideation" if routed.decision == "brainstorm" else None
 
         outcome = answer(
             question,
             retrieve=self._retrieve,
             chat_adapter=self._chat_adapter,
             refuse_threshold=self._refuse_threshold,
+            verifier=self._verifier(),
             on_stage=on_stage,
         )
         if isinstance(outcome, Refused):
-            message = self._store.add_refusal(conversation_id, outcome.refusal)
+            message = self._store.add_refusal(
+                conversation_id,
+                outcome.refusal,
+                diagnostics=outcome.diagnostics,
+                hint=hint,
+                gate_log_id=routed.log_id,
+            )
             emit("refused", outcome.refusal.model_dump())
         else:
             for index, sentence in enumerate(outcome.sentences):
                 emit("sentence", {"index": index, **sentence.model_dump()})
-            # Phase 1: dropped (uncited) sentences are not shown anywhere (layer 3).
-            message = self._store.add_answer(conversation_id, outcome.sentences)
+            # Layer 3 drops (uncited sentences) are not shown anywhere; layer 4/5 removals are
+            # kept as removed_sentences for the "Unverified, not from your sources" drawer.
+            message = self._store.add_answer(
+                conversation_id,
+                outcome.sentences,
+                outcome.removed,
+                badge=outcome.badge,
+                scores=outcome.scores,
+                diagnostics=outcome.diagnostics,
+                hint=hint,
+                gate_log_id=routed.log_id,
+            )
         emit("done", {"message": message.model_dump()})
         return message

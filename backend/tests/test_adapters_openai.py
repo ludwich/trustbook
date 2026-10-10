@@ -223,3 +223,30 @@ def test_non_json_success(http: OutboundHttp, router: Router) -> None:
     router.add("POST", BASE, lambda _r: httpx.Response(200, text="<html>"))
     with pytest.raises(AdapterError, match="not with JSON"):
         _adapter(http).chat([{"role": "user", "content": "Hi"}])
+
+
+def test_think_false_asks_local_servers_to_skip_thinking(
+    http: OutboundHttp, router: Router
+) -> None:
+    router.json("POST", BASE, chat_reply('{"a": "x"}'))
+    _adapter(http).chat([{"role": "user", "content": "Hi"}], json_schema=SCHEMA, think=False)
+    assert router.last_json()["chat_template_kwargs"] == {"enable_thinking": False}
+    _adapter(http).chat([{"role": "user", "content": "Hi"}])
+    assert "chat_template_kwargs" not in router.last_json()
+
+
+def test_endpoints_rejecting_the_thinking_hint_get_it_again_without(
+    http: OutboundHttp, router: Router
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "chat_template_kwargs" in json.loads(request.content):
+            return httpx.Response(
+                400, json={"error": {"message": "Unrecognized request argument supplied"}}
+            )
+        return httpx.Response(200, json=chat_reply('{"a": "x"}'))
+
+    router.add("POST", BASE, handler)
+    adapter = _adapter(http)
+    reply = adapter.chat([{"role": "user", "content": "Hi"}], json_schema=SCHEMA, think=False)
+    assert reply.text == '{"a": "x"}'
+    assert adapter.json_mode == "json_schema"  # the hint was dropped, not the JSON schema

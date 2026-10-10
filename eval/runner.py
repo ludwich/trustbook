@@ -3,14 +3,19 @@
 
 Asks every question in one or more YAML question files (format: ``eval/format.md``) against a
 space of a running Trustbook, then prints a Markdown report ready to paste into ``docs/GATES.md``:
-citation precision, correct-refusal rate, false refusals, answer latency p50/p95 and the
-informational ``must_contain`` hit rate.
+citation precision, correct-refusal rate, ``must_contain`` hit rate, false refusals and answer
+latency p50/p95.
 
 Usage (from the repo root, with the backend's virtualenv)::
 
     uv run --project backend python eval/runner.py --base-url http://localhost:8484 \\
         --space "requests smoke" --questions eval/smoke/questions.yaml \\
         --setup eval/smoke/corpus.yaml --report eval-report.md
+
+With ``--report out.md`` the runner also writes ``out.json`` next to it: per-question outcome,
+top reranker score, sentence verifier scores (from the answer's ``diagnostics``) and the threshold
+sweep (see ``eval/format.md``, "Threshold sweep"). Nothing is written anywhere else, so a private
+question set never ends up in the repository unless the report path is inside it.
 
 Exit codes: 0 = report written; 1 = a ``--min-*`` threshold was not met; 2 = the API is
 unreachable or the input (questions, corpus, space) is invalid.
@@ -547,6 +552,13 @@ class QuestionResult:
     must_found: list[str] = field(default_factory=list)
     expected_resolved: int = 0
     expected_cited: int = 0
+    # From the answer's ``diagnostics`` and badge (Phase 2); None when the API did not send them.
+    badge: str | None = None
+    top_rerank: float | None = None
+    sentence_scores: list[float | None] | None = None
+    regenerated: bool | None = None
+    removed_sentences: int = 0
+    sentence_citations: list[list[Citation]] = field(default_factory=list)  # kept sentences
 
     @property
     def answer_text(self) -> str:
@@ -615,6 +627,168 @@ def compute_metrics(results: Sequence[QuestionResult]) -> Metrics:
     )
 
 
+# ---------------------------------------------------------------------------------------------
+# Threshold sweep (layer 6 tuning; estimation rules in eval/format.md, "Threshold sweep")
+# ---------------------------------------------------------------------------------------------
+
+REFUSE_SWEEP = tuple(round(0.05 * i, 2) for i in range(1, 9))  # 0.05 .. 0.40
+VERIFY_SWEEP = tuple(round(0.1 * i, 1) for i in range(3, 8))  # 0.3 .. 0.7
+
+
+@dataclass(frozen=True)
+class Thresholds:
+    """The space's grounding thresholds during the run (``GET /api/settings``)."""
+
+    refuse: float = 0.15
+    verify: float = 0.5
+
+
+@dataclass(frozen=True)
+class SweepRow:
+    refuse: float
+    verify: float
+    correct_refusal: Ratio
+    answered: Ratio
+    precision: Ratio
+
+
+def outcome_at(result: QuestionResult, refuse: float, verify: float) -> str:
+    """Estimated outcome (``answered`` | ``refused`` | ``error``) at other thresholds.
+
+    Refused when the top reranker score is below ``refuse``; or when, at ``verify``, more than
+    half of the recorded sentence scores fail or the first one fails (None = not checked, passes);
+    or when the run refused it for a reason the scores cannot re-decide (anything but
+    ``unsupported``). Questions without diagnostics keep their real outcome.
+    """
+    if result.outcome == "error":
+        return "error"
+    if result.top_rerank is not None and result.top_rerank < refuse:
+        return "refused"
+    scores = result.sentence_scores
+    if not scores:
+        return result.outcome
+    failing = [s is not None and s < verify for s in scores]
+    if failing[0] or sum(failing) * 2 > len(failing):
+        return "refused"
+    if result.outcome == "refused" and result.refusal_reason != "unsupported":
+        return "refused"
+    return "answered"
+
+
+def kept_scores(result: QuestionResult, run_verify: float) -> list[float | None]:
+    """Scores of the sentences the run kept, aligned with ``sentence_citations``.
+
+    ``sentence_scores`` covers removed sentences too. Kept ones are those that passed at the
+    run's verify threshold (score None or >= it), in order. If that cannot be matched up, every
+    kept sentence counts as unknown (None).
+    """
+    kept = len(result.sentence_citations)
+    scores = result.sentence_scores or []
+    if len(scores) == kept:
+        return list(scores)
+    passing = [s for s in scores if s is None or s >= run_verify]
+    return passing if len(passing) == kept else [None] * kept
+
+
+def sweep(
+    results: Sequence[QuestionResult],
+    sources: dict[str, SourceInfo],
+    run: Thresholds,
+) -> list[SweepRow]:
+    """Correct-refusal rate, answered rate and a precision proxy for each threshold pair."""
+    answerable = [r for r in results if r.question.answerable]
+    unanswerable = [r for r in results if not r.question.answerable]
+    rows: list[SweepRow] = []
+    for refuse in REFUSE_SWEEP:
+        for verify in VERIFY_SWEEP:
+            refused = sum(outcome_at(r, refuse, verify) == "refused" for r in unanswerable)
+            answered = [r for r in answerable if outcome_at(r, refuse, verify) == "answered"]
+            num = den = 0
+            for r in answered:
+                if r.outcome != "answered":
+                    continue  # answered only in the estimate: its citations are unknown
+                unique: dict[str, Citation] = {}
+                for cits, value in zip(
+                    r.sentence_citations, kept_scores(r, run.verify), strict=True
+                ):
+                    if value is None or value >= verify:
+                        for c in cits:
+                            unique.setdefault(c.key, c)
+                den += len(unique)
+                num += sum(citation_correct(r.question, c, sources) for c in unique.values())
+            rows.append(
+                SweepRow(
+                    refuse=refuse,
+                    verify=verify,
+                    correct_refusal=Ratio(refused, len(unanswerable)),
+                    answered=Ratio(len(answered), len(answerable)),
+                    precision=Ratio(num, den),
+                )
+            )
+    return rows
+
+
+def has_diagnostics(results: Sequence[QuestionResult]) -> bool:
+    return any(r.top_rerank is not None or r.sentence_scores is not None for r in results)
+
+
+def _ratio_json(r: Ratio) -> dict[str, Any]:
+    return {"num": r.num, "den": r.den, "value": r.value}
+
+
+def sidecar(
+    info: RunInfo, results: Sequence[QuestionResult], rows: Sequence[SweepRow]
+) -> dict[str, Any]:
+    """The JSON written next to the report: scores per question and the sweep.
+
+    Only ids, types and numbers: no question or answer text.
+    """
+    thresholds = info.thresholds
+    return {
+        "version": 1,
+        "date": info.started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "api_version": info.api_version,
+        "space_id": info.space_id,
+        "thresholds": None
+        if thresholds is None
+        else {"refuse": thresholds.refuse, "verify": thresholds.verify},
+        "questions": [
+            {
+                "id": r.question.id,
+                "type": r.question.type,
+                "category": r.question.category,
+                "outcome": r.outcome,
+                "refusal_reason": r.refusal_reason,
+                "badge": r.badge,
+                "top_rerank": r.top_rerank,
+                "sentence_scores": r.sentence_scores,
+                "regenerated": r.regenerated,
+                "removed_sentences": r.removed_sentences,
+                "citations": len(r.citations),
+                "citations_correct": r.n_correct if r.question.answerable else None,
+                "latency_s": r.latency_s,
+            }
+            for r in results
+        ],
+        "sweep": [
+            {
+                "refuse": row.refuse,
+                "verify": row.verify,
+                "correct_refusal": _ratio_json(row.correct_refusal),
+                "answered": _ratio_json(row.answered),
+                "precision_proxy": _ratio_json(row.precision),
+            }
+            for row in rows
+        ],
+    }
+
+
+def sidecar_path(report: str) -> Path:
+    """``out.md`` → ``out.json`` (any other name gets ``.json`` appended)."""
+    path = Path(report)
+    return path.with_suffix(".json") if path.suffix.lower() == ".md" else Path(f"{report}.json")
+
+
 def score(result: QuestionResult, sources: dict[str, SourceInfo]) -> None:
     """Fill the judged fields of a result (citations must already be unique)."""
     q = result.question
@@ -659,6 +833,22 @@ class Api:
         except httpx.TransportError as exc:
             raise ApiUnreachableError(f"{what}: {type(exc).__name__}: {exc}") from exc
         return _json(resp, what)
+
+    def thresholds(self) -> Thresholds | None:
+        """The grounding thresholds in use, or None if the API does not report them."""
+        try:
+            data = self._request("GET", "/api/settings", "read settings")
+        except ApiUnreachableError:
+            raise
+        except EvalError:
+            return None
+        raw = data.get("thresholds") if isinstance(data, dict) else None
+        if not isinstance(raw, dict):
+            return None
+        refuse, verify = _num(raw.get("refuse")), _num(raw.get("verify"))
+        if refuse is None or verify is None:
+            return None
+        return Thresholds(refuse=refuse, verify=verify)
 
     def health(self) -> dict[str, Any]:
         data = self._request("GET", "/api/health", "health check")
@@ -784,6 +974,16 @@ def ask(
                             final = [
                                 _sentence(s) for s in content["sentences"] if isinstance(s, dict)
                             ]
+                        elif (
+                            isinstance(content, dict)
+                            and isinstance(content.get("text"), str)
+                            and message.get("badge") is None
+                            and not streamed
+                        ):
+                            # The gate's fixed chitchat reply: no answer was given.
+                            result.outcome = "refused"
+                            result.refusal_reason = "chitchat"
+                        read_message_extras(result, message)
                     if result.outcome != "refused":
                         result.outcome = "answered"
                     terminal = True
@@ -810,12 +1010,34 @@ def ask(
     sentences = final if final is not None else streamed
     if result.outcome == "answered":
         result.sentences = [text for text, _ in sentences]
+        result.sentence_citations = [cits for _, cits in sentences]
         unique: dict[str, Citation] = {}
         for _, cits in sentences:
             for c in cits:
                 unique.setdefault(c.key, c)
         result.citations = list(unique.values())
     return result
+
+
+def _score(value: Any) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def read_message_extras(result: QuestionResult, message: dict[str, Any]) -> None:
+    """Badge, removed sentences and ``diagnostics`` of the final assistant message."""
+    badge = message.get("badge")
+    result.badge = badge if isinstance(badge, str) else None
+    removed = message.get("removed_sentences")
+    result.removed_sentences = len(removed) if isinstance(removed, list) else 0
+    diagnostics = message.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return
+    result.top_rerank = _score(diagnostics.get("top_rerank"))
+    scores = diagnostics.get("sentence_scores")
+    if isinstance(scores, list):
+        result.sentence_scores = [_score(v) for v in scores]
+    regenerated = diagnostics.get("regenerated")
+    result.regenerated = regenerated if isinstance(regenerated, bool) else None
 
 
 def _sentence(data: dict[str, Any]) -> tuple[str, list[Citation]]:
@@ -1005,6 +1227,8 @@ class RunInfo:
     started_at: datetime
     min_precision: float | None = None
     min_refusal: float | None = None
+    min_must_contain: float | None = None
+    thresholds: Thresholds | None = None  # None when the API did not report them
 
 
 def render_report(
@@ -1030,12 +1254,17 @@ def render_report(
     out.append("")
     p_target, p_res = _verdict(m.precision.value, info.min_precision)
     r_target, r_res = _verdict(m.correct_refusal.value, info.min_refusal)
+    k_target, k_res = _verdict(m.must_contain.value, info.min_must_contain)
     out.append("| Metric | Value | Target | Result |")
     out.append("|---|---|---|---|")
     out.append(f"| Citation precision (answerable) | {_pct(m.precision)} | {p_target} | {p_res} |")
     out.append(
         f"| Correct-refusal rate (unanswerable) | {_pct(m.correct_refusal)} "
         f"| {r_target} | {r_res} |"
+    )
+    out.append(
+        f"| must_contain hit rate (answerable with keywords) | {_pct(m.must_contain)} "
+        f"| {k_target} | {k_res} |"
     )
     out.append(
         f"| False refusals (answerable) | {m.false_refusal.num}/{m.false_refusal.den} | - | - |"
@@ -1045,7 +1274,6 @@ def render_report(
         f"| Answer latency p50 / p95 ({m.latency_count} answers) | "
         f"{_secs(m.latency_p50)} / {_secs(m.latency_p95)} | - | - |"
     )
-    out.append(f"| must_contain hit rate (informational) | {_pct(m.must_contain)} | - | - |")
     out.append("")
     out.append(
         "| ID | Type | Category | Outcome | Citations correct/total "
@@ -1107,6 +1335,8 @@ def render_report(
             out.append(f"- `{r.question.id}`: {_cell(r.error or 'unknown error')}")
         out.append("")
 
+    out.extend(render_sweep(info, results, sources))
+
     unmatched = sorted({e for r in results for e in unmatched_entries(r.question, sources)})
     notes: list[str] = []
     if unmatched:
@@ -1136,13 +1366,58 @@ def render_report(
     return "\n".join(out).rstrip() + "\n"
 
 
-def thresholds_met(m: Metrics, min_precision: float | None, min_refusal: float | None) -> bool:
-    ok = True
-    if min_precision is not None:
-        ok = ok and m.precision.value is not None and m.precision.value >= min_precision
-    if min_refusal is not None:
-        ok = ok and m.correct_refusal.value is not None and m.correct_refusal.value >= min_refusal
-    return ok
+def _ratio_cell(r: Ratio) -> str:
+    v = r.value
+    return f"n/a ({r.num}/{r.den})" if v is None else f"{v * 100:.0f}% ({r.num}/{r.den})"
+
+
+def render_sweep(
+    info: RunInfo, results: Sequence[QuestionResult], sources: dict[str, SourceInfo]
+) -> list[str]:
+    """The "Threshold sweep" section (estimation rules: eval/format.md)."""
+    out = ["#### Threshold sweep", ""]
+    if not has_diagnostics(results):
+        out += ["No answer diagnostics were returned (API before Phase 2); no sweep.", ""]
+        return out
+    run = info.thresholds or Thresholds()
+    known = "" if info.thresholds else " (not reported by the API; defaults assumed)"
+    out.append(
+        f"Estimated from the recorded scores; this run used refuse {run.refuse:g}, "
+        f'verify {run.verify:g}{known}. See `eval/format.md`, "Threshold sweep", for how '
+        "each value is estimated and where it is only a bound."
+    )
+    out.append("")
+    out.append(
+        "| Refuse | Verify | Correct refusals (unanswerable) | Answered (answerable) "
+        "| Precision proxy |"
+    )
+    out.append("|---|---|---|---|---|")
+    for row in sweep(results, sources, run):
+        current = math.isclose(row.refuse, run.refuse) and math.isclose(row.verify, run.verify)
+        mark = " **(run)**" if current else ""
+        out.append(
+            f"| {row.refuse:.2f}{mark} | {row.verify:.1f} | {_ratio_cell(row.correct_refusal)} "
+            f"| {_ratio_cell(row.answered)} | {_ratio_cell(row.precision)} |"
+        )
+    out.append("")
+    return out
+
+
+def thresholds_met(
+    m: Metrics,
+    min_precision: float | None,
+    min_refusal: float | None,
+    min_must_contain: float | None = None,
+) -> bool:
+    """True when every given minimum is reached (a value that can't be computed fails)."""
+    checks = (
+        (m.precision.value, min_precision),
+        (m.correct_refusal.value, min_refusal),
+        (m.must_contain.value, min_must_contain),
+    )
+    return all(
+        minimum is None or (value is not None and value >= minimum) for value, minimum in checks
+    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1172,13 +1447,20 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="question YAML file or directory (repeatable)",
     )
-    p.add_argument("--report", help="also write the Markdown report to this file")
+    p.add_argument(
+        "--report",
+        help="also write the Markdown report to this file, and the scores to the same name "
+        "with .json",
+    )
     p.add_argument("--setup", help="corpus YAML to ingest into the space before asking")
     p.add_argument("--setup-timeout", type=float, default=3600.0, help="seconds (default 3600)")
     p.add_argument("--poll-interval", type=float, default=5.0, help=argparse.SUPPRESS)
     p.add_argument("--timeout", type=float, default=300.0, help="seconds per answer (default 300)")
     p.add_argument("--min-precision", type=_fraction, help="exit 1 if citation precision is lower")
     p.add_argument("--min-refusal", type=_fraction, help="exit 1 if correct-refusal rate is lower")
+    p.add_argument(
+        "--min-must-contain", type=_fraction, help="exit 1 if the must_contain hit rate is lower"
+    )
     return p
 
 
@@ -1226,6 +1508,7 @@ def main(
                 space = found
             sid = str(space["id"])
             sources = {s.id: s for s in api.sources(sid)}
+            run_thresholds = api.thresholds()
             results: list[QuestionResult] = []
             for i, q in enumerate(questions, 1):
                 r = ask(client, sid, q, clock=clock)
@@ -1252,13 +1535,21 @@ def main(
         started_at=started,
         min_precision=args.min_precision,
         min_refusal=args.min_refusal,
+        min_must_contain=args.min_must_contain,
+        thresholds=run_thresholds,
     )
     report = render_report(info, results, sources, setup)
     out.write(report)
     if args.report:
         Path(args.report).write_text(report, encoding="utf-8")
         print(f"report written to {args.report}", file=log)
-    if not thresholds_met(compute_metrics(results), args.min_precision, args.min_refusal):
+        data = sidecar(info, results, sweep(results, sources, run_thresholds or Thresholds()))
+        json_path = sidecar_path(args.report)
+        json_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        print(f"scores written to {json_path}", file=log)
+    if not thresholds_met(
+        compute_metrics(results), args.min_precision, args.min_refusal, args.min_must_contain
+    ):
         print("thresholds not met", file=log)
         return EXIT_THRESHOLD
     return EXIT_OK

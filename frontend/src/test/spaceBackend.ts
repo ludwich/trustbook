@@ -3,12 +3,16 @@ import type {
   BrowseListing,
   ChatStatus,
   Chunk,
+  ChunkContext,
   Conversation,
   Message,
   Overview,
+  SecretsReport,
   Settings,
   Snapshot,
   Source,
+  SourceEstimate,
+  SourceEstimateItem,
   WebSearchResult,
 } from "@/api/types";
 import {
@@ -46,7 +50,15 @@ export interface SpaceBackendOptions {
   searchResults?: WebSearchResult[];
   chunks?: Record<string, Chunk>;
   snapshots?: Record<string, Snapshot>;
+  /** GET …/chunks/{id}/context by chunk id (404 when missing). */
+  contexts?: Record<string, ChunkContext>;
+  /** GET …/sources/{id}/secrets by source id (404 when missing). */
+  secrets?: Record<string, SecretsReport>;
   stream?: StreamHandler;
+  /** POST …/sources/estimate. Default: a few seconds, no confirmation. */
+  estimate?: (items: SourceEstimateItem[]) => SourceEstimate;
+  /** GET …/gate-log, as the server would send it (raw rows). */
+  gateLog?: Record<string, unknown>[];
 }
 
 /**
@@ -72,13 +84,18 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
       refresh: [] as string[],
       deleted: [] as string[],
       browse: [] as string[],
+      secrets: [] as string[],
+      contexts: [] as string[],
       settings: [] as unknown[],
       overviewPut: [] as unknown[],
       overviewRefresh: 0,
       conversationsCreated: [] as unknown[],
       conversationsDeleted: [] as string[],
       asked: [] as { conversationId: string; content: string }[],
+      estimate: [] as SourceEstimateItem[][],
+      gateCorrect: [] as { id: number; body: unknown }[],
     },
+    gateLog: [...(opts.gateLog ?? [])],
   };
   let nextId = 1;
   const newSource = (over: Partial<Source>): Source => {
@@ -171,6 +188,9 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
     http.put("*/api/spaces/:sid/sources/enabled", async ({ request }) => {
       const body = (await request.json()) as { source_ids: string[]; enabled: boolean };
       state.calls.enabled.push(body);
+      if (state.sources.some((s) => body.source_ids.includes(s.id) && s.status === "failed")) {
+        return HttpResponse.json({ detail: "A failed source can't be ticked." }, { status: 409 });
+      }
       state.sources = state.sources.map((s) =>
         body.source_ids.includes(s.id) ? { ...s, enabled: body.enabled } : s,
       );
@@ -179,6 +199,10 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
     http.patch("*/api/spaces/:sid/sources/:id", async ({ params, request }) => {
       const body = (await request.json()) as Partial<Source>;
       state.calls.patch.push({ id: String(params.id), body });
+      const target = state.sources.find((s) => s.id === params.id);
+      if (target?.status === "failed" && "enabled" in body) {
+        return HttpResponse.json({ detail: "A failed source can't be ticked." }, { status: 409 });
+      }
       state.sources = state.sources.map((s) => (s.id === params.id ? { ...s, ...body } : s));
       return HttpResponse.json(state.sources.find((s) => s.id === params.id));
     }),
@@ -200,11 +224,47 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
         ? HttpResponse.json(snap)
         : HttpResponse.json({ detail: "No snapshot." }, { status: 404 });
     }),
+    http.get("*/api/spaces/:sid/sources/:id/secrets", ({ params }) => {
+      state.calls.secrets.push(String(params.id));
+      const report = opts.secrets?.[String(params.id)];
+      return report
+        ? HttpResponse.json(report)
+        : HttpResponse.json({ detail: "No secrets report." }, { status: 404 });
+    }),
+    http.get("*/api/spaces/:sid/chunks/:id/context", ({ params }) => {
+      state.calls.contexts.push(String(params.id));
+      const c = opts.contexts?.[String(params.id)];
+      return c
+        ? HttpResponse.json(c)
+        : HttpResponse.json({ detail: "Passage not found." }, { status: 404 });
+    }),
     http.get("*/api/spaces/:sid/chunks/:id", ({ params }) => {
       const c = opts.chunks?.[String(params.id)];
       return c
         ? HttpResponse.json(c)
         : HttpResponse.json({ detail: "Passage not found." }, { status: 404 });
+    }),
+    http.post("*/api/spaces/:sid/sources/estimate", async ({ request }) => {
+      const body = (await request.json()) as { items: SourceEstimateItem[] };
+      state.calls.estimate.push(body.items);
+      return HttpResponse.json(
+        opts.estimate?.(body.items) ?? {
+          seconds: 5,
+          files: null,
+          summary: "Less than a minute on this PC",
+          confirm: false,
+        },
+      );
+    }),
+    http.get("*/api/spaces/:sid/gate-log", () => HttpResponse.json(state.gateLog)),
+    http.post("*/api/spaces/:sid/gate-log/:id/correct", async ({ params, request }) => {
+      const id = Number(params.id);
+      const body = (await request.json()) as { decision: string };
+      state.calls.gateCorrect.push({ id, body });
+      state.gateLog = state.gateLog.map((e) =>
+        e.id === id ? { ...e, user_correction: body.decision } : e,
+      );
+      return HttpResponse.json(state.gateLog.find((e) => e.id === id) ?? {});
     }),
     http.get("*/api/browse", ({ request }) => {
       const path = new URL(request.url).searchParams.get("path") ?? "";

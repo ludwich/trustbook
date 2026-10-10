@@ -138,3 +138,86 @@ Other checks:
   release moves `stable`, re-check `verification.md`.
 - The headless-browser fallback cannot run Chromium's sandbox inside the container (Docker's default
   seccomp). It renders only public pages, and private addresses are blocked (D-025).
+
+---
+
+## Gate 2 — Trust and flow
+
+**Image:** `ghcr.io/ludwich/trustbook:phase-2-rc` · **PR:** `phase-2 → main`
+
+**Criterion (SPEC §14):** correct-refusal rate ≥ 95% on unanswerable questions, with citation precision still
+≥ 90%.
+
+### Setup
+
+1. In `.env` set `TRUSTBOOK_IMAGE_TAG=phase-2-rc`, then `docker compose pull` and `docker compose up -d`.
+   The speed test runs again (version 5: it now also picks parallel indexing streams). Wait for it in
+   **Settings → Speed test**.
+2. The smoke corpus from Gate 1 stays where it is (`trustbook-eval/requests`). The `Smoke` space from Gate 1 can
+   be reused, but delete it and let the runner rebuild it: Phase 2 no longer indexes generated files (the
+   `.ai`/`.svg` logos were 93% of the old index).
+3. Private golden set (optional, recommended): put the YAML file(s) under your data folder, for example
+   `C:/Users/<you>/Trustbook/eval-private/`, which the container sees as `/data/eval-private/`. Nothing there is
+   ever indexed or uploaded.
+
+### Checklist
+
+| # | Check | How to verify | Expected |
+|---|---|---|---|
+| 1 | **Refusal + precision (gate)** | `docker compose exec app python /app/eval/runner.py --base-url http://127.0.0.1:8484 --space Smoke --setup /app/eval/smoke/corpus.yaml --questions /app/eval/smoke/questions.yaml --questions /app/eval/smoke/refusal.yaml --report /data/gate2-report.md --min-precision 0.9 --min-refusal 0.95` (add `--questions /data/eval-private` for your set) | Exit code 0; in `Trustbook/gate2-report.md` correct-refusal ≥ 95% and precision ≥ 90% (pass). Also note "False refusals". `gate2-report.json` holds the per-question scores for tuning |
+| 2 | G2 indexing speed | The `--setup` step above (fresh `Smoke` space) | `requests` indexes in minutes, not 29 min; Speed test shows "Indexing code" and "N streams" |
+| 3 | Badges | Ask in `Smoke`: "What are the default values of pool_connections, pool_maxsize and pool_block?" | Answer badged **Verified** (10, 10, False). Some answers show **Partially verified**: open "Unverified, not from your sources" to see removed statements |
+| 4 | Unverified | Settings → Grounding checker → turn off; ask again; turn it back on | Badge **Unverified** with the tooltip "Answer checking is turned off in Settings" |
+| 5 | Refusal card (G5) | Ask "Does requests support WebSocket connections?" | Title "Not in your sources", subtitle a readable sentence quoting your question, no repetition |
+| 6 | Source viewer (G6) | Click a citation into `src/requests/…` | Monospace, line numbers, exact highlighted lines, no flash of the top of the file |
+| 7 | Secrets report (G4) | In `Smoke`, the `requests` source row | One "4 files skipped: possible secrets" button → report with file, line, rule ID (`private-key`), no values |
+| 8 | Failed sources (G7) | Add a URL on your LAN, e.g. `http://192.168.1.1/` | Fails with the local-network message; its checkbox is unticked and disabled; not counted |
+| 9 | Power labels (G1) | Settings → Power | High shows the real (capped) worker count, at most 8 |
+| 10 | Web search (G8) | Search the web for "microsoft ab 731 certificate" | Relevant pages above bare homepages; no Swedish homepage on top |
+| 11 | Estimates | Link a big folder (e.g. a large repo) | Before indexing: "About N files, roughly M min on this PC" with Add / Cancel; the header shows "about M min left" while it runs |
+| 12 | Gate log | Ask "hello", then "Brainstorm ideas for a retry feature"; open the space's ⋮ menu → Gate log | "hello" gets a short reply without citations; the brainstorm answer shows the Ideation hint; both appear in the log and a decision can be corrected |
+| 13 | Gate 1 items you deferred | PDF upload with OCR warning, overview + one-time hint, checkbox scoping | Covered by end-to-end tests (`frontend/e2e/`), run against this image before it was published; spot-check in the UI if you like |
+
+### Builder results (dev workbench, before handing over)
+
+Chat endpoint: llama-server `192.168.155.52:8080`, `Qwen3.6-35B-A3B-UD-Q4_K_XL`. 45 questions: the 15 smoke questions
+plus `eval/smoke/refusal.yaml` (20 hard unanswerable + 10 answerable near-misses, each verified by hand,
+`eval/smoke/refusal-verification.md`). Thresholds refuse 0.15 / verify 0.5 (unchanged; the sweep showed no
+gain from moving them).
+
+| Run | Change | Precision | Correct refusals | False refusals |
+|---|---|---|---|---|
+| A | layers 4–5 as first built | 95.7% (smoke only) | 3/3 | 3/12 (smoke) |
+| B | + cited chunks scored together, qualified names by part (D-042); refuse 0 to collect sweep data | 91.2% | 23/23 | 6/22 |
+| C | + focused premise, literal check (D-044) | 100% | 23/23 | 7/22 |
+| D | + restated code facts (D-044) | 100% | 23/23 | 6/22 |
+| **E** | + facts first in a capped window, literal check for value claims only | **97.4% (38/39)** | **23/23 (100%)** | **3/22** |
+
+Run E, smoke questions: 11/12 answerable answered, all citations correct; 3/3 unanswerable refused.
+
+**Remaining false refusals:**
+- code-05 is a claim about what code does ("joins the username and password with a colon"). The prose-trained
+  checker can't verify that from `b64encode(b":".join(...))`. It is a known limit, with Phase 3 options in
+  `docs/BACKLOG.md`.
+- ref-near-08 and ref-near-10: the model itself said the chunks don't answer (retrieval). Not a verification
+  issue.
+
+The run is cautious by design: grounding correctness comes first.
+
+Other checks:
+
+| Check | Result |
+|---|---|
+| All 7 end-to-end specs (smoke, PDF + OCR warning, overview + hint, checkbox scoping ×2, badges + gate chitchat) against the release image, real models + mock LLM | pass (3.3 min incl. calibration) |
+| Gate router with a reasoning model: `think=False` for the gate call (D-043) | ~1 s per gate call; correct decisions |
+| Estimates on `requests`: predicted 80 s vs real 79 s (8 CPUs) | pass |
+| Indexing `requests` folder | 19 min (Phase 1) → ~1.3 min (generated files skipped, 4 streams) |
+| CI on `phase-2` (ruff, mypy --strict, pytest, eval tests, ESLint, typecheck, Vitest, image build) | see PR checks |
+
+### Known limits
+
+- Claims describing code behaviour often can't be verified and get removed or refused (above).
+- Latency: verification adds a grounding-checker pass. One retry when most sentences fail adds a second LLM
+  call. p50 is about 20 s and p95 about 45 s on the workbench with your server.
+- A web-page chunk's heading label is the heading where the chunk starts. A citation can therefore show the
+  previous section's heading (seen once in run E).

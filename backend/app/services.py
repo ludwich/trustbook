@@ -17,6 +17,7 @@ from app.chat.overview import OVERVIEW_KIND, ChatState, OverviewService
 from app.config import Paths, SettingsStore, ensure_layout
 from app.db.engine import get_engine
 from app.db.migrate import migrate
+from app.grounding.verify import GroundingSettings
 from app.index.base import IndexRegistry
 from app.index.lance import LanceIndexRegistry
 from app.ingest.factory import build_ingest_tools
@@ -60,6 +61,14 @@ class Services:
     def chat_state(self) -> ChatState:
         chat = self.capabilities.get("chat")
         return ChatState(ready=chat.status == "ready", remote=chat.locality == "remote")
+
+    def grounding_settings(self) -> GroundingSettings:
+        """Grounding checker on/off (the ``grounding`` capability) and the verify threshold."""
+        settings = self.settings.load()
+        return GroundingSettings(
+            enabled=settings.capability("grounding").enabled,
+            verify_threshold=settings.thresholds.verify,
+        )
 
     def cancel_space_jobs(self, space_id: str) -> None:
         """Cancel a space's jobs; running ones are asked to stop."""
@@ -120,6 +129,7 @@ def build_services(
         tools=build_ingest_tools(paths, providers, capabilities, http, transport),
         on_ready=on_source_ready,
     )
+    ingest.calibration = calibration.read  # job estimates for the queue ETA
     handlers.register(INGEST_KIND, ingest.handler)
     documents = ingest.tools.documents
     calibration.parse_pdf = lambda path: documents.parse(path, "pdf")
@@ -132,6 +142,7 @@ def build_services(
         providers=providers,
         chat_adapter=lambda: services.chat_adapter(),
         chat_state=lambda: services.chat_state(),
+        grounding=lambda: services.grounding_settings(),
     )
     handlers.register(OVERVIEW_KIND, overview.handler)
 

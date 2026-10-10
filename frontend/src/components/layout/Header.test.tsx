@@ -96,4 +96,20 @@ describe("header", () => {
     expect(localStorage.getItem("trustbook-theme")).toBe("light");
     expect(group).toBeInTheDocument();
   });
+
+  it("says 'less than a minute left' under 60 s and rounds minutes up from eta_seconds", async () => {
+    let eta: number | null = 45;
+    serveJobs(() => jobList([job({ status: "running" }), job({ id: "b" })], { eta_seconds: eta }));
+    const { client } = renderWithProviders(<Header />);
+    const link = await screen.findByRole("link", { name: /processing/i });
+    expect(link).toHaveTextContent(/^Processing: 2 jobs, less than a minute left$/);
+
+    eta = 25 * 60 + 1;
+    await act(() => client.refetchQueries({ queryKey: ["jobs"] }));
+    await waitFor(() => expect(link).toHaveTextContent(/^Processing: 2 jobs, about 26 min left$/));
+
+    eta = null;
+    await act(() => client.refetchQueries({ queryKey: ["jobs"] }));
+    await waitFor(() => expect(link).toHaveTextContent(/^Processing: 2 jobs$/));
+  });
 });

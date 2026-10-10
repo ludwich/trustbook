@@ -2,6 +2,12 @@
 
 Only the path is stored (SPEC §7.1). Symlinks are never followed. Files with gitleaks findings are
 skipped and listed in ``sources/<id>/secrets.json`` by file, line and rule ID only (SPEC §7.4).
+Generated files (vector graphics, PDF/PostScript in disguise, minified one-liners) are skipped like
+binaries: they only add noise and, being huge, dominate indexing time (Gate 1 finding G2).
+
+Files are read by a small thread pool (overlapping file-system latency, e.g. on Docker Desktop
+bind mounts); Docling conversions run one at a time in their own lane, since Docling already uses
+the model threads. The snapshot is assembled in path order, so the output is deterministic.
 """
 
 from __future__ import annotations
@@ -9,11 +15,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from app.capabilities.cpu import usable_cpus
 from app.fsutil import atomic_write_json
 from app.ingest import errors
 from app.ingest.errors import IngestError, fail
@@ -62,15 +71,22 @@ BINARY_EXTENSIONS = frozenset(
         "exe dll so dylib o a lib obj pdb class pyc pyo pyd wasm bin dat iso dmg img msi "
         "mp3 mp4 m4a wav ogg webm flac avi mov mkv opus aac "
         "woff woff2 ttf otf eot doc xls ppt odt ods odp db sqlite sqlite3 mdb accdb "
-        "parquet arrow lance npy npz pkl pt pth onnx safetensors gguf"
+        "parquet arrow lance npy npz pkl pt pth onnx safetensors gguf "
+        "svg ai eps ps"  # vector graphics: text, but generated drawing data
     ).split()
 )
+# PDF and PostScript content (e.g. Illustrator files under another extension) is not text.
+_GENERATED_MAGIC = (b"%PDF-", b"%!PS")
+# A code file with a line this long is generated or minified (bundles, embedded data).
+MAX_CODE_LINE_CHARS = 10_000
+READ_WORKERS_MAX = 8
 
 
 @dataclass
 class WalkResult:
     files: list[str] = field(default_factory=list)  # relative paths, sorted
     skipped_large: int = 0
+    sizes: dict[str, int] = field(default_factory=dict)  # bytes per file (for estimates)
 
 
 def _extension(name: str) -> str:
@@ -121,6 +137,7 @@ def walk_folder(root: Path, *, max_files: int = MAX_FILES) -> WalkResult:
             if size == 0:
                 continue
             result.files.append(rel(name))
+            result.sizes[rel(name)] = size
             if len(result.files) > max_files:
                 raise fail(errors.FOLDER_TOO_BIG)
     result.files.sort()
@@ -150,9 +167,93 @@ def _read_text_file(path: Path) -> str | None:
         data = path.read_bytes()
     except OSError:
         return None
-    if looks_binary(data):
+    if looks_binary(data) or data.lstrip()[:5].startswith(_GENERATED_MAGIC):
         return None
     return normalise_text(decode_text(data))
+
+
+def looks_generated(text: str) -> bool:
+    """A code file with a very long line: minified or generated, not something to read."""
+    return any(len(line) > MAX_CODE_LINE_CHARS for line in text.split("\n"))
+
+
+def skipped_when_read(head: bytes, ext: str) -> bool:
+    """Whether a text or code file starting with ``head`` is skipped when read (estimates).
+
+    The same checks as reading the whole file: binary, PDF/PostScript content, or (code only) a
+    line over :data:`MAX_CODE_LINE_CHARS`. A line that long inside ``head`` is at least as long in
+    the whole file, so a head never wrongly marks a file as generated.
+    """
+    if looks_binary(head) or head.lstrip()[:5].startswith(_GENERATED_MAGIC):
+        return True
+    return ext not in TEXT_DOCUMENTS and looks_generated(normalise_text(decode_text(head)))
+
+
+@dataclass
+class _FileRead:
+    """One file's contribution to the snapshot (``None`` fields: nothing usable)."""
+
+    text: str | None = None
+    document: Snapshot | None = None
+    generated: bool = False
+
+
+def _read_one(path: Path, ext: str) -> _FileRead:
+    text = _read_text_file(path)
+    if text is None or not text.strip():
+        return _FileRead()
+    if ext not in TEXT_DOCUMENTS and looks_generated(text):
+        return _FileRead(generated=True)
+    return _FileRead(text=text)
+
+
+def _parse_one(documents: DocumentParser, path: Path, ext: str, rel: str) -> _FileRead:
+    try:
+        return _FileRead(document=documents.parse(path, ext, title=rel))
+    except IngestError:
+        return _FileRead()
+
+
+def read_files(
+    root: Path,
+    files: list[str],
+    documents: DocumentParser,
+    progress: Callable[[float], None],
+    check_cancelled: Callable[[], None],
+    *,
+    workers: int | None = None,
+) -> list[_FileRead]:
+    """Read ``files`` (relative to ``root``) concurrently; results come back in ``files`` order.
+
+    At most ``4 × workers`` files are in flight, so memory stays bounded for huge folders.
+    Cancellation stops before the next file and drops the queued ones.
+    """
+    size = max(1, min(workers or usable_cpus(), READ_WORKERS_MAX))
+    results: list[_FileRead] = []
+    pending: deque[Future[_FileRead]] = deque()
+    texts = ThreadPoolExecutor(size, thread_name_prefix="read-file")
+    docs = ThreadPoolExecutor(1, thread_name_prefix="read-document")
+    try:
+        upcoming = iter(files)
+        while True:
+            while len(pending) < 4 * size:
+                rel = next(upcoming, None)
+                if rel is None:
+                    break
+                path, ext = root / rel, _extension(rel)
+                if ext in DOCLING_FORMATS:
+                    pending.append(docs.submit(_parse_one, documents, path, ext, rel))
+                else:
+                    pending.append(texts.submit(_read_one, path, ext))
+            if not pending:
+                break
+            check_cancelled()
+            results.append(pending.popleft().result())
+            progress(len(results) / max(1, len(files)))
+    finally:
+        for pool in (texts, docs):
+            pool.shutdown(wait=True, cancel_futures=True)
+    return results
 
 
 def folder_snapshot(
@@ -185,19 +286,15 @@ def folder_snapshot(
 
     builder = SnapshotBuilder()
     entries: list[FileEntry] = []
-    code_files = doc_files = 0
+    code_files = doc_files = generated = 0
     warnings: set[str] = set()
     files = [f for f in walk.files if f not in secret_files]
-    for i, rel in enumerate(files):
-        check_cancelled()
-        progress(i / max(1, len(files)))
-        path = root / rel
+    reads = read_files(root, files, documents, progress, check_cancelled)
+    for rel, read in zip(files, reads, strict=True):
         ext = _extension(rel)
-        if ext in DOCLING_FORMATS:
-            try:
-                parsed = documents.parse(path, ext, title=rel)
-            except IngestError:
-                continue
+        generated += read.generated
+        parsed = read.document
+        if parsed is not None:
             warnings.update(parsed.warnings)
             builder.separate()
             builder.text(f"# {rel}\n\n")
@@ -210,8 +307,8 @@ def folder_snapshot(
             entries.append(FileEntry(rel, start, builder.length, "document"))
             doc_files += 1
             continue
-        text = _read_text_file(path)
-        if text is None or not text.strip():
+        text = read.text
+        if text is None:
             continue
         builder.separate()
         builder.text(f"# {rel}\n\n")
@@ -236,6 +333,9 @@ def folder_snapshot(
         commit_hash=head_commit(root, browse_root),
     )
     snapshot.stats["files"] = len(entries)
+    if generated:
+        snapshot.stats["skipped_generated"] = generated
+        logger.info("Skipped %d generated or minified file(s)", generated)
     if secret_files:
         snapshot.stats["skipped_secrets"] = len(secret_files)
         snapshot.warnings.append(errors.skipped_secrets_warning(len(secret_files)))

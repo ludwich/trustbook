@@ -7,7 +7,14 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { QueryError } from "@/components/common/QueryError";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AnswerBadge, CitedText, RefusalCard, RemovedSentences, SourcesUsed } from "./AnswerParts";
+import {
+  AnswerBadge,
+  CitedText,
+  IdeationHint,
+  RefusalCard,
+  RemovedSentences,
+  SourcesUsed,
+} from "./AnswerParts";
 import { askBlocker } from "./askBlocker";
 import { Composer } from "./Composer";
 import { ConversationBar } from "./ConversationBar";
@@ -18,21 +25,32 @@ import { type StreamState, useChatStream, withoutTrailingExchange } from "./useC
 const STAGE_TEXT: Record<ChatStage, string> = {
   retrieving: "Searching your sources…",
   generating: "Writing…",
-  checking: "Checking…",
+  checking: "Checking the answer against your sources…",
 };
 
 function UserBubble({ text }: { text: string }) {
   return (
-    <div className="ml-auto max-w-[85%] rounded-lg bg-secondary px-3 py-2 whitespace-pre-wrap">
+    <div
+      className="ml-auto max-w-[85%] rounded-lg bg-secondary px-3 py-2 whitespace-pre-wrap"
+      data-testid="user-message"
+    >
       <span className="sr-only">You asked: </span>
       {text}
     </div>
   );
 }
 
-function AssistantMessage({ message }: { message: Message }) {
+function AssistantMessage({
+  message,
+  onOpenIdeation,
+}: {
+  message: Message;
+  onOpenIdeation?: () => void;
+}) {
   const sentences = message.content.sentences ?? [];
   const refused = message.badge === "refused";
+  // A reply without sentences (e.g. the gate's short fixed reply to a greeting) is plain text.
+  const plain = !refused && sentences.length === 0 ? message.content.text?.trim() : undefined;
   return (
     <article aria-label="Answer" className="grid gap-2" data-testid="assistant-message">
       {message.badge && (
@@ -43,11 +61,14 @@ function AssistantMessage({ message }: { message: Message }) {
           message={message.content.text ?? sentences.map((s) => s.text).join(" ")}
           suggestion={message.content.suggestion}
         />
+      ) : plain ? (
+        <p className="leading-relaxed whitespace-pre-wrap">{plain}</p>
       ) : (
         <CitedText sentences={sentences} />
       )}
-      <RemovedSentences sentences={message.removed_sentences} />
+      {message.content.hint === "ideation" && <IdeationHint onOpenIdeation={onOpenIdeation} />}
       {!refused && <SourcesUsed sentences={sentences} sourcesUsed={message.sources_used} />}
+      <RemovedSentences sentences={message.removed_sentences} />
     </article>
   );
 }
@@ -91,7 +112,14 @@ function StreamingAnswer({ state, onRetry }: { state: StreamState; onRetry: () =
   );
 }
 
-export function ChatView({ spaceId }: { spaceId: string }) {
+export function ChatView({
+  spaceId,
+  onOpenIdeation,
+}: {
+  spaceId: string;
+  /** Switches the space to the Ideation tab (from the brainstorming hint). */
+  onOpenIdeation?: () => void;
+}) {
   const conversations = useConversations(spaceId);
   // undefined = follow the newest conversation; null = a new, still empty conversation.
   const [selected, setSelected] = useState<string | null | undefined>(undefined);
@@ -184,7 +212,7 @@ export function ChatView({ spaceId }: { spaceId: string }) {
             m.role === "user" ? (
               <UserBubble key={m.id} text={m.content.text ?? ""} />
             ) : (
-              <AssistantMessage key={m.id} message={m} />
+              <AssistantMessage key={m.id} message={m} onOpenIdeation={onOpenIdeation} />
             ),
           )}
 

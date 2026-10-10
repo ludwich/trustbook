@@ -7,7 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn, errorMessage } from "@/lib/utils";
 import { AddSourceDialogs, AddSourceMenu, type AddSourceKind } from "./AddSource";
-import { GROUP_LABELS, groupChecked, groupSources } from "./sourceMeta";
+import { GROUP_LABELS, groupChecked, groupSources, selectableSources } from "./sourceMeta";
 import { SourceRow } from "./SourceRow";
 
 function hasFiles(e: DragEvent): boolean {
@@ -20,6 +20,10 @@ export function SourcesPanel({ spaceId }: { spaceId: string }) {
   const [dialog, setDialog] = useState<AddSourceKind | null>(null);
   const [droppedFiles, setDroppedFiles] = useState<File[]>([]);
   const [dragging, setDragging] = useState(false);
+  // Show ticks the user just made, before the server has confirmed them.
+  const list = sources.data ? toggle.apply(sources.data) : undefined;
+  // Failed sources can't be ticked and are left out of every count (G7).
+  const usableCount = list ? selectableSources(list).length : 0;
 
   const openDialog = (kind: AddSourceKind | null) => {
     if (kind !== "upload") setDroppedFiles([]);
@@ -53,8 +57,10 @@ export function SourcesPanel({ spaceId }: { spaceId: string }) {
       <div className="flex items-center justify-between gap-2 px-4 pt-3 pb-2">
         <h2 className="text-sm font-semibold">
           Sources
-          {sources.data && sources.data.length > 0 && (
-            <span className="ml-1.5 font-normal text-muted-foreground">{sources.data.length}</span>
+          {usableCount > 0 && (
+            <span className="ml-1.5 font-normal text-muted-foreground" data-testid="sources-count">
+              {usableCount}
+            </span>
           )}
         </h2>
         <AddSourceMenu onChoose={openDialog} />
@@ -88,8 +94,9 @@ export function SourcesPanel({ spaceId }: { spaceId: string }) {
                 {errorMessage(toggle.error)}
               </p>
             )}
-            {groupSources(sources.data).map(({ group, sources: items }) => {
+            {groupSources(list ?? []).map(({ group, sources: items }) => {
               const state = groupChecked(items);
+              const usable = selectableSources(items);
               const label = GROUP_LABELS[group];
               return (
                 <section
@@ -101,9 +108,14 @@ export function SourcesPanel({ spaceId }: { spaceId: string }) {
                   <div className="flex items-center gap-2 px-2 py-1">
                     <Checkbox
                       checked={state}
+                      disabled={usable.length === 0}
+                      title={usable.length === 0 ? "No source in this group loaded" : undefined}
                       aria-label={`Use all ${label.toLowerCase()}`}
                       onChange={() =>
-                        toggle.mutate({ ids: items.map((s) => s.id), enabled: state !== true })
+                        toggle.toggle(
+                          usable.map((s) => s.id),
+                          state !== true,
+                        )
                       }
                     />
                     <h3
@@ -112,7 +124,14 @@ export function SourcesPanel({ spaceId }: { spaceId: string }) {
                     >
                       {label}
                     </h3>
-                    <span className="text-xs text-muted-foreground">{items.length}</span>
+                    {usable.length > 0 && (
+                      <span
+                        className="text-xs text-muted-foreground"
+                        data-testid={`group-count-${group}`}
+                      >
+                        {usable.length}
+                      </span>
+                    )}
                   </div>
                   <ul className="grid gap-0.5">
                     {items.map((s) => (
@@ -120,7 +139,7 @@ export function SourcesPanel({ spaceId }: { spaceId: string }) {
                         key={s.id}
                         spaceId={spaceId}
                         source={s}
-                        onToggle={(enabled) => toggle.mutate({ ids: [s.id], enabled })}
+                        onToggle={(enabled) => toggle.toggle([s.id], enabled)}
                       />
                     ))}
                   </ul>

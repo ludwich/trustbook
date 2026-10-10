@@ -34,12 +34,33 @@ describe("helpers", () => {
     expect(localityOfUrl("not a url")).toBeNull();
   });
 
-  it("describes worker counts per power level", () => {
-    expect(workersFor("low", 8)).toBe("1 worker");
-    expect(workersFor("normal", 8)).toBe("2 workers");
-    expect(workersFor("high", 8)).toBe("6 workers");
-    expect(workersFor("high", 2)).toBe("2 workers");
-    expect(workersFor("high", null)).toBe("most CPU cores");
+  it("labels power levels with the backend's real (capped) worker counts", () => {
+    const s = {
+      power: "normal" as const,
+      workers: 2,
+      workers_by_power: { low: 1, normal: 2, high: 8 },
+    };
+    expect(workersFor("low", s)).toBe("1 worker");
+    expect(workersFor("normal", s)).toBe("2 workers");
+    // G1: 30 cores but capped at 8 → the label says 8, not 30 − 2.
+    expect(workersFor("high", s)).toBe("8 workers");
+  });
+
+  it("falls back gracefully when workers_by_power is absent", () => {
+    expect(workersFor("low", { power: "normal", workers: 2 })).toBe("1 worker");
+    expect(workersFor("normal", { power: "normal", workers: 2 })).toBe("2 workers");
+    // High's cap is only known by the backend: no made-up number…
+    expect(workersFor("high", { power: "normal", workers: 2 })).toBe("most CPU cores");
+    // …unless it is the current level, whose effective count is `workers`.
+    expect(workersFor("high", { power: "high", workers: 8 })).toBe("8 workers");
+    // A zero or missing entry is ignored.
+    expect(
+      workersFor("high", {
+        power: "low",
+        workers: 1,
+        workers_by_power: { low: 1, normal: 2, high: 0 },
+      }),
+    ).toBe("most CPU cores");
   });
 });
 
@@ -82,6 +103,13 @@ describe("formatComputer", () => {
       ),
     ).toBe("uses 6 of 8 CPUs · FP32");
     expect(formatComputer(cpu, null)).toBe("AMD Ryzen AI Max+ 395 · uses 32 of 32 CPUs");
+  });
+  it("adds 'S streams' only for more than one embedding stream", () => {
+    expect(formatComputer(cpu, { ...runtime, embedding_streams: 2 })).toBe(
+      "AMD Ryzen AI Max+ 395 · uses 32 of 32 CPUs · 16 model threads · 2 streams · BF16",
+    );
+    expect(formatComputer(cpu, { ...runtime, embedding_streams: 1 })).not.toContain("stream");
+    expect(formatComputer(cpu, { ...runtime, embedding_streams: null })).not.toContain("stream");
   });
   it("returns null for results without CPU or runtime details", () => {
     expect(formatComputer(undefined, undefined)).toBeNull();

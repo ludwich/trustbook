@@ -56,9 +56,40 @@ export function groupSources(sources: Source[]): { group: SourceGroup; sources: 
   })).filter((g) => g.sources.length > 0);
 }
 
-/** Group checkbox state: all ticked, none, or some ("mixed"). */
+/**
+ * Sources the user can tick: everything except failed ones (G7). A failed source is stored
+ * unticked by the backend and can't be ticked, so it takes no part in group state or counts.
+ */
+export function isSelectable(source: Source): boolean {
+  return source.status !== "failed";
+}
+
+export function selectableSources(sources: Source[]): Source[] {
+  return sources.filter(isSelectable);
+}
+
+/** Group checkbox state over the tickable sources: all ticked, none, or some ("mixed"). */
 export function groupChecked(sources: Source[]): boolean | "mixed" {
-  const on = sources.filter((s) => s.enabled).length;
+  const usable = selectableSources(sources);
+  const on = usable.filter((s) => s.enabled).length;
   if (on === 0) return false;
-  return on === sources.length ? true : "mixed";
+  return on === usable.length ? true : "mixed";
+}
+
+const SECRETS_SENTENCE = /\b\d+\s+files?\s+skipped:\s*possible secrets\.?/gi;
+
+/**
+ * The quality warning to show under a source. When the source has skipped secrets, the backend's
+ * "N files skipped: possible secrets." sentence is dropped here because the row shows it once,
+ * as a button that opens the report (G4).
+ */
+export function visibleQualityWarning(source: Source): string | null {
+  const warning = source.quality_warning;
+  if (!warning) return null;
+  if (!(source.stats.skipped_secrets && source.stats.skipped_secrets > 0)) return warning;
+  const rest = warning
+    .replace(SECRETS_SENTENCE, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return rest || null;
 }

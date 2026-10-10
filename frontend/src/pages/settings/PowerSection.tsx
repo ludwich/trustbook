@@ -1,5 +1,5 @@
 import type { Power } from "@/api/types";
-import { useCalibration, useSettings, useUpdateSettings } from "@/api/queries";
+import { useSettings, useUpdateSettings } from "@/api/queries";
 import { QueryError } from "@/components/common/QueryError";
 import { Skeleton } from "@/components/ui/skeleton";
 import { workersFor } from "@/lib/power";
@@ -14,9 +14,7 @@ const LEVELS: { value: Power; label: string; hint: string }[] = [
 
 export function PowerSection() {
   const settings = useSettings();
-  const calibration = useCalibration();
   const update = useUpdateSettings();
-  const cpu = calibration.data?.results?.cpu_count ?? null;
 
   return (
     <SettingsSection
@@ -59,8 +57,11 @@ export function PowerSection() {
                   <span className="grid gap-0.5">
                     <span className="font-medium">
                       {level.label}{" "}
-                      <span className="font-normal text-muted-foreground">
-                        · {workersFor(level.value, cpu)}
+                      <span
+                        className="font-normal text-muted-foreground"
+                        data-testid={`power-workers-${level.value}`}
+                      >
+                        · {workersFor(level.value, settings.data)}
                       </span>
                     </span>
                     <span className="text-xs text-muted-foreground">{level.hint}</span>
