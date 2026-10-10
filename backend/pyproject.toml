@@ -12,6 +12,15 @@ dependencies = [
     "sqlmodel",
     "httpx",
     "pyyaml",
+    "python-multipart",  # file uploads
+    # Phase 1 ingestion and index (docs/DECISIONS.md D-025..D-027)
+    "lancedb==0.40.0",
+    "pyarrow==26.0.0",
+    "pypdf==6.20.0",
+    "trafilatura==2.3.1",
+    "yt-dlp==2026.8.19",  # plain: the [default] extra pulls GPL mutagen
+    "playwright==1.63.0",  # headless Chromium fallback for JS pages (browser baked in the image)
+    "av==19.0.1",  # audio decoding for STT (wheel bundles LGPL FFmpeg, D-027)
 ]
 
 [project.optional-dependencies]
@@ -28,6 +37,13 @@ ml = [
     "safetensors==0.8.0",
     "numpy==2.5.3",
     "cactus-needle==3.2.0",
+    # Document parsing (MIT); slim extras avoid faker, mail-parser, tree-sitter, websockets
+    "docling-slim[convert-core,models-local,format-pdf,format-pdf-docling,format-docx,format-pptx,format-xlsx,feat-ocr-rapidocr]==2.137.0",
+    "docling-core==2.101.1",
+    "docling-ibm-models==4.0.3",
+    "docling-parse==7.22.2",
+    "rapidocr==3.10.0",
+    "opencv-python-headless==5.0.0.93",  # TableFormer imports cv2 without declaring it
 ]
 
 [dependency-groups]
@@ -75,7 +91,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["torch", "torch.*", "sentence_transformers", "sentence_transformers.*", "transformers", "transformers.*", "needle", "needle.*"]
+module = ["torch", "torch.*", "sentence_transformers", "sentence_transformers.*", "transformers", "transformers.*", "needle", "needle.*", "docling", "docling.*", "docling_core.*", "rapidocr.*", "lancedb", "lancedb.*", "pyarrow", "pyarrow.*", "trafilatura", "trafilatura.*", "yt_dlp", "yt_dlp.*", "av", "av.*", "tokenizers", "tokenizers.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

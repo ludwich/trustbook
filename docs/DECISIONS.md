@@ -193,3 +193,38 @@ grounding correctness > data safety > simplicity > performance > features.
   Phase 1 instead of Phase 3. Files with findings are skipped and reported by file, line and rule ID only.
 - **Reason:** data safety ranks above features. Without the scan, a secret in a linked folder could end up
   in a chunk sent to a remote chat endpoint. The gitleaks binary is MIT and small.
+
+### D-025 Headless-browser fallback is plain Playwright, not Crawl4AI
+- **Decision:** when Trafilatura gets < 200 characters, render the page with Playwright 1.63 (Apache-2.0)
+  and Chromium's headless shell (BSD-3-Clause, third-party notices shipped), then run Trafilatura on the
+  rendered HTML. The browser blocks requests to private, loopback and link-local addresses and to `file:`,
+  and blocks downloads and service workers.
+- **Reason:** Crawl4AI's LICENSE adds an attribution requirement on top of Apache-2.0, so it fails the
+  license rule. It also pulls 62 packages (a LiteLLM fork, two browser drivers, nltk) and writes to HOME on
+  import. SPEC §15: the most widely used MIT/Apache option.
+
+### D-026 Phase 1 parsing and index stack
+- **Docling** `docling-slim==2.137.0` (MIT), with only the extras for PDF/DOCX/PPTX/XLSX and RapidOCR
+  (Apache-2.0, PP-OCRv6 small, torch backend). Baked models: layout
+  `docling-project/docling-layout-heron@8f39ad3c…` (Apache-2.0); TableFormer "accurate"
+  `docling-project/docling-models@2199320848…`, the commit that dual-licenses the same weights as
+  Apache-2.0 (the `v2.3.0` tag Docling asks for says CDLA-Permissive-2.0 only). Docling gets the calibrated
+  thread count (`AcceleratorOptions`), since its stages otherwise call `set_num_threads(4)` (D-020).
+  Remote services and external plugins are explicitly off. Offline use was verified with no network access.
+- **pypdf** 6.20 (BSD-3) stays as the SPEC fallback and as the fast "does this PDF have text?" check.
+- **Trafilatura** 2.3.1 (Apache-2.0); the snapshot date is the fetch date (its own guess is unreliable).
+- **yt-dlp** 2026.8.19 (Unlicense), plain install (the `[default]` extra adds GPL `mutagen`), `cachedir=False`.
+- **LanceDB** 0.40 + pyarrow 26 (Apache-2.0), native FTS, embedded; no network (verified with strace).
+- **Token counts** come from EmbeddingGemma's own `tokenizer.json` (already baked); no new dependency.
+
+### D-027 Further transitive license exceptions (extends D-009)
+- `tld` (via Trafilatura → courlan) is MPL-1.1 / GPL-2.0 / LGPL-2.1+: we take **MPL-1.1**, unmodified.
+- `opencv-python-headless` (Apache-2.0, required by Docling's TableFormer) bundles LGPL-2.1 FFmpeg
+  libraries, GCC runtime libraries (GPL-3 with the runtime exception) and OpenSSL 1.1.1k (end of life;
+  Trustbook never uses OpenCV's networking).
+- `av` (PyAV, BSD-3-Clause) decodes audio for STT (YouTube audio, mp3/m4a uploads). Its wheels bundle LGPL
+  FFmpeg, dynamically linked and unmodified. There is no allowlisted decoder for AAC/Opus.
+- Chromium's headless shell ships `LICENSE.headless_shell` with third-party (incl. LGPL) notices. It is kept
+  in the image, and Playwright's separate ffmpeg (video recording only) is deleted.
+- **Reason:** no allowlisted alternative provides these capabilities. All are used unmodified, as
+  separately replaceable shared libraries.
