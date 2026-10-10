@@ -113,6 +113,18 @@ def _clean(value: str | None) -> str | None:
     return value or None
 
 
+def _origin(url: str | None) -> tuple[str, str, int | None] | None:
+    """Scheme, host and port of ``url`` — the parts that decide where a key is sent."""
+    if not url:
+        return None
+    parts = urlsplit(url)
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return (parts.scheme.lower(), (parts.hostname or "").lower(), port)
+
+
 # Used when a capability has presets but does not show a preset field (speech-to-text).
 _IMPLICIT_PRESET = PresetSpec(
     id="custom", label="OpenAI-compatible", adapter="openai_compatible", needs_api_key=False
@@ -524,9 +536,15 @@ class CapabilityRegistry:
         if "api_version" in given:
             merged.api_version = _clean(update.api_version)
 
-        # A missing (or null) api_key keeps the saved key; "" clears it.
+        # A missing (or null) api_key keeps the saved key; "" clears it. A saved key is never
+        # carried over to a different server or search service: it would leak to that host.
         if "api_key" in given and update.api_key is not None:
             merged.api_key = _clean(update.api_key)
+        elif merged.api_key and (
+            _origin(merged.base_url) != _origin(stored.base_url)
+            or merged.provider != stored.provider
+        ):
+            merged.api_key = None
         return merged
 
     def update(self, cap_id: str, update: CapabilityConfigUpdate) -> CapabilityOut:

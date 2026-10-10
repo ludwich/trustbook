@@ -201,13 +201,35 @@ def test_locality(url: str | None, locality: str | None) -> None:
 def test_missing_key_keeps_saved_key(registry: CapabilityRegistry) -> None:
     registry.update("chat", Update(preset="custom", base_url="http://a.example/v1", model="m"))
     registry.update("chat", Update(api_key="secret-key-123456"))
-    chat = registry.update("chat", Update(base_url="http://b.example/v1"))
+    chat = registry.update("chat", Update(base_url="http://a.example/v2"))
     assert chat.config.api_key_hint == "…3456"
     chat = registry.update("chat", Update(api_key=None, model="m2"))
     assert chat.config.api_key_set
     chat = registry.update("chat", Update(api_key="other-key-1234"))
     assert chat.config.api_key_hint == "…1234"
     assert not registry.update("chat", Update(api_key="")).config.api_key_set
+
+
+def test_saved_key_never_follows_a_new_host(registry: CapabilityRegistry) -> None:
+    registry.update("chat", Update(preset="custom", base_url="http://a.example/v1", model="m"))
+    registry.update("chat", Update(api_key="secret-key-123456"))
+    # A draft pointing elsewhere must not carry the saved key.
+    assert registry.effective("chat", Update(base_url="http://evil.example/v1")).api_key is None
+    assert registry.effective("chat", Update(base_url="http://a.example:9/v1")).api_key is None
+    assert registry.effective("chat", Update(model="m2")).api_key == "secret-key-123456"
+    chat = registry.update("chat", Update(base_url="https://b.example/v1"))
+    assert not chat.config.api_key_set
+    # A new key given together with the new host is kept.
+    chat = registry.update(
+        "chat", Update(base_url="http://c.example/v1", api_key="c-key-123456789")
+    )
+    assert chat.config.api_key_hint == "…6789"
+
+
+def test_saved_key_never_follows_a_new_search_provider(registry: CapabilityRegistry) -> None:
+    registry.update("web_search", Update(provider="brave", api_key="brave-key-123456"))
+    search = registry.update("web_search", Update(provider="tavily"))
+    assert not search.config.api_key_set
 
 
 def test_web_search_providers(registry: CapabilityRegistry) -> None:
@@ -301,7 +323,7 @@ def test_endpoint_resolution_with_draft(registry: CapabilityRegistry) -> None:
     endpoint = registry.endpoint("chat", Update(model="other"))
     assert (endpoint.model, endpoint.api_key) == ("other", "k" * 16)
     moved = registry.endpoint("chat", Update(base_url="http://b.example"))
-    assert moved.api_key == "k" * 16  # missing api_key means "use the saved key"
+    assert moved.api_key is None  # the saved key never follows a new host
     assert "k" * 16 not in repr(endpoint)
     with pytest.raises(ConfigError, match="model name"):
         registry.endpoint("chat", Update(model=""))
