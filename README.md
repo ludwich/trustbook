@@ -14,7 +14,8 @@ work; adding sources and chat arrive in Phase 1. See [`SPEC.md`](SPEC.md) for th
 
 ## Install
 
-You need Docker (or Podman) with Compose, and about 6 GB of free disk space.
+You need Docker (or Podman) with Compose, about 6 GB of free disk space and at least 4 GB of RAM for
+the app container. With Podman, use podman-compose 1.1 or newer (or Podman's docker-compose provider).
 
 1. Create a folder, for example `trustbook`, and put two files in it:
    - [`compose.yaml`](compose.yaml)

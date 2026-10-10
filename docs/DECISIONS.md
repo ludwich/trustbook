@@ -103,3 +103,23 @@ grounding correctness > data safety > simplicity > performance > features.
 - **Decision:** accept `opentelemetry-api`, which FastAPI's core now requires. Never install
   `fastapi[standard]` or any OpenTelemetry SDK or exporter. The image also sets `OTEL_SDK_DISABLED=true`.
 - **Reason:** the API package on its own is a no-op that cannot export anything. SPEC requires no telemetry.
+
+### D-015 SearXNG engines and pinning
+- **Decision:** pin `searxng/searxng:2026.10.9-f4822b3fc@sha256:85492ba8…` and keep only DuckDuckGo, Brave,
+  Bing (switched on explicitly) and Wikipedia. JSON output is on, the limiter and image proxy are off, and the
+  port is not published.
+- **Reason:** this release disables Startpage and Mojeek upstream (CAPTCHA). Several general engines give
+  fallback when one rate-limits (DuckDuckGo and Brave were rate-limited from the dev host; Bing answered).
+
+### D-016 Startup probe for SearXNG; bundled status checks the runtime
+- **Decision:** at startup the app calls SearXNG's `/healthz` (retrying for about a minute while it boots) and
+  stores the result as the card's last test. Bundled capabilities show an error when the ML runtime is not
+  installed, not only when model files are missing.
+- **Reason:** Gate 0 needs every card to show its real status. `/healthz` sends no search words to any engine.
+
+### D-017 Release build details
+- **Decision:** release images are a single plain `linux/amd64` manifest (`provenance: false`), built with the
+  GitHub Actions layer cache. The CI image check builds without models (D-006). The download script is mounted
+  for its build step only, not copied into the image. The model self-check runs with `--network=none`.
+- **Podman:** `service_completed_successfully` (used by `searxng-init`) needs podman-compose ≥ 1.1 or Podman
+  with the docker-compose provider. This is noted in the README.

@@ -26,6 +26,11 @@ Container paths:
 | `/app/static` | built frontend | `TRUSTBOOK_STATIC_DIR` |
 | — | SearXNG base URL | `TRUSTBOOK_SEARXNG_URL` (default `http://searxng:8080`) |
 | — | image tag shown in UI | `TRUSTBOOK_VERSION` |
+| `/etc/searxng` (init step) | where `searxng-init` writes `settings.yml` | `TRUSTBOOK_SEARXNG_CONFIG_DIR` |
+
+Privacy env set in the image: `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `HF_HUB_DISABLE_TELEMETRY=1`,
+`NEEDLE_TELEMETRY=0`, `DO_NOT_TRACK=1`, `OTEL_SDK_DISABLED=true`; `HF_MODULES_CACHE=/tmp/trustbook-hf-modules`
+(HHEM's remote code is copied there because the models folder is read-only).
 
 `TRUSTBOOK_MOCK_LLM=1` adds a `mock` chat preset that answers deterministically without network
 (used by tests and the Playwright e2e test only; never set in `compose.yaml`).
