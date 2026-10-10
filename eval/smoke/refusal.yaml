@@ -1,0 +1,287 @@
+# Public refusal-tuning set for Gate 2 (SPEC §8 thresholds, §14 Gate 2).
+# Same corpus as the smoke set: eval/smoke/corpus.yaml (psf/requests v2.34.2,
+# commit 6e83187b8feb273ed4c6cdab5efd8d54901dfab3, folder titled `requests`, plus four doc pages).
+# Format: eval/format.md. Every question is checked by hand in eval/smoke/refusal-verification.md.
+#
+# 20 unanswerable questions: on-topic and plausible for an HTTP library, but the corpus does not
+# contain the answer. Many are traps: a nearby fact is in the corpus (the Retry example, the
+# Keep-Alive section, the certifi section, ...) but the detail asked for is not.
+# 10 answerable "near-miss" questions: the answer is in the corpus, phrased indirectly or hinging on
+# a small detail, often right next to a trap. They keep threshold tuning from simply refusing
+# everything (false refusals) and add citations to the precision measurement.
+#
+# Run together with questions.yaml (ids are unique across both files):
+#   --questions eval/smoke/questions.yaml --questions eval/smoke/refusal.yaml
+#
+# Heading locators apply only to citations of the doc pages (URL sources). Trustbook labels a page
+# chunk with the heading of the section the chunk starts in; if a dry run flags a page citation
+# whose text does state the answer, widen the key here and in refusal-verification.md together.
+
+questions:
+  # --- unanswerable: features requests does not have --------------------------------------------
+  - id: ref-unans-01
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      When I mount an HTTPAdapter with urllib3's Retry, what is the default backoff_max (the cap
+      on the sleep between attempts), and how do I add random jitter to the exponential backoff?
+
+  - id: ref-unans-02
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      If a server answers 503 with a Retry-After header, does the Retry configuration shown in the
+      requests docs wait for that header's delay, and what is the longest Retry-After it will honour?
+
+  - id: ref-unans-03
+    category: unanswerable
+    type: unanswerable
+    question: Can requests negotiate HTTP/3 over QUIC, and how do I turn it on for a Session?
+
+  - id: ref-unans-04
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      How do I instrument a requests Session with OpenTelemetry so that every request produces a
+      trace span?
+
+  - id: ref-unans-05
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      How do I configure a requests Session to throttle itself automatically so it stays within the
+      X-RateLimit-Remaining budget that the GitHub API reports?
+
+  - id: ref-unans-06
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      Does requests automatically decode responses with Content-Encoding: zstd, and which package
+      do I need to install for Zstandard support?
+
+  - id: ref-unans-07
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      What minimum TLS version and which cipher suites does requests 2.34.2 configure by default
+      for HTTPS connections?
+
+  - id: ref-unans-08
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      How many seconds does requests keep an idle keep-alive connection in the pool before closing
+      it, and can I change that idle timeout?
+
+  - id: ref-unans-09
+    category: unanswerable
+    type: unanswerable
+    question: How many root CA certificates are in the certifi bundle that requests uses?
+
+  - id: ref-unans-10
+    category: unanswerable
+    type: unanswerable
+    question: How do I make requests resolve hostnames with DNS-over-HTTPS or a custom DNS resolver?
+
+  - id: ref-unans-11
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      How do I get a progress callback that reports how many bytes have been sent while requests
+      uploads a large file?
+
+  # --- unanswerable: exact numbers / version history absent from the corpus ---------------------
+  - id: ref-unans-12
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      What is the maximum number of response headers requests accepts before it raises an error?
+
+  - id: ref-unans-13
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      Which CVE identifier was assigned to the greedy no_proxy matching bug that requests fixed in
+      version 2.34.0?
+
+  - id: ref-unans-14
+    category: unanswerable
+    type: unanswerable
+    question: In which requests release was official support for Python 3.13 first added?
+
+  # --- unanswerable: neighbouring libraries and third-party integrations ------------------------
+  - id: ref-unans-15
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      In httpx, what are the default values of max_connections and max_keepalive_connections in
+      httpx.Limits?
+
+  - id: ref-unans-16
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      In grequests, what arguments does the exception_handler passed to grequests.map receive, and
+      what ends up in the result list for a request that failed?
+
+  - id: ref-unans-17
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      When an HTTPAdapter's urllib3 pool is full and pool_block is False, what does urllib3 do with
+      the extra connection, and what warning message does it log?
+
+  - id: ref-unans-18
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      Which HTTP methods does urllib3's Retry treat as idempotent and retry by default (its
+      DEFAULT_ALLOWED_METHODS)?
+
+  - id: ref-unans-19
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      What is the default mutual_authentication setting of HTTPKerberosAuth in requests-kerberos?
+
+  - id: ref-unans-20
+    category: unanswerable
+    type: unanswerable
+    question: >-
+      With requests-oauthlib's OAuth2Session, how do I configure automatic access-token refresh
+      using auto_refresh_url and token_updater?
+
+  # --- answerable near-misses -------------------------------------------------------------------
+  - id: ref-near-01
+    category: code
+    type: answerable
+    question: >-
+      When I loop over a streamed response with iter_lines() and leave chunk_size alone, how many
+      bytes does each underlying read ask for?
+    expected_sources: [requests]
+    expected_locators:
+      - {file: src/requests/models.py, lines: [106, 106]}
+      - {file: src/requests/models.py, lines: [990, 995]}
+    must_contain: ["512"]
+
+  - id: ref-near-02
+    category: code
+    type: answerable
+    question: >-
+      Which requests utility function was the subject of CVE-2026-25645, and in which release was
+      it fixed?
+    expected_sources: [requests]
+    expected_locators:
+      - {file: HISTORY.md, lines: [70, 82]}
+      - {file: src/requests/utils.py, lines: [290, 325]}
+    must_contain: [extract_zipped_paths, "2.33.0"]
+
+  - id: ref-near-03
+    category: code
+    type: answerable
+    question: Which requests release was the first to officially support CPython 3.12?
+    expected_sources: [requests]
+    expected_locators:
+      - {file: HISTORY.md, lines: [159, 191]}
+    must_contain: ["2.32.0"]
+
+  - id: ref-near-04
+    category: docs
+    type: answerable
+    question: >-
+      If I make a request with stream=True on a Session, when can its connection go back to the
+      pool to be reused by the next request?
+    expected_sources:
+      - "Advanced Usage"
+      - https://requests.readthedocs.io/en/stable/user/advanced/
+      - requests
+    expected_locators:
+      - {file: docs/user/advanced.rst, lines: [324, 333]}
+      - {file: docs/user/advanced.rst, lines: [336, 345]}
+      - {heading: Body Content Workflow}
+      - {heading: Keep-Alive}
+    must_contain: [close]
+
+  - id: ref-near-05
+    category: docs
+    type: answerable
+    question: >-
+      With verify=False, does requests still reject a server certificate whose hostname does not
+      match the URL?
+    expected_sources:
+      - "Advanced Usage"
+      - https://requests.readthedocs.io/en/stable/user/advanced/
+      - requests
+    expected_locators:
+      - {file: docs/user/advanced.rst, lines: [241, 250]}
+      - {heading: SSL Cert Verification}
+    must_contain: [hostname]
+
+  - id: ref-near-06
+    category: docs
+    type: answerable
+    question: >-
+      Which library does the Requests documentation point to for OAuth 2 and OpenID Connect, and
+      which OAuth 2 flows does it list?
+    expected_sources:
+      - "Authentication"
+      - https://requests.readthedocs.io/en/stable/user/authentication/
+      - requests
+    expected_locators:
+      - {file: docs/user/authentication.rst, lines: [90, 100]}
+      - {heading: OAuth 2 and OpenID Connect Authentication}
+    must_contain: [requests-oauthlib, Web Application]
+
+  - id: ref-near-07
+    category: docs
+    type: answerable
+    question: >-
+      When I send requests through a SOCKS proxy, how do I make the proxy server resolve hostnames
+      instead of my own machine?
+    expected_sources:
+      - "Advanced Usage"
+      - https://requests.readthedocs.io/en/stable/user/advanced/
+      - requests
+    expected_locators:
+      - {file: docs/user/advanced.rst, lines: [685, 693]}
+      - {heading: SOCKS}
+    must_contain: [socks5h]
+
+  - id: ref-near-08
+    category: code
+    type: answerable
+    question: >-
+      When a server's Digest challenge has no algorithm parameter, which hash does HTTPDigestAuth
+      use, and which other algorithms does it support?
+    expected_sources: [requests]
+    expected_locators:
+      - {file: src/requests/auth.py, lines: [165, 208]}
+      - {file: tests/test_requests.py, lines: [85, 85]}
+    must_contain: [MD5, SHA-256, SHA-512]
+
+  - id: ref-near-09
+    category: docs
+    type: answerable
+    question: >-
+      Does requests do non-blocking IO with its default transport adapter, and which projects do
+      the docs suggest for combining it with an async framework?
+    expected_sources:
+      - "Advanced Usage"
+      - https://requests.readthedocs.io/en/stable/user/advanced/
+      - requests
+    expected_locators:
+      - {file: docs/user/advanced.rst, lines: [1061, 1075]}
+      - {heading: "Blocking Or Non-Blocking?"}
+    must_contain: [grequests, httpx]
+
+  - id: ref-near-10
+    category: code
+    type: answerable
+    question: >-
+      Which attribute names can I use on requests.codes to compare a status code with HTTP 429?
+    expected_sources: [requests]
+    expected_locators:
+      - {file: src/requests/status_codes.py, lines: [85, 85]}
+      - {file: src/requests/status_codes.py, lines: [1, 19]}
+      - {file: src/requests/status_codes.py, lines: [109, 114]}
+    must_contain: [too_many_requests]

@@ -1,10 +1,12 @@
 """Grounding layer 4 (sentence verification) plus layer 5, and the refusal rule (SPEC §8).
 
 Each sentence is scored against every chunk it cites with the bundled grounding checker:
-``(premise = the cited chunk's text, hypothesis = the sentence)``. The sentence score is the
-highest of those scores; it passes at ``score >= verify_threshold``. The premise is the chunk text
-exactly as indexed, so a code chunk keeps its ``File: … (lines a-b)`` first line (it is part of
-what the model was shown and lets "defined in sessions.py" be checked).
+``(premise = the cited chunk's text, hypothesis = the sentence)``, and, when it cites more than one
+chunk, against all of them joined in citation order (a claim may need two cited chunks together:
+``pool_connections=DEFAULT_POOLSIZE`` plus ``DEFAULT_POOLSIZE = 10``; D-042). The sentence
+score is the highest of those scores; it passes at ``score >= verify_threshold``. The premise is
+the chunk text exactly as indexed, so a code chunk keeps its ``File: … (lines a-b)`` first line
+(it is part of what the model was shown and lets "defined in sessions.py" be checked).
 
 Layer 5 (:mod:`app.grounding.code_checks`) runs whether or not the checker is on; a sentence that
 fails it fails, whatever its score.
@@ -39,7 +41,8 @@ class GroundingSettings:
 class SentenceCheck:
     """Outcome of layers 4 and 5 for one sentence.
 
-    ``score``: highest checker score over the cited chunks (None when the checker is off).
+    ``score``: highest checker score over the cited chunks, each alone and (2+ citations) all
+    joined (None when the checker is off).
     ``chunk_scores``: per cited chunk, in the sentence's citation order.
     ``problems``: layer 5 failures (missing identifiers, file/line ranges not in the snapshot).
     """
@@ -117,11 +120,14 @@ class Verifier:
 
     def check(self, sentences: Sequence[tuple[str, Sequence[RetrievedChunk]]]) -> Checked:
         """Check ``(sentence text, cited chunks)`` pairs; one checker call for the whole reply."""
+        self._joined: dict[int, float] = {}
         scores = self._scores(sentences)
         checks: list[SentenceCheck] = []
-        for (text, cited), chunk_scores in zip(sentences, scores, strict=True):
+        for i, ((text, cited), chunk_scores) in enumerate(zip(sentences, scores, strict=True)):
             problems = self._code_problems(text, cited)
             known = [s for s in chunk_scores if s is not None]
+            if i in self._joined:
+                known.append(self._joined[i])
             score = max(known) if known else None
             layer4 = not self.enabled or (score is not None and score >= self._threshold)
             checks.append(
@@ -140,11 +146,20 @@ class Verifier:
         if self._score_pairs is None:
             return [[None] * len(cited) for _, cited in sentences]
         pairs = [(chunk.text, text) for text, cited in sentences for chunk in cited]
-        raw = self._score_pairs(pairs) if pairs else []
-        if len(raw) != len(pairs):
+        joined = [
+            ("\n\n".join(chunk.text for chunk in cited), text)
+            for text, cited in sentences
+            if len(cited) > 1
+        ]
+        raw = self._score_pairs(pairs + joined) if pairs else []
+        if len(raw) != len(pairs) + len(joined):
             raise RuntimeError("The grounding checker returned the wrong number of scores")
         flat = iter(_clean(v) for v in raw)
-        return [[next(flat) for _ in cited] for _, cited in sentences]
+        per_chunk: list[list[float | None]] = [
+            [next(flat) for _ in cited] for _, cited in sentences
+        ]
+        self._joined = {i: next(flat) for i, (_, cited) in enumerate(sentences) if len(cited) > 1}
+        return per_chunk
 
     def _code_problems(self, text: str, cited: Sequence[RetrievedChunk]) -> list[str]:
         problems = [

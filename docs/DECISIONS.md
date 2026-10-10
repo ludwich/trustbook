@@ -385,3 +385,18 @@ grounding correctness > data safety > simplicity > performance > features.
 - Estimates are stored in the job payload (`estimate_s`). Queue ETA = the sum of remaining estimates divided
   by min(workers, jobs), but never less than the longest single remaining job. Jobs report `eta_seconds`.
 - The UI asks to confirm adds above 2 minutes. If the estimate call itself fails, the add goes ahead.
+
+### D-042 Verification reads a sentence's cited chunks together; qualified names are matched by part
+- **Finding:** the first smoke run with layers 4–5 falsely refused 3 of 12 answerable code questions.
+  - code-03 "the default pool_connections is 10" needs two cited chunks together:
+    `pool_connections=DEFAULT_POOLSIZE` and `DEFAULT_POOLSIZE = 10` (the G3 definition chunk). Scored one
+    chunk at a time it got 0.07.
+  - code-02's first sentence used `Response.ok`, which never occurs verbatim in code (`class Response` …
+    `def ok`). The layer 5 failure then triggered the first-sentence refusal rule.
+- **Decision:**
+  - A sentence citing two or more chunks is also scored against all of them joined, in citation order.
+    The score is the best of the single and joined scores. The premise is still only what the sentence
+    cites, so no grounding layer is weakened.
+  - A backticked span passes layer 5 if it occurs verbatim in a cited chunk, or if every identifier and
+    number in it occurs there as a whole word (exact, case-sensitive). A span without identifiers, such as a
+    quoted literal, must still occur verbatim.

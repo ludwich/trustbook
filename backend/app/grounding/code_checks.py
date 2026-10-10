@@ -38,10 +38,32 @@ def backticked(text: str) -> list[str]:
     return list(found)
 
 
+_NAME_PART = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?")
+
+
+def _occurs(token: str, texts: list[str]) -> bool:
+    """``token`` as a whole word in any of ``texts`` (exact, case-sensitive)."""
+    pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])")
+    return any(pattern.search(t) for t in texts)
+
+
 def missing_identifiers(text: str, chunk_texts: Iterable[str]) -> list[str]:
-    """Backticked identifiers of ``text`` that occur in none of ``chunk_texts`` (exact match)."""
+    """Backticked names of ``text`` not found in ``chunk_texts`` (exact, deterministic).
+
+    A backticked span passes if it occurs verbatim in a cited chunk, or if every identifier and
+    number inside it occurs there as a whole word: code defines ``class Response`` and
+    ``def ok``, so ``Response.ok`` never appears verbatim (D-042). A span without identifiers
+    (e.g. a quoted literal) must occur verbatim.
+    """
     texts = list(chunk_texts)
-    return [token for token in backticked(text) if not any(token in t for t in texts)]
+    missing: list[str] = []
+    for token in backticked(text):
+        if any(token in t for t in texts):
+            continue
+        parts = _NAME_PART.findall(token)
+        if not parts or not all(_occurs(part, texts) for part in parts):
+            missing.append(token)
+    return missing
 
 
 def _line(value: Any) -> int | None:

@@ -63,8 +63,23 @@ def test_sentence_score_is_the_max_over_cited_chunks_and_passes_at_threshold() -
     first, second = checked.checks
     assert (first.score, first.chunk_scores, first.passed) == (0.5, (0.2, 0.5), True)
     assert (second.score, second.passed) == (0.49, False)
-    # One checker call for the whole reply, premise = chunk text, hypothesis = sentence.
-    assert checker.calls == [[("chunk A", "S1"), ("chunk B", "S1"), ("chunk A", "S2")]]
+    # One checker call for the whole reply, premise = chunk text, hypothesis = sentence; a
+    # sentence citing two chunks is also scored against both joined.
+    assert checker.calls == [
+        [("chunk A", "S1"), ("chunk B", "S1"), ("chunk A", "S2"), ("chunk A\n\nchunk B", "S1")]
+    ]
+
+
+def test_a_claim_needing_two_cited_chunks_passes_on_the_joined_premise() -> None:
+    signature = rc("a", "def __init__(self, pool_connections=DEFAULT_POOLSIZE):")
+    constant = rc("b", "DEFAULT_POOLSIZE = 10")
+    claim = "The default pool_connections is 10."
+    checker = Pinned({(f"{signature.text}\n\n{constant.text}", claim): 0.9})
+    check = Verifier(checker, threshold=0.5).check([(claim, [signature, constant])]).checks[0]
+    assert (check.chunk_scores, check.score, check.passed) == ((0.0, 0.0), 0.9, True)
+    # A single citation is not scored twice.
+    single = Verifier(checker, threshold=0.5).check([(claim, [constant])]).checks[0]
+    assert (single.score, single.passed) == (0.0, False)
 
 
 def test_code_chunk_premise_keeps_its_file_header() -> None:
@@ -241,3 +256,16 @@ def test_refusal_rule(passed: tuple[bool, ...], mostly_failed: bool, refuse: boo
     if passed:
         assert checked.mostly_failed is mostly_failed
     assert checked.refuse is refuse
+
+
+def test_qualified_names_pass_when_every_part_occurs_as_a_whole_word() -> None:
+    from app.grounding.code_checks import missing_identifiers
+
+    code = (
+        "class Response:\n    @property\n    def ok(self):\n        return self.status_code < 400"
+    )
+    assert missing_identifiers("`Response.ok` is True below `400`.", [code]) == []
+    assert missing_identifiers("Use `Response.okay`.", [code]) == ["Response.okay"]
+    assert missing_identifiers("`Resp.ok` works.", [code]) == ["Resp.ok"]  # no partial words
+    assert missing_identifiers('Prefix `"Basic "`.', [code]) == ['"Basic "']  # literal: verbatim
+    assert missing_identifiers('Prefix `"Basic "`.', ['b"Basic " + token']) == []
