@@ -131,3 +131,12 @@ grounding correctness > data safety > simplicity > performance > features.
   model, because Whistle skips non-speech almost instantly (a tone measured RTF 0.002). Calibration re-runs when
   `CALIBRATION_VERSION` rises (now 2). Phase 1 bumps it when the document parser arrives.
 - **Also:** the image build's self-check transcribes that clip and requires the exact words.
+
+### D-019 Known issue: Whistle oversubscribes threads when a container sees more CPUs than it may use
+- **Finding:** the Needle engine sizes its thread pool from `/sys/devices/system/cpu`, not from the process
+  affinity or cgroup quota, and offers no thread setting. On this dev host (Docker inside an 8-CPU LXC that
+  shows 32 CPUs) STT runs at RTF ≈ 0.8 instead of ≈ 0.09, and pinning to 2 CPUs gives RTF ≈ 2.25.
+- **Decision:** keep Whistle (it is correct, and on Docker Desktop, Ludwig's setup, every visible CPU is
+  usable). Calibration stores the real RTF, so estimates stay honest. Revisit in Phase 1 when STT is used for
+  audio and YouTube: if calibrated RTF > 1.0, prefer the SPEC fallback (`pywhispercpp`, which takes an
+  explicit thread count) or a configured STT endpoint.
