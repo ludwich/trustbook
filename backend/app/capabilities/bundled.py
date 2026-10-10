@@ -21,9 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.capabilities.cpu import CpuInfo, cpu_info
+from app.capabilities.cpu import CpuInfo, cpu_info, memory_bytes
 
 logger = logging.getLogger("trustbook.bundled")
 
@@ -136,16 +136,30 @@ def read_models_lock(models_dir: Path) -> dict[BundledKind, ModelInfo]:
 Dtype = Literal["float32", "bfloat16"]
 
 
-class RuntimeOptions(BaseModel):
-    """How the bundled models run on this computer, chosen by calibration (DECISIONS D-020).
+# Parallel embedding streams for indexing (Gate 1 finding G2): each stream has its own replica.
+MAX_EMBEDDING_STREAMS = 8
+_MB = 1024 * 1024
+# Resident size of one text-only EmbeddingGemma replica, by dtype.
+EMBEDDER_BYTES: dict[str, int] = {"bfloat16": 550 * _MB, "float32": 1100 * _MB}
+# Memory kept free for everything else (the other models, Docling, the app, the OS page cache).
+MEMORY_RESERVE_BYTES = 4 * 1024 * _MB
 
-    ``torch_threads`` None means "every CPU we may use". The grounding checker always runs in
-    float32 (grounding correctness before speed); FP16 is never used (SPEC §2).
+
+class RuntimeOptions(BaseModel):
+    """How the bundled models run on this computer, chosen by calibration (D-020, Gate 1 G2).
+
+    ``torch_threads`` None means "every CPU we may use"; it applies to every single model call
+    (queries, ranking, the grounding checker, Docling). Indexing embeds with
+    ``embedding_streams`` concurrent model replicas of ``stream_threads`` threads each (None:
+    ``torch_threads``). The grounding checker always runs in float32 (grounding correctness
+    before speed); FP16 is never used (SPEC §2).
     """
 
     torch_threads: int | None = None
     embedding_dtype: Dtype = "float32"
     reranker_dtype: Dtype = "float32"
+    embedding_streams: int = Field(default=1, ge=1, le=MAX_EMBEDDING_STREAMS)
+    stream_threads: int | None = Field(default=None, ge=1)
 
 
 @dataclass(frozen=True)
@@ -161,6 +175,18 @@ def default_threads(cpu: CpuInfo | None = None) -> int:
     so physical cores are only one of the candidates calibration measures (DECISIONS D-020).
     """
     return (cpu or cpu_info()).usable
+
+
+def streams_that_fit(streams: int, dtype: str, memory: int | None) -> int:
+    """``streams`` reduced so its embedding replicas fit in ``memory`` (bytes; None: unknown).
+
+    One stream uses the shared model and needs no replica. Several streams each load their own
+    replica, and :data:`MEMORY_RESERVE_BYTES` stays free for everything else.
+    """
+    if streams <= 1 or memory is None:
+        return max(1, streams)
+    size = EMBEDDER_BYTES.get(dtype, EMBEDDER_BYTES["float32"])
+    return max(1, min(streams, (memory - MEMORY_RESERVE_BYTES) // size))
 
 
 ProviderFactory = Callable[[ModelInfo, RuntimeOptions], Any]
@@ -244,10 +270,13 @@ class ProviderRegistry:
         factories: dict[BundledKind, ProviderFactory] | None = None,
         runtime_check: Callable[[BundledKind], bool] | None = None,
         tuner: Tuner | None = None,
+        memory: Callable[[], int | None] = memory_bytes,
     ) -> None:
         self._models_dir = models_dir
         self._factories = factories
         self._tuner = tuner
+        self._memory_source = memory
+        self._memory: tuple[int | None] | None = None
         self._options = RuntimeOptions()
         self.use = ModelUseLock()
         # Injected factories bring their own runtime; otherwise look for the ml packages.
@@ -257,6 +286,10 @@ class ProviderRegistry:
         self._instances: dict[BundledKind, Any] = {}
         self._overrides: dict[BundledKind, Any] = {}
         self._lock = threading.Lock()
+        # Embedding replicas for indexing streams, loaded on first use (one lock per slot).
+        self._replicas: dict[int, Any] = {}
+        self._replica_locks = [threading.Lock() for _ in range(MAX_EMBEDDING_STREAMS)]
+        self._generation = 0
 
     @property
     def models_dir(self) -> Path:
@@ -277,6 +310,8 @@ class ProviderRegistry:
                 return
             self._options = options
             self._instances.clear()
+            self._replicas.clear()
+            self._generation += 1
 
     def tune(self, cpu: CpuInfo, sample_texts: Sequence[str]) -> TuneResult:
         """Find the fastest thread count and dtypes for this computer (calibration)."""
@@ -317,7 +352,57 @@ class ProviderRegistry:
                     self._overrides[kind] = provider
 
     def embedder(self) -> Embedder:
+        """The shared embedder: queries, chat and single-stream indexing."""
         return cast(Embedder, self._get("embeddings"))
+
+    def memory(self) -> int | None:
+        """Memory this process may use, in bytes (read once)."""
+        if self._memory is None:
+            self._memory = (self._memory_source(),)
+        return self._memory[0]
+
+    def stream_threads(self) -> int:
+        """Model threads per indexing stream."""
+        options = self._options
+        return options.stream_threads or options.torch_threads or default_threads()
+
+    def ingest_streams(self) -> int:
+        """Concurrent embedding streams for indexing, reduced to what memory allows.
+
+        An injected embedder (tests) is a single instance, so it always means one stream.
+        """
+        with self._lock:
+            if "embeddings" in self._overrides:
+                return 1
+            options = self._options
+        return streams_that_fit(options.embedding_streams, options.embedding_dtype, self.memory())
+
+    def ingest_embedder(self, stream: int) -> Embedder:
+        """The embedder indexing stream ``stream`` uses.
+
+        With one stream that is the shared :meth:`embedder`. With several, each stream gets its own
+        replica (own model and tokenizer: fast tokenizers must not be shared across threads),
+        loaded on first use with :meth:`stream_threads` threads. Chat never uses the replicas.
+        """
+        streams = self.ingest_streams()
+        if streams <= 1:
+            return self.embedder()
+        slot = stream % streams
+        with self._replica_locks[slot]:
+            with self._lock:
+                found = self._replicas.get(slot)
+                generation = self._generation
+                options = self._options
+            if found is not None:
+                return cast(Embedder, found)
+            threads = options.stream_threads or options.torch_threads or default_threads()
+            instance = self._load(
+                "embeddings", options.model_copy(update={"torch_threads": threads})
+            )
+            with self._lock:
+                if generation != self._generation:
+                    return cast(Embedder, instance)  # settings changed while loading: don't keep it
+                return cast(Embedder, self._replicas.setdefault(slot, instance))
 
     def reranker(self) -> Reranker:
         return cast(Reranker, self._get("reranker"))
@@ -334,20 +419,23 @@ class ProviderRegistry:
                 return self._overrides[kind]
             if kind in self._instances:
                 return self._instances[kind]
+        instance = self._load(kind, self._options)
+        with self._lock:
+            return self._instances.setdefault(kind, instance)
+
+    def _load(self, kind: BundledKind, options: RuntimeOptions) -> Any:
         info = self.info(kind)
         if not info.present:
             raise ProviderUnavailableError("Model files are missing from this install.")
         factories = self._factories if self._factories is not None else _default_factories()
         try:
-            instance = factories[kind](info, self._options)
+            return factories[kind](info, options)
         except ProviderUnavailableError:
             raise
         except ImportError as exc:
             raise ProviderUnavailableError(
                 "The model runtime is not installed in this build."
             ) from exc
-        with self._lock:
-            return self._instances.setdefault(kind, instance)
 
 
 _registry: ProviderRegistry | None = None

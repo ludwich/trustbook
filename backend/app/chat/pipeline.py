@@ -19,7 +19,7 @@ from app.chat.llm import ChatAdapterFactory, generate_structured
 from app.chat.output import InvalidOutputError, parse_answer
 from app.chat.prompt import ANSWER_SCHEMA, answer_messages, labelled
 from app.chat.schemas import Refusal, RefusalReason, SentenceOut, Stage
-from app.chat.text import topic_of
+from app.chat.text import content_terms, question_topic
 from app.retrieval.service import Retrieval
 
 logger = logging.getLogger("trustbook.chat")
@@ -42,16 +42,26 @@ class Refused:
 Outcome = Answered | Refused
 
 
+NO_SOURCES_SUGGESTION = "Add or tick at least one ready source, then ask again."
+GENERIC_SUGGESTION = "Add sources about this topic, then ask again."
+
+
+def suggestion_for(question: str) -> str:
+    """``Add sources that cover “…”, then ask again.`` built from the question's own words."""
+    topic = question_topic(question)
+    if not content_terms(topic):  # nothing meaningful left ("What is it?")
+        return GENERIC_SUGGESTION
+    return f"Add sources that cover “{topic}”, then ask again."
+
+
 def refusal(reason: RefusalReason, question: str) -> Refusal:
-    """The plain-English refusal for ``reason``, with a suggestion about the question's topic."""
-    topic = topic_of(question)
+    """The plain-English refusal for ``reason``.
+
+    ``message`` is only the title the UI shows ("Not in your sources"); ``suggestion`` is the
+    subtitle, so the two never repeat each other.
+    """
     if reason == "no_sources":
-        return Refusal(
-            reason=reason,
-            message=NOT_IN_SOURCES,
-            suggestion=f"Add sources about “{topic}”, or tick a source that is ready, "
-            "then ask again.",
-        )
+        return Refusal(reason=reason, message=NOT_IN_SOURCES, suggestion=NO_SOURCES_SUGGESTION)
     if reason == "invalid_output":
         return Refusal(
             reason=reason,
@@ -59,11 +69,7 @@ def refusal(reason: RefusalReason, question: str) -> Refusal:
             suggestion="The chat model's reply did not cite your sources, so it is not shown. "
             "Ask again or rephrase the question.",
         )
-    return Refusal(
-        reason=reason,
-        message=NOT_IN_SOURCES,
-        suggestion=f"Add sources about “{topic}” and ask again.",
-    )
+    return Refusal(reason=reason, message=NOT_IN_SOURCES, suggestion=suggestion_for(question))
 
 
 def answer(

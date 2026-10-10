@@ -97,6 +97,46 @@ class ChunkOut(BaseModel):
     locator: dict[str, Any]
 
 
+class CodeContextOut(BaseModel):
+    file: str
+    commit: str | None
+    language: str | None
+    first_line: int
+    lines: list[str]
+    highlight: tuple[int, int]  # inclusive 1-based line range of the cited chunk
+
+
+class TextContextOut(BaseModel):
+    label: str | None
+    before: str
+    highlight: str
+    after: str
+
+
+class ChunkContextOut(BaseModel):
+    """The source viewer's data for one cited chunk (docs/ARCHITECTURE.md, "Phase 2")."""
+
+    chunk: ChunkOut
+    source_type: str
+    view: Literal["code", "text"]
+    # Only the key that matches ``view`` is present in the JSON.
+    code: CodeContextOut | None = Field(default=None, exclude_if=lambda v: v is None)
+    text: TextContextOut | None = Field(default=None, exclude_if=lambda v: v is None)
+
+
+class SecretFindingOut(BaseModel):
+    """One possible secret: where it is, never what it is."""
+
+    file: str
+    line: int
+    rule_id: str
+
+
+class SecretsReportOut(BaseModel):
+    files_skipped: int
+    findings: list[SecretFindingOut]
+
+
 class BrowseEntry(BaseModel):
     name: str
     path: str

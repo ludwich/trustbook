@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.chat.prompt import (
     ANSWER_SCHEMA,
     ANSWER_SYSTEM,
@@ -11,7 +13,7 @@ from app.chat.prompt import (
     overview_messages,
     parse_prompt,
 )
-from app.chat.text import content_terms, topic_of, truncate
+from app.chat.text import content_terms, question_topic, truncate
 from app.retrieval.service import RetrievedChunk
 
 
@@ -76,8 +78,41 @@ def test_text_helpers() -> None:
         "policy",
         "adapter",
     ]
-    assert topic_of("How do I configure proxies in requests?") == "configure proxies requests"
-    assert topic_of("What is it?") == "What is it"
+    assert question_topic("How do I configure proxies in requests?") == (
+        "how to configure proxies in requests"
+    )
+    assert question_topic("What is it?") == "it"
+    assert question_topic("  ?? ") == ""
     assert truncate("short", 10) == "short"
     assert truncate("one two three four five six", 12) == "one two…"
     assert estimate_tokens(0) == 0 and estimate_tokens(9) == 3
+
+
+@pytest.mark.parametrize(
+    ("question", "topic"),
+    [
+        ("How do I set a base URL for Session calls?", "how to set a base URL for Session calls"),
+        ("how can we mount a custom adapter", "how to mount a custom adapter"),
+        ("What is the default pool size?", "the default pool size"),
+        ("What's the default timeout?", "the default timeout"),
+        ("Can you tell me how do I stream a download?", "how to stream a download"),
+        ("Could you explain HTTPAdapter retries?", "HTTPAdapter retries"),
+        ("Does requests support HTTP/2?", "requests support HTTP/2"),
+        ("Is there a way to retry failed requests?", "a way to retry failed requests"),
+        ("Please, describe the Session object", "the Session object"),
+        ("Why does Session.send raise?", "why does Session.send raise"),
+        ("Retry policy", "retry policy"),
+        ("JSON body encoding?", "JSON body encoding"),
+        ("Is", "is"),
+    ],
+)
+def test_question_topic_keeps_the_users_words(question: str, topic: str) -> None:
+    assert question_topic(question) == topic
+
+
+def test_question_topic_is_cut_on_a_word_boundary() -> None:
+    long = "Why " + " ".join(f"word{i}" for i in range(40)) + "?"
+    topic = question_topic(long)
+    assert len(topic) <= 80 and topic.endswith("…")
+    assert topic.startswith("why word0 word1") and "word3…" not in topic[:-1]
+    assert topic[:-1].split(" ")[-1].startswith("word")

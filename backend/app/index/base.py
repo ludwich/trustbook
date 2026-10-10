@@ -26,7 +26,17 @@ class Hit:
 class SpaceIndex(Protocol):
     """Vectors and full text for one space's chunks; every search is filtered to ``source_ids``."""
 
-    def add(self, chunks: Sequence[IndexedChunk], vectors: Sequence[Sequence[float]]) -> None: ...
+    def add(self, chunks: Sequence[IndexedChunk], vectors: Sequence[Sequence[float]]) -> None:
+        """Add rows and make them searchable by text right away."""
+        ...
+
+    def append(self, chunks: Sequence[IndexedChunk], vectors: Sequence[Sequence[float]]) -> None:
+        """Add rows in bulk; call :meth:`refresh_text_index` once after the last batch."""
+        ...
+
+    def refresh_text_index(self) -> None:
+        """Fold rows added with :meth:`append` into the full-text index."""
+        ...
 
     def delete_source(self, source_id: str) -> None: ...
 

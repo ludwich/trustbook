@@ -82,3 +82,17 @@ def test_registry_caches_and_drops(tmp_path: Path) -> None:
     assert registry.for_space("a") is first
     registry.drop("a")
     assert registry.for_space("a") is not first
+
+
+def test_append_in_batches_then_refresh_text_index_once(tmp_path: Path) -> None:
+    index = LanceSpaceIndex(tmp_path / "vectors")
+    chunks, vectors = _chunks()
+    index.append(chunks[:2], vectors[:2])
+    index.append(chunks[2:], vectors[2:])
+    index.refresh_text_index()
+    assert index.count() == 3
+    assert [h.chunk_id for h in index.text_search("valve", limit=5, source_ids=["s1"])] == ["c1"]
+    assert [h.chunk_id for h in index.text_search("finance", limit=5, source_ids=["s2"])] == ["c3"]
+    with pytest.raises(IndexDimensionError):
+        index.append([IndexedChunk("c4", "s3", "x")], [[1.0, 0.0]])
+    LanceSpaceIndex(tmp_path / "empty").refresh_text_index()  # nothing indexed yet: no error

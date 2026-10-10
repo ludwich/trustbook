@@ -3,6 +3,12 @@
 Status flow: queued → reading → indexing → ready | failed (SPEC §7.5). The job is space-scoped
 (the active space's jobs run first), cancellable and reports progress: reading 0–40 %,
 embedding 40–95 %, writing the index to 100 %.
+
+Indexing (Gate 1 finding G2): the chunk rows go to ``space.db`` first, then parallel embedding
+streams (:mod:`app.capabilities.streams`) feed a bounded queue that this job's thread drains,
+appending vectors to the index every :data:`WRITE_BATCH` chunks; the full-text index is
+refreshed once at the end. The source only becomes ``ready`` after that, so chat never sees a
+half-indexed source; a failure removes the partial rows and vectors.
 """
 
 from __future__ import annotations
@@ -13,11 +19,12 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from app.capabilities.bundled import Embedder, ProviderRegistry, ProviderUnavailableError
+from app.capabilities.bundled import ProviderRegistry, ProviderUnavailableError
+from app.capabilities.streams import EmbeddedBatch, embed_in_streams
 from app.chunking.dispatch import chunk_snapshot
 from app.chunking.tokens import TokenCounter, load_token_counter
 from app.db.models import Chunk, Source
-from app.index.base import IndexedChunk, IndexRegistry
+from app.index.base import IndexedChunk, IndexRegistry, SpaceIndex
 from app.index.lance import IndexDimensionError
 from app.ingest import errors
 from app.ingest.errors import IngestError, fail
@@ -40,7 +47,7 @@ from app.timeutil import utc_now_iso
 logger = logging.getLogger("trustbook.ingest")
 
 INGEST_KIND = "ingest"
-EMBED_BATCH = 16
+WRITE_BATCH = 512  # vectors per index append
 REFRESHABLE = frozenset({"url", "youtube", "folder", "search"})
 SourceReadyHook = Callable[[str, str], None]
 
@@ -117,7 +124,7 @@ class IngestService:
             failure_reason=reason if status == "failed" else None,
             failure_next_step=step if status == "failed" else None,
             quality_warning=source.quality_warning,
-            enabled=source.enabled,
+            enabled=source.enabled and status != "failed",  # G7: failed is never ticked
             snapshot_at=source.snapshot_at,
             commit_hash=source.commit_hash,
             stats=load_stats(source),
@@ -197,6 +204,10 @@ class IngestService:
                 "Pasted text and uploaded files are fixed snapshots and can't be refreshed. "
                 "Remove the source and add it again instead."
             )
+        if self.out(source).status == "failed":
+            # G7: a failed source was unticked; refreshing it ticks it again like a new source
+            # (a new failure unticks it once more, so only a successful refresh keeps it ticked).
+            source = repo.update(source.id, enabled=True)
         self._cancel_job(source)
         return self.enqueue(repo, source)
 
@@ -222,6 +233,7 @@ class IngestService:
         return repo.update(
             source.id,
             status="failed",
+            enabled=False,  # G7: a failed source is unticked and not tickable
             failure_reason=exc.reason,
             failure_next_step=self._next_step(source, exc.next_step),
         )
@@ -258,22 +270,45 @@ class IngestService:
         except Exception:
             logger.warning("Could not record the failure of source %s", source.id, exc_info=True)
 
-    def _embedder(self) -> Embedder:
+    def _embed_into(
+        self, ctx: JobContext, index: SpaceIndex, chunks: Sequence[IndexedChunk]
+    ) -> None:
+        """Embed ``chunks`` with the indexing streams and append their vectors to ``index``.
+
+        Vectors are written every :data:`WRITE_BATCH` chunks while the streams keep embedding;
+        the streams wait when the writer falls behind (bounded queue), so memory stays flat.
+        """
+        pending: list[tuple[int, list[float]]] = []
+        done = 0
+
+        def flush() -> None:
+            pending.sort(key=lambda item: item[0])
+            index.append([chunks[i] for i, _ in pending], [vector for _, vector in pending])
+            pending.clear()
+
+        def on_batch(batch: EmbeddedBatch) -> None:
+            nonlocal done
+            pending.extend(zip(batch.indices, batch.vectors, strict=True))
+            done += len(batch.indices)
+            if len(pending) >= WRITE_BATCH:
+                flush()
+            ctx.progress(0.4 + 0.55 * done / len(chunks))
+
         try:
-            return self.providers.embedder()
+            streams = self.providers.ingest_streams()
+            used = embed_in_streams(
+                [c.text for c in chunks],
+                embedder_for=self.providers.ingest_embedder,
+                streams=streams,
+                on_batch=on_batch,
+                guard=self.providers.use.shared,  # waits while calibration measures
+                check_cancelled=ctx.check_cancelled,
+            )
         except ProviderUnavailableError as exc:
             raise fail(errors.NO_EMBEDDER) from exc
-
-    def _embed(self, ctx: JobContext, texts: Sequence[str]) -> list[list[float]]:
-        embedder = self._embedder()
-        vectors: list[list[float]] = []
-        for i in range(0, len(texts), EMBED_BATCH):
-            ctx.check_cancelled()
-            batch = list(texts[i : i + EMBED_BATCH])
-            with self.providers.use.shared():  # waits while calibration measures
-                vectors.extend(embedder.embed_documents(batch))
-            ctx.progress(0.4 + 0.55 * min(1.0, (i + len(batch)) / len(texts)))
-        return vectors
+        if pending:
+            flush()
+        logger.info("Embedded %d chunks with %d stream(s)", len(chunks), used)
 
     def _run(self, ctx: JobContext, repo: SourceRepository, source: Source) -> None:
         space_id = repo.record.id
@@ -295,7 +330,6 @@ class IngestService:
         drafts = chunk_snapshot(snapshot, self.token_counter())
         if not drafts:
             raise fail(errors.NO_TEXT)
-        vectors = self._embed(ctx, [d.text for d in drafts])
         ctx.check_cancelled()
 
         rows = [
@@ -313,15 +347,29 @@ class IngestService:
         ]
         indexed = [IndexedChunk(r.id, source.id, r.text) for r in rows]
         index = self.indexes.for_space(space_id)
+        # Rows first: retrieval skips indexed ids without a row, and the source is not ready yet.
         repo.replace_chunks(source.id, rows)
         index.delete_source(source.id)
         try:
-            index.add(indexed, vectors)
-        except IndexDimensionError as exc:
-            raise fail(errors.EMBEDDING_CHANGED) from exc
+            self._embed_into(ctx, index, indexed)
+            ctx.check_cancelled()
+            index.refresh_text_index()
+        except BaseException as exc:
+            self._discard_chunks(repo, index, source.id)
+            if isinstance(exc, IndexDimensionError):
+                raise fail(errors.EMBEDDING_CHANGED) from exc
+            raise
         self._mark_ready(repo, source, snapshot, snapshot_at, len(rows))
         ctx.progress(1.0)
         self._notify_ready(space_id, source.id)
+
+    def _discard_chunks(self, repo: SourceRepository, index: SpaceIndex, source_id: str) -> None:
+        """Drop a half-indexed source's rows and vectors (it is marked failed next)."""
+        try:
+            index.delete_source(source_id)
+            repo.replace_chunks(source_id, [])
+        except Exception:
+            logger.warning("Could not clean up source %s after a failure", source_id, exc_info=True)
 
     def _mark_ready(
         self,

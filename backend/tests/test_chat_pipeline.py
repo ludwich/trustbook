@@ -51,7 +51,7 @@ def test_no_usable_sources_refuses_without_calling_the_model() -> None:
     assert isinstance(outcome, Refused)
     assert outcome.refusal.reason == "no_sources"
     assert outcome.refusal.message == NOT_IN_SOURCES
-    assert "proxies configured requests" in (outcome.refusal.suggestion or "")
+    assert outcome.refusal.suggestion == "Add or tick at least one ready source, then ask again."
     assert (stages, built, chat.calls) == (["retrieving"], 0, [])
 
 
@@ -64,7 +64,7 @@ def test_low_top_score_refuses_before_generating(top: float) -> None:
     assert outcome.refusal.message == "Not in your sources"
     assert (
         outcome.refusal.suggestion
-        == "Add sources about “proxies configured requests” and ask again."
+        == "Add sources that cover “how are proxies configured in requests”, then ask again."
     )
     assert (stages, built, chat.calls) == (["retrieving"], 0, [])
 

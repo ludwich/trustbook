@@ -11,6 +11,7 @@ from sqlmodel import Session
 
 from app.capabilities.bundled import Embedder, Reranker
 from app.index.base import SpaceIndex
+from app.retrieval.definitions import definition_extras, fit_extras
 from app.retrieval.fusion import (
     CONTEXT_CHUNKS,
     CONTEXT_TOKENS,
@@ -36,9 +37,13 @@ class RetrievedChunk:
     locator: dict[str, object]
     token_count: int
     score: float
+    # Set when the chunk was added because it defines this constant (not ranked in).
+    definition_of: str | None = None
 
     @classmethod
-    def from_row(cls, row: ChunkRow, score: float) -> RetrievedChunk:
+    def from_row(
+        cls, row: ChunkRow, score: float, *, definition_of: str | None = None
+    ) -> RetrievedChunk:
         return cls(
             chunk_id=row.chunk_id,
             source_id=row.source_id,
@@ -47,6 +52,7 @@ class RetrievedChunk:
             locator=dict(row.locator),
             token_count=row.token_count,
             score=score,
+            definition_of=definition_of,
         )
 
 
@@ -96,6 +102,36 @@ def select_context(
     )
 
 
+def with_definitions(
+    engine: Engine,
+    selected: Sequence[RetrievedChunk],
+    ranked: Sequence[RetrievedChunk] = (),
+    *,
+    max_tokens: int = CONTEXT_TOKENS,
+) -> list[RetrievedChunk]:
+    """``selected`` plus the chunks defining the module-level constants its code refers to.
+
+    See :mod:`app.retrieval.definitions`. A chunk that was also reranked keeps its score;
+    otherwise its score is 0.0 (it was not ranked; the refusal check only uses ``ranked``).
+    """
+    try:
+        extras = definition_extras(engine, selected)
+    except Exception:
+        logger.warning("Looking up constant definitions failed; context unchanged", exc_info=True)
+        return list(selected)
+    if not extras:
+        return list(selected)
+    scores = {c.chunk_id: c.score for c in ranked}
+    chunks = [
+        (
+            RetrievedChunk.from_row(e.row, scores.get(e.row.chunk_id, 0.0), definition_of=e.name),
+            e.referrer,
+        )
+        for e in extras
+    ]
+    return fit_extras(selected, chunks, max_tokens=max_tokens)
+
+
 def candidates(
     engine: Engine,
     index: SpaceIndex,
@@ -141,4 +177,5 @@ def retrieve(
         return Retrieval(chunks=[], ranked=[], source_ids=[])
     rows = candidates(engine, index, embedder, query, allowed)
     ranked = rerank(query, rows, reranker)
-    return Retrieval(chunks=select_context(ranked), ranked=ranked, source_ids=allowed)
+    chunks = with_definitions(engine, select_context(ranked), ranked)
+    return Retrieval(chunks=chunks, ranked=ranked, source_ids=allowed)

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Engine, func
+from sqlalchemy import Engine, func, or_
 from sqlmodel import Session, col, select
 
 from app.db.models import Chunk, Source
@@ -107,6 +108,30 @@ def first_chunks(engine: Engine, source_ids: Sequence[str]) -> list[ChunkRow]:
         ).all()
     by_source = {chunk.source_id: _row(chunk, title) for chunk, title in rows}
     return [by_source[sid] for sid in source_ids if sid in by_source]
+
+
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def chunks_assigning(engine: Engine, source_id: str, names: Sequence[str]) -> list[ChunkRow]:
+    """Chunks of one source with a line starting ``NAME =`` / ``NAME:`` for any name, by ordinal.
+
+    A pre-filter with case-sensitive ``GLOB`` (about 1 ms per name on 3,600 chunks; ``instr``
+    is ~5× slower because it counts characters); callers check the exact match themselves.
+    Code chunk bodies always follow their "File: …" line, so "\\n" + name finds column 0.
+    """
+    names = [name for name in names if _IDENTIFIER.fullmatch(name)]  # no GLOB wildcards
+    if not names:
+        return []
+    conditions = [col(Chunk.text).op("GLOB")(f"*\n{name}[ \t:=]*") for name in names]
+    with Session(engine) as session:
+        rows = session.exec(
+            select(Chunk, Source.title)
+            .join(Source, col(Source.id) == col(Chunk.source_id))
+            .where(col(Chunk.source_id) == source_id, or_(*conditions))
+            .order_by(col(Chunk.ordinal))
+        ).all()
+    return [_row(chunk, title) for chunk, title in rows]
 
 
 def total_tokens(engine: Engine, source_ids: Sequence[str]) -> tuple[int, int]:

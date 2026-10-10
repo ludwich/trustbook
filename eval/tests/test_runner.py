@@ -406,9 +406,26 @@ def test_compute_metrics() -> None:
     assert runner.thresholds_met(m, 0.75, None)
     assert not runner.thresholds_met(m, 0.9, None)
     assert not runner.thresholds_met(m, None, 0.95)
+    assert runner.thresholds_met(m, None, None, 1.0)
     empty = compute_metrics([])
     assert empty.precision.value is None
     assert not runner.thresholds_met(empty, 0.9, None)
+    assert not runner.thresholds_met(empty, None, None, 0.8)  # nothing to measure fails
+
+
+def test_must_contain_hit_rate_counts_misses_and_refusals() -> None:
+    results = [
+        result(q("a", must_contain=("10", "False")), "answered", 1.0, [True]),
+        result(q("b", must_contain=("10",)), "answered", 1.0, [True]),
+        result(q("c", must_contain=("30",)), "refused", 1.0, []),
+        result(q("d"), "answered", 1.0, [True]),  # no keywords: not counted
+    ]
+    results[0].must_found = ["10"]  # one of two keywords is not enough
+    results[1].must_found = ["10"]
+    m = compute_metrics(results)
+    assert (m.must_contain.num, m.must_contain.den) == (1, 3)
+    assert not runner.thresholds_met(m, None, None, 0.8)
+    assert runner.thresholds_met(m, None, None, 0.3)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -617,8 +634,13 @@ def test_render_report_lists_wrong_citations_and_escapes_pipes() -> None:
         started_at=datetime(2026, 10, 10, 12, 0, tzinfo=UTC),
         min_precision=0.9,
         min_refusal=0.95,
+        min_must_contain=0.8,
     )
     text = runner.render_report(info, [r1, r2], SOURCES)
+    assert (
+        "| must_contain hit rate (answerable with keywords) | n/a (0/0) | >= 80% | **FAIL** |"
+        in text
+    )
     assert "| Citation precision (answerable) | 50.0% (1/2) | >= 90% | **FAIL** |" in text
     assert "| Correct-refusal rate (unanswerable) | 0.0% (0/1) | >= 95% | **FAIL** |" in text
     assert "| code\\|1 | answerable | code | answered | 1/2 | 1/1 | - | 2.0 s |" in text
@@ -683,6 +705,8 @@ def test_main_end_to_end_with_setup_and_thresholds(tmp_path: Path) -> None:
         "0.9",
         "--min-refusal",
         "95",
+        "--min-must-contain",
+        "0.8",
     ]
     transport = httpx.MockTransport(api.handler)
     code = runner.main(
@@ -692,7 +716,10 @@ def test_main_end_to_end_with_setup_and_thresholds(tmp_path: Path) -> None:
     assert code == 0, text
     assert report_path.read_text() == text
     assert "100.0% (2/2)" in text and "| pass |" in text
-    assert "| must_contain hit rate (informational) | 100.0% (1/1) |" in text
+    assert (
+        "| must_contain hit rate (answerable with keywords) | 100.0% (1/1) | >= 80% | pass |"
+        in text
+    )
     assert "| un-1 | unanswerable | - | refused (not_in_sources) |" in text
     # docs source title in the fake is "stable", so only the URL entry resolves
     assert f"`{QS_TITLE}`" in text
@@ -728,3 +755,35 @@ def test_main_unreachable_and_unknown_space(tmp_path: Path) -> None:
     assert runner.main(argv, transport=httpx.MockTransport(api.handler), log=log) == 2
     assert "space not found" in log.getvalue()
     assert runner.main(["--space", "x", "--questions", str(tmp_path / "nope.yaml")], log=log) == 2
+
+
+def test_main_exits_1_when_must_contain_is_below_target(tmp_path: Path) -> None:
+    api = FakeApi()
+    loc = {"file": "src/requests/models.py", "start_line": 100, "end_line": 106}
+    # Right source and lines, but the answer stops at the constant's name (Gate 1 code-03).
+    api.answers["Max redirects?"] = answer(
+        ("The limit is DEFAULT_REDIRECT_LIMIT [1].", [cit(1, "src1", "requests", **loc)])
+    )
+    api.answers["Redirects for HEAD?"] = answer(
+        ("All verbs except HEAD [1].", [cit(1, "src2", "stable", heading="Redirection")])
+    )
+    corpus = tmp_path / "corpus.yaml"
+    corpus.write_text(f"sources:\n  - folder: trustbook-eval/requests\n  - url: {QS_URL}\n")
+    argv = ["--base-url", "http://tb", "--space", "Smoke", "--questions"]
+    argv += [str(write_questions(tmp_path)), "--setup", str(corpus)]
+    out = io.StringIO()
+    code = runner.main(
+        [*argv, "--min-precision", "0.9", "--min-must-contain", "0.8"],
+        transport=httpx.MockTransport(api.handler),
+        out=out,
+        log=io.StringIO(),
+        sleep=lambda _: None,
+        clock=Clock(),
+    )
+    text = out.getvalue()
+    assert code == 1, text
+    assert "| Citation precision (answerable) | 100.0% (2/2) | >= 90% | pass |" in text
+    assert (
+        "| must_contain hit rate (answerable with keywords) | 0.0% (0/1) | >= 80% | **FAIL** |"
+        in text
+    )

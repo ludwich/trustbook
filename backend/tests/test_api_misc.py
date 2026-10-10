@@ -62,6 +62,7 @@ def test_calibration_routes(make_client: AppFactory, paths: Paths) -> None:
         "measured_at",
         "cpu_count",
         "embedding_chunks_per_s",
+        "embedding_chunks_per_s_code",
         "rerank_pairs_per_s",
         "parse_pages_per_s",
         "stt_realtime_factor",
@@ -71,6 +72,8 @@ def test_calibration_routes(make_client: AppFactory, paths: Paths) -> None:
     }
     assert set(results["cpu"]) == {"model", "logical", "usable", "physical", "bf16"}
     assert results["runtime"]["torch_threads"] >= 1
+    assert results["runtime"]["embedding_streams"] >= 1
+    assert results["embedding_chunks_per_s_code"] > 0
     # No Docling models in tests: the basic PDF reader is measured, and the note says so.
     assert results["parse_pages_per_s"] > 0
     assert "Document reading speed measured with the basic PDF reader." in results["notes"]

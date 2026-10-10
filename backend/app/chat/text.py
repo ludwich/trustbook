@@ -47,9 +47,49 @@ def truncate(text: str, limit: int) -> str:
     return cut.rstrip(" ,.;:-") + "…"
 
 
-def topic_of(question: str, *, max_words: int = 6) -> str:
-    """A short topic phrase for a question (its first content words), for refusal suggestions."""
-    terms = content_terms(question)[:max_words]
-    if terms:
-        return " ".join(terms)
-    return truncate(question.strip().rstrip("?"), 60)
+# Leading phrases that make a question a question; stripped repeatedly ("Can you tell me how do I
+# …" → "how to …"). "How do I …" becomes "how to …", which reads well after "sources that cover".
+_HOW_TO = re.compile(
+    r"^how\s+(?:do|can|could|should|would|will|must|may)\s+(?:i|we|you|one|someone)\s+", re.I
+)
+_LEAD = re.compile(
+    r"^(?:please|so|ok(?:ay)?|hey|hi|"
+    r"can\s+you|could\s+you|would\s+you|will\s+you|"
+    r"(?:can|could)\s+(?:i|we)\s+(?:ask|know)|"
+    r"do\s+you\s+know|i\s+(?:want|would\s+like|need)\s+to\s+know|i\s+wonder|"
+    r"tell\s+me(?:\s+about)?|show\s+me|explain|describe|"
+    r"what(?:'s|\s+is|\s+are|\s+was|\s+were|\s+does|\s+do)|"
+    r"is\s+there|are\s+there|is\s+it\s+possible\s+to|"
+    r"does|do|did|is|are|was|were|can|could|should|will|would|has|have)"
+    r"(?:\s+|[,:]\s*|$)",
+    re.I,
+)
+TOPIC_CHARS = 80
+
+
+def question_topic(question: str, *, limit: int = TOPIC_CHARS) -> str:
+    """The question as a readable topic: leading question words and the "?" removed.
+
+    The user's own words stay in order ("How do I set a base URL for Session calls?" →
+    "how to set a base URL for Session calls"); long questions are cut on a word boundary.
+    Returns "" when nothing is left.
+    """
+    text = " ".join(question.split())
+    text = text.rstrip(" ?!.;:").strip()
+    while True:
+        how = _HOW_TO.match(text)
+        if how:
+            text = "how to " + text[how.end() :]
+            break
+        lead = _LEAD.match(text)
+        if not lead or lead.end() == 0 or lead.end() >= len(text):
+            break
+        text = text[lead.end() :]
+    text = text.strip(" ,;:-")
+    if not text:
+        return ""
+    first, _, rest = text.partition(" ")
+    # "How to …" / "Retry …" at the start of a question is capitalised only as sentence case.
+    if first[:1].isupper() and first[1:].islower() and first.isalpha():
+        text = first.lower() + (" " + rest if rest else "")
+    return truncate(text, limit)

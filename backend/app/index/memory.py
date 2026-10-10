@@ -28,6 +28,12 @@ class InMemorySpaceIndex:
             for chunk, vector in zip(chunks, vectors, strict=True):
                 self._rows[chunk.chunk_id] = (chunk, [float(v) for v in vector])
 
+    def append(self, chunks: Sequence[IndexedChunk], vectors: Sequence[Sequence[float]]) -> None:
+        self.add(chunks, vectors)
+
+    def refresh_text_index(self) -> None:
+        return None
+
     def delete_source(self, source_id: str) -> None:
         with self._lock:
             for chunk_id in [k for k, (c, _) in self._rows.items() if c.source_id == source_id]:

@@ -3,8 +3,8 @@
 
 Asks every question in one or more YAML question files (format: ``eval/format.md``) against a
 space of a running Trustbook, then prints a Markdown report ready to paste into ``docs/GATES.md``:
-citation precision, correct-refusal rate, false refusals, answer latency p50/p95 and the
-informational ``must_contain`` hit rate.
+citation precision, correct-refusal rate, ``must_contain`` hit rate, false refusals and answer
+latency p50/p95.
 
 Usage (from the repo root, with the backend's virtualenv)::
 
@@ -1005,6 +1005,7 @@ class RunInfo:
     started_at: datetime
     min_precision: float | None = None
     min_refusal: float | None = None
+    min_must_contain: float | None = None
 
 
 def render_report(
@@ -1030,12 +1031,17 @@ def render_report(
     out.append("")
     p_target, p_res = _verdict(m.precision.value, info.min_precision)
     r_target, r_res = _verdict(m.correct_refusal.value, info.min_refusal)
+    k_target, k_res = _verdict(m.must_contain.value, info.min_must_contain)
     out.append("| Metric | Value | Target | Result |")
     out.append("|---|---|---|---|")
     out.append(f"| Citation precision (answerable) | {_pct(m.precision)} | {p_target} | {p_res} |")
     out.append(
         f"| Correct-refusal rate (unanswerable) | {_pct(m.correct_refusal)} "
         f"| {r_target} | {r_res} |"
+    )
+    out.append(
+        f"| must_contain hit rate (answerable with keywords) | {_pct(m.must_contain)} "
+        f"| {k_target} | {k_res} |"
     )
     out.append(
         f"| False refusals (answerable) | {m.false_refusal.num}/{m.false_refusal.den} | - | - |"
@@ -1045,7 +1051,6 @@ def render_report(
         f"| Answer latency p50 / p95 ({m.latency_count} answers) | "
         f"{_secs(m.latency_p50)} / {_secs(m.latency_p95)} | - | - |"
     )
-    out.append(f"| must_contain hit rate (informational) | {_pct(m.must_contain)} | - | - |")
     out.append("")
     out.append(
         "| ID | Type | Category | Outcome | Citations correct/total "
@@ -1136,13 +1141,21 @@ def render_report(
     return "\n".join(out).rstrip() + "\n"
 
 
-def thresholds_met(m: Metrics, min_precision: float | None, min_refusal: float | None) -> bool:
-    ok = True
-    if min_precision is not None:
-        ok = ok and m.precision.value is not None and m.precision.value >= min_precision
-    if min_refusal is not None:
-        ok = ok and m.correct_refusal.value is not None and m.correct_refusal.value >= min_refusal
-    return ok
+def thresholds_met(
+    m: Metrics,
+    min_precision: float | None,
+    min_refusal: float | None,
+    min_must_contain: float | None = None,
+) -> bool:
+    """True when every given minimum is reached (a value that can't be computed fails)."""
+    checks = (
+        (m.precision.value, min_precision),
+        (m.correct_refusal.value, min_refusal),
+        (m.must_contain.value, min_must_contain),
+    )
+    return all(
+        minimum is None or (value is not None and value >= minimum) for value, minimum in checks
+    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1179,6 +1192,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=300.0, help="seconds per answer (default 300)")
     p.add_argument("--min-precision", type=_fraction, help="exit 1 if citation precision is lower")
     p.add_argument("--min-refusal", type=_fraction, help="exit 1 if correct-refusal rate is lower")
+    p.add_argument(
+        "--min-must-contain", type=_fraction, help="exit 1 if the must_contain hit rate is lower"
+    )
     return p
 
 
@@ -1252,13 +1268,16 @@ def main(
         started_at=started,
         min_precision=args.min_precision,
         min_refusal=args.min_refusal,
+        min_must_contain=args.min_must_contain,
     )
     report = render_report(info, results, sources, setup)
     out.write(report)
     if args.report:
         Path(args.report).write_text(report, encoding="utf-8")
         print(f"report written to {args.report}", file=log)
-    if not thresholds_met(compute_metrics(results), args.min_precision, args.min_refusal):
+    if not thresholds_met(
+        compute_metrics(results), args.min_precision, args.min_refusal, args.min_must_contain
+    ):
         print("thresholds not met", file=log)
         return EXIT_THRESHOLD
     return EXIT_OK

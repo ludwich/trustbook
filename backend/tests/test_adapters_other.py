@@ -7,7 +7,7 @@ import pytest
 
 from app.capabilities.adapters.anthropic import AnthropicAdapter
 from app.capabilities.adapters.azure_openai import AzureOpenAIAdapter
-from app.capabilities.adapters.base import AdapterError
+from app.capabilities.adapters.base import AdapterError, SearchResult
 from app.capabilities.adapters.factory import (
     build_chat_adapter,
     build_search_adapter,
@@ -22,6 +22,8 @@ from app.capabilities.adapters.search import (
     SearxngAdapter,
     TavilyAdapter,
     clean_snippet,
+    demote_homepages,
+    is_homepage,
 )
 from app.capabilities.adapters.stt_openai import OpenAITranscriptionAdapter
 from app.capabilities.http import OutboundHttp, RequestLogRepository
@@ -116,6 +118,75 @@ def test_searxng(http: OutboundHttp, router: Router) -> None:
     ]
     assert router.requests[0].url.params["format"] == "json"
     assert router.requests[0].url.params["q"] == "trustbook"
+    assert router.requests[0].url.params["language"] == "en"
+
+
+@pytest.mark.parametrize(
+    ("url", "bare"),
+    [
+        ("https://www.microsoft.com", True),
+        ("https://www.microsoft.com/", True),
+        ("https://www.microsoft.com/sv-se/", True),
+        ("https://www.microsoft.com/en-us", True),
+        ("https://example.org/en/", True),
+        ("https://example.org/de/index.html", True),
+        ("https://example.org/?q=1", True),
+        ("https://requests.readthedocs.io/en/latest/user/advanced/", False),
+        ("https://example.org/docs", False),
+        ("https://example.org/en-us/docs/x", False),
+        ("https://example.org/blog/post.html", False),
+    ],
+)
+def test_is_homepage(url: str, bare: bool) -> None:
+    assert is_homepage(url) is bare
+
+
+def test_homepages_demoted_only_for_specific_queries() -> None:
+    results = [
+        SearchResult(title="Home", url="https://www.microsoft.com/sv-se/", snippet=""),
+        SearchResult(title="A", url="https://a.example/docs/a", snippet=""),
+        SearchResult(title="Root", url="https://b.example", snippet=""),
+        SearchResult(title="C", url="https://c.example/c", snippet=""),
+    ]
+    assert [r.title for r in demote_homepages("set session base url", results)] == [
+        "A",
+        "C",
+        "Home",
+        "Root",
+    ]
+    assert [r.title for r in demote_homepages("microsoft teams", results)] == [
+        "Home",
+        "A",
+        "Root",
+        "C",
+    ]
+
+
+def test_searxng_demotes_homepages_before_the_limit(http: OutboundHttp, router: Router) -> None:
+    data = {
+        "results": [
+            {"title": "Home", "url": "https://www.microsoft.com/sv-se/"},
+            {"title": "Docs", "url": "https://learn.microsoft.com/en-us/graph/overview"},
+            {"title": "Root", "url": "https://example.com/"},
+            {"title": "Guide", "url": "https://example.com/guide"},
+        ]
+    }
+    router.json("GET", "http://searxng:8080/search", data)
+    adapter = SearxngAdapter(http, base_url="http://searxng:8080")
+    results = adapter.search("microsoft graph api overview", 2)
+    assert [r.title for r in results] == ["Docs", "Guide"]
+
+
+def test_brave_and_tavily_demote_homepages(http: OutboundHttp, router: Router) -> None:
+    items = [
+        {"title": "Home", "url": "https://t.example/", "content": "", "description": ""},
+        {"title": "Page", "url": "https://t.example/page", "content": "", "description": ""},
+    ]
+    router.json("GET", BRAVE_URL, {"web": {"results": items}})
+    router.json("POST", TAVILY_URL, {"results": items})
+    brave = BraveAdapter(http, api_key="brave-key-123456").search("three word query", 5)
+    tavily = TavilyAdapter(http, api_key="tvly-secret-123456").search("three word query", 5)
+    assert [r.title for r in brave] == [r.title for r in tavily] == ["Page", "Home"]
 
 
 def test_searxng_json_disabled(http: OutboundHttp, router: Router) -> None:

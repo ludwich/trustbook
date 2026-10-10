@@ -3,9 +3,11 @@ from __future__ import annotations
 import stat
 from dataclasses import replace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Paths
+from app.jobs import pool as pool_module
 from app.jobs.calibration import CALIBRATION_VERSION
 from tests.conftest import AppFactory, wait_for
 
@@ -32,7 +34,11 @@ def test_setup_flow(client: TestClient) -> None:
 
 
 def test_settings_get_and_put(client: TestClient) -> None:
-    assert client.get("/api/settings").json() == {
+    body = client.get("/api/settings").json()
+    by_power = body.pop("workers_by_power")
+    assert (by_power["low"], by_power["normal"]) == (1, 2)
+    assert 2 <= by_power["high"] <= 8
+    assert body == {
         "power": "normal",
         "setup_completed": False,
         "workers": 2,
@@ -84,3 +90,17 @@ def test_static_spa_fallback(make_client: AppFactory, paths: Paths) -> None:
 
 def test_no_static_dir_means_no_fallback(client: TestClient) -> None:
     assert client.get("/").status_code == 404
+
+
+def test_settings_show_capped_high_workers(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate 1 G1: a 32-CPU laptop showed "High: 30 workers" while 8 were used."""
+    monkeypatch.setattr(pool_module, "usable_cpus", lambda: 32)
+    monkeypatch.setattr(pool_module, "memory_bytes", lambda: 64 * 1024**3)
+    body = client.get("/api/settings").json()
+    assert body["workers_by_power"] == {"low": 1, "normal": 2, "high": 8}
+    monkeypatch.setattr(pool_module, "memory_bytes", lambda: 10 * 1024**3)
+    body = client.put("/api/settings", json={"power": "high"}).json()
+    assert body["workers_by_power"]["high"] == 4
+    assert body["workers"] == 4

@@ -16,7 +16,7 @@ questions:
     expected_locators:                # optional; narrows which citations count as correct
       - {file: src/requests/models.py, lines: [104, 104]}
       - {file: src/requests/sessions.py, lines: [484, 488]}
-    must_contain: ["30"]              # optional keywords (informational)
+    must_contain: ["30"]              # optional keywords (tracked metric)
 
   - id: unans-01
     question: How do I open a WebSocket connection with requests?
@@ -32,7 +32,7 @@ questions:
 | `type` | yes | `answerable`: the space's sources contain the answer. `unanswerable`: they do not; the right outcome is a refusal. |
 | `expected_sources` | answerable: yes | Sources that may be cited. Each entry is matched against every source in the space by **title** or by **origin** (see below). |
 | `expected_locators` | no | Where in those sources the answer is. See "Locators". |
-| `must_contain` | no | Keywords the answer should contain (case-insensitive substring). Informational only. |
+| `must_contain` | no | Keywords the answer should contain (case-insensitive substring). Counted in the must_contain hit rate. |
 | `category` | no | `docs`, `code`, `multi` or `unanswerable`; shown in the report. |
 
 ### Matching `expected_sources`
@@ -90,11 +90,13 @@ counts once.
 | **False refusals** | Answerable questions with outcome `refused` / all answerable questions. |
 | **Errors** | Questions with outcome `error`. |
 | **Answer latency p50 / p95** | Time from sending the message request to the first `done` or `refused` event, over `answered` and `refused` questions. Percentiles use linear interpolation between closest ranks (NumPy's default). |
-| **must_contain hit rate** (informational) | Answerable questions with `must_contain` whose answer text contains **all** keywords / answerable questions with `must_contain`. Per question shown as `found/total`. |
+| **must_contain hit rate** (target with `--min-must-contain`) | Answerable questions with `must_contain` whose answer text contains **all** keywords / answerable questions with `must_contain`. Refused or failed answers count as misses. Per question shown as `found/total`. Catches answers that cite the right passage but stop short of the value asked for (e.g. a constant's name instead of its value). |
 | **Expected sources cited** (informational) | Per answerable question: distinct expected sources (as resolved in the space) that were cited / expected sources found in the space. Shows whether a multi-source answer used both sources. |
 
-`--min-precision` and `--min-refusal` (fractions, `0.9` or `90`) make the runner exit 1 when a value
-is below the threshold or cannot be computed (no citations / no unanswerable questions).
+`--min-precision`, `--min-refusal` and `--min-must-contain` (fractions, `0.9` or `90`) make the runner
+exit 1 when a value is below the threshold or cannot be computed (no citations / no unanswerable
+questions / no answerable questions with `must_contain`). The report shows the target and
+pass/**FAIL** for each one given.
 
 ## Corpus file (`--setup`)
 

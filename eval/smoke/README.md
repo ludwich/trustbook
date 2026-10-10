@@ -73,6 +73,8 @@ Exit code: 0 = done, 1 = a `--min-*` threshold was missed, 2 = Trustbook unreach
 
 **Gate 1**: citation precision ≥ 90%. **Gate 2** adds `--min-refusal 0.95` (correct-refusal rate on
 the three unanswerable questions; with three questions that means all three must be refused).
+`--min-must-contain 0.8` also tracks whether answers contain the expected values (`must_contain`
+keywords), e.g. `10` rather than only the name `DEFAULT_POOLSIZE`.
 
 ## Reading the report
 

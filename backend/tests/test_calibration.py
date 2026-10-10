@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -8,8 +10,9 @@ from typing import Any
 import pytest
 
 from app.capabilities.audio import wav_bytes
-from app.capabilities.bundled import ProviderRegistry, RuntimeOptions, TuneResult
+from app.capabilities.bundled import ModelInfo, ProviderRegistry, RuntimeOptions, TuneResult
 from app.capabilities.cpu import CpuInfo
+from app.capabilities.streams import StreamLayout, choose_streams, stream_candidates
 from app.config import Paths, ensure_layout
 from app.jobs.calibration import (
     CALIBRATE_KIND,
@@ -20,7 +23,13 @@ from app.jobs.calibration import (
 )
 from app.jobs.handlers import JobCancelledError, JobContext
 from app.jobs.repository import JobRepository
-from tests.fakes import BrokenProvider, FakeEmbedder, FakeReranker, FakeTranscriber
+from tests.fakes import (
+    BrokenProvider,
+    FakeEmbedder,
+    FakeReranker,
+    FakeTranscriber,
+    write_models_lock,
+)
 
 
 class Clock:
@@ -66,6 +75,7 @@ def test_run_with_fakes(
     result = service.run(ctx)
     assert result.version == CALIBRATION_VERSION
     assert result.embedding_chunks_per_s == 256.0  # 64 chunks / 0.25 s
+    assert result.embedding_chunks_per_s_code == 128.0  # 32 code chunks / 0.25 s
     assert result.rerank_pairs_per_s == 128.0
     assert result.stt_realtime_factor == 0.025  # 0.25 s / 10 s of synthetic audio
     assert result.parse_pages_per_s is None
@@ -216,3 +226,86 @@ def test_parse_speed_uses_the_document_parser(
     assert parsed == [1, 6]  # warm-up page, then the timed document
     assert result.parse_pages_per_s == 24.0  # 6 pages / 0.25 s
     assert "Document reading speed measured with the basic PDF reader." in result.notes
+
+
+def test_calibration_picks_streams_and_measures_code_with_them(
+    paths: Paths, repo: JobRepository
+) -> None:
+    """The tuner measures stream layouts; the code speed is then measured the way indexing runs."""
+    ensure_layout(paths)
+    write_models_lock(paths.models_dir)
+    measured: list[str] = []
+    rates = {"1×8": 3.3, "2×4": 3.9, "4×2": 4.4}
+
+    def tuner(_registry: ProviderRegistry, cpu: CpuInfo, _texts: Sequence[str]) -> TuneResult:
+        layouts = stream_candidates(8, 8, lambda _n: True)
+
+        def measure(layout: StreamLayout) -> float:
+            measured.append(layout.label)
+            return rates[layout.label]
+
+        choice = choose_streams(layouts, measure)
+        options = RuntimeOptions(
+            torch_threads=8,
+            embedding_streams=choice.layout.streams,
+            stream_threads=choice.layout.threads,
+        )
+        return TuneResult(options, [choice.note])
+
+    threads: dict[int, set[str]] = {}
+
+    class Replica(FakeEmbedder):
+        def __init__(self, number: int, options: RuntimeOptions) -> None:
+            super().__init__()
+            self.number = number
+            self.threads_option = options.torch_threads
+
+        def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+            threads.setdefault(self.number, set()).add(threading.current_thread().name)
+            time.sleep(0.002)
+            return super().embed_documents(texts)
+
+    loads: list[Replica] = []
+
+    def factory(_info: ModelInfo, options: RuntimeOptions) -> Replica:
+        loads.append(Replica(len(loads), options))
+        return loads[-1]
+
+    providers = ProviderRegistry(
+        paths.models_dir,
+        factories={"embeddings": factory},
+        tuner=tuner,
+        memory=lambda: 64 * 1024**3,
+    )
+    providers.override(reranker=FakeReranker(), transcriber=FakeTranscriber())
+    result = CalibrationService(paths, providers, repo, clock=Clock()).run(_ctx()[0])
+
+    assert measured == ["1×8", "2×4", "4×2"]
+    assert result.runtime is not None
+    assert (result.runtime.embedding_streams, result.runtime.stream_threads) == (4, 2)
+    assert result.notes[0].startswith("Indexing uses 4 parallel streams × 2 threads")
+    assert result.embedding_chunks_per_s_code == 128.0  # 32 chunks / 0.25 s (fake clock)
+    # The shared embedder (prose speed) plus 4 replicas with 2 threads each, one thread apiece.
+    assert [r.threads_option for r in loads] == [8, 2, 2, 2, 2]
+    stream_threads = {name for number, names in threads.items() if number > 0 for name in names}
+    assert stream_threads == {f"embed-stream-{i}" for i in range(4)}
+    assert all(len(names) == 1 for number, names in threads.items() if number > 0)
+    saved = json.loads(paths.calibration_file.read_text())
+    assert saved["runtime"]["embedding_streams"] == 4
+    assert saved["embedding_chunks_per_s_code"] == 128.0
+
+
+def test_version_4_calibration_still_reads(
+    paths: Paths, fake_providers: ProviderRegistry, repo: JobRepository
+) -> None:
+    ensure_layout(paths)
+    service = CalibrationService(paths, fake_providers, repo, clock=Clock())
+    current = service.run(_ctx()[0]).model_dump()
+    current.pop("embedding_chunks_per_s_code")
+    current["version"] = 4
+    current["runtime"] = {"torch_threads": 7, "embedding_dtype": "bfloat16"}
+    paths.calibration_file.write_text(json.dumps(current))
+    old = service.read()
+    assert old is not None and old.embedding_chunks_per_s_code is None
+    assert old.runtime is not None and old.runtime.embedding_streams == 1
+    assert service.ensure_first_run() is not None  # recalibrated for streams
