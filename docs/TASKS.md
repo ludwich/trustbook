@@ -1,50 +1,40 @@
-# Phase 2 — Trust and flow (branch `phase-2`)
+# Phase 3 — Code (branch `phase-3`)
 
-Gate 2: correct-refusal rate ≥ 95% on unanswerable questions, with citation precision still ≥ 90%.
+Gate 3 (SPEC §14): on the `requests` repo, 100% of cited file/line ranges exist at the indexed commit; the
+secrets scan skips a planted fake secret in a test folder.
+Gate 3 (added by Ludwig at Gate 2): at most **1 false refusal across all answerable code questions** in the
+smoke + refusal sets, with correct refusals still ≥ 95% and citation precision ≥ 90%. False refusals are
+reported per category (docs/code/multi). p95 latency is tracked in GATES.md and flagged above 60 s.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
-## 0. Gate 1 follow-ups (Ludwig's findings, do first; each logged in DECISIONS.md)
-- [x] G1 Power "High" label shows the real (capped) worker count
-- [x] G2 Indexing one large source uses all cores: parallel parsing/chunking per file, concurrent embedding streams (tuned by calibration), batched LanceDB writes
-- [x] G3 Code answers include definitions of referenced module-level constants; `must_contain` becomes a tracked metric in the eval report
-- [x] G4 Secrets warning shown once and clickable: report (file, line, rule ID) viewable in the UI
-- [x] G5 Refusal card: no repeated title; suggestion is a readable topic
-- [x] G6 Code viewer: exact highlight, monospace, line numbers, no flash of the file top
-- [x] G7 Failed sources: unticked, not tickable, not counted
-- [x] G8 Web search: `language=en` sent to SearXNG (config/params only), bare homepages demoted for specific queries
-- [x] E2E tests for what Ludwig did not verify at Gate 1: PDF upload (incl. OCR warning), overview + one-time hint, checkbox scoping
-- [x] Backlog items written to docs/BACKLOG.md (not built)
+## 0. Ludwig's Gate 2 priorities (in order; each logged in DECISIONS.md)
+- [ ] P1a Answer checking handles claims about code (code-03, code-05 refused "unsupported" on Strix Halo); never weaken grounding
+- [ ] P1b Code retrieval finds ref-near-08 (Digest MD5 default) and ref-near-10 (`codes.too_many_requests`)
+- [ ] P2 Eval report: false refusals per category (docs/code/multi); Gate 3 criterion wired into the runner (`--max-false-refusals-code 1`)
+- [ ] P3 p95 latency tracked in GATES.md, flagged above 60 s (runner target flag)
+- [ ] E2E tests for Gate 2 UI items #3–#12 (badges + drawer, unverified, refusal card, code viewer, secrets report, failed sources, power labels, web search ranking, estimates, gate log), run against the phase-3 image
 
-## 1. Grounding layers 4–6 (SPEC §8)
-- [x] Layer 4: sentence verification with the grounding checker (max score over cited chunks ≥ verify_threshold 0.5); failing sentences removed; one regeneration if more than half fail; then the refusal rule
-- [x] Refusal rule: refuse if > 50% of sentences fail or the first sentence fails
-- [x] Layer 5: deterministic code checks (cited file/line ranges exist in the indexed snapshot; every backticked identifier occurs in its cited chunks)
-- [x] Grounding disabled → badge "Unverified"
-- [x] Badges: Verified · Partially verified (N removed; drawer "Unverified, not from your sources") · Refused · Unverified
-- [x] Layer 6: eval runner records scores; private-set support; threshold tuning report
+## 1. Code ingestion (SPEC §7.2, §7.3)
+- [ ] tree-sitter chunking for C#, TypeScript, JavaScript, Python: one chunk per function/method/class, prefixed with file path + enclosing symbol; symbols > 1,500 tokens split at statement boundaries; module-level code grouped up to 500 tokens; locator file + start_line + end_line + symbol
+- [ ] Fallback chunker stays for other languages (AL, X++, SQL, YAML, …)
+- [ ] Licenses: tree-sitter + grammars (MIT) in THIRD_PARTY_LICENSES.md
 
-## 2. Source viewer (SPEC §9, §12)
-- [x] Full viewer: documents by page, transcripts with timestamps, web by section, code with line numbers + commit
+## 2. Commits and refresh (SPEC §7.5)
+- [ ] Record HEAD commit; "Indexed at <short>, folder is N commits ahead. Refresh?" banner (N via commit graph; no GPL git binary)
+- [ ] Incremental refresh: re-index only changed files (content hash per file)
 
-## 3. Processing, cost and flow (SPEC §11)
-- [x] Estimates before adds above 2 minutes ("About N files, roughly M min on this PC") → confirm/cancel
-- [x] Queue view: ETA from calibration, pause / reorder / cancel across spaces; header "about M min left"
+## 3. Deterministic code checks (SPEC §8 layer 5)
+- [ ] Cited file/line ranges exist at the indexed commit; eval runner metric "cited ranges valid" against the checkout (Gate 3)
+- [ ] Secrets: planted fake secret in a generated test folder is skipped (Gate 3), test generated at runtime (never commit a secret-looking string)
 
-## 4. Gate logging (SPEC §5, §6)
-- [x] `gate` capability used as a fixed-choice router; every decision logged to `gate_log` (input, decision, confidence, user correction)
-
-## 5. Evaluation and tuning
-- [x] Runner: per-question top rerank score and verifier scores in a JSON sidecar; threshold sweep table
-- [x] Tune refuse/verify thresholds on the smoke set + public refusal set (sweep: no gain from moving them; Ludwig's private set at the gate); recorded in GATES.md
-
-## 6. Gate
-- [x] CI green, PR `phase-2 → main` (#3), `:phase-2-rc` published (e2e gate passes)
-- [x] Smoke + refusal set: refusal 100%, precision 97.4%, false refusals 3/22; GATES.md checklist
-- [x] `docker image prune -f`; stop and summarise — **waiting for Ludwig's Gate 2 verdict**
+## 4. Gate
+- [ ] CI green, PR `phase-3 → main`, `:phase-3-rc` published (e2e gate passes)
+- [ ] GATES.md Gate 3 checklist incl. per-category false refusals and p95 latency
+- [ ] `docker image prune -f`; stop and summarise
 
 ## Notes for a restarted session
-- Phase 1 merged (`65d07c7`), tagged `phase-1`. Phase 2 PR #3. Push tags as `refs/tags/phase-N`.
+- Phase 2 merged (`14db9aa`), tagged `phase-2`. Push tags as `refs/tags/phase-N`.
 - Never `git commit -a` while agents edit the tree; stage explicit paths.
-- ML work outside CI: use a separate venv (`UV_PROJECT_ENVIRONMENT=<scratch>/mlvenv uv sync --extra ml`) so
-  agents' `uv run` doesn't fight over backend/.venv.
+- ML work outside CI: `UV_PROJECT_ENVIRONMENT=<scratch>/mlvenv uv sync --frozen --extra ml`.
+- Build test images from committed HEAD only: `git archive HEAD | docker build -f docker/app.Dockerfile -`.
