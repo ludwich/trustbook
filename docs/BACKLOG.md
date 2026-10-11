@@ -18,7 +18,7 @@ usual locality and request-log rules.
 
 ## From Phase 2 tuning (2026-10-10)
 
-### Code-aware answer verification (candidate for Phase 3)
+### Code-aware answer verification (done in Phase 3: code judge D-045, tree-sitter chunks)
 The bundled grounding checker (HHEM, a prose NLI model) cannot judge claims that describe what code does.
 D-044 restates simple facts (assignments, defaults) so those verify, but process claims are still refused.
 Options to evaluate in Phase 3:
@@ -35,3 +35,8 @@ skill, so agents can add sources and ask grounded questions. It goes through the
 
 ### MCP server
 An MCP server wrapping the same client as the CLI (after Phase 3b).
+
+### Summary tree for overview questions
+An LLM-built summary tree (section → file/source → space) to answer overview questions ("what is this repo
+about?"). Summaries only route retrieval to the right children; they are never citable and never verified
+text — answers still cite the child chunks' exact lines. Builds on the Phase 3 parent/child retrieval.

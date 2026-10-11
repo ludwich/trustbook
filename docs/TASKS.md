@@ -36,8 +36,15 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
     document files chunked on whole lines (line locators claim only lines the chunk holds); `CHUNKER_VERSION` 4
   - [x] retrieval (D-059–062): content-ordered ties, callee definitions, agreement guard; chat (D-063/064): judge confirms checker passes
   - [x] attempt-2 measurement: run 1 passed; run 2 (2 code FR), real-use (p95 66 s) and Qwen3.8 reference failed
-  - [ ] round 2: section heading path in document chunk headers (ref-near-03), anchor matching (dotted names,
-    plural acronyms, inline markup), confirmation veto checks the full cited chunks, targeted retry, failed_sentences diagnostics
+  - [ ] round 2a: anchor matching (dotted names, plural acronyms, inline markup), confirmation veto checks the full
+    cited chunks, targeted retry, failed_sentences diagnostics
+  - [ ] round 2b (Ludwig): general parent/child retrieval — retrieve on small chunks, expand to capped parent context
+    for the prompt (docs: enclosing section with heading path; code: enclosing class / file outline + imports;
+    transcripts later: ~1–2k-token window with speakers + timestamps); citations always the child's exact
+    lines/timestamps, never the parent; replace the D-032 constant lookup and the callee lookup where possible
+    (DECISION); fixes ref-near-03 (release heading outside the chunk); CHUNKER_VERSION/calibration bump if chunks change
+- [ ] Latency: judge calls per answer in diagnostics + eval report; judge calls/answer and p95 in GATES.md;
+  p95 ≤ 60 s with Qwen3.6 (strict judge now also runs on prose and borderline passes)
 - [ ] F4 Run the full gate command 3× on the workbench; all 3 must pass; report all 3 in GATES.md
 - [x] F5 Eval runs use temperature 0 + fixed seed (per-request generation override used only by the runner; SPEC's 0.2 default unchanged)
 - [~] F6 Runner `--chat-endpoint` / `--chat-model` overrides (done); model name in the report header (done); gate run with a stronger reference model (Qwen3.8-27B-UD-Q4_K_XL, chosen by Ludwig) alongside Qwen3.6, both in GATES.md
