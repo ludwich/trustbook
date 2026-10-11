@@ -25,6 +25,7 @@ Files with syntax errors and languages without a grammar use the fallback chunke
 
 from __future__ import annotations
 
+import bisect
 import functools
 import logging
 import re
@@ -35,10 +36,12 @@ from typing import TYPE_CHECKING, Literal
 from app.chunking.code import chunk_code
 from app.chunking.document import ChunkDraft
 from app.chunking.header import header_line
+from app.chunking.imports import SourceFiles
+from app.chunking.structure import Import, Structure, class_key, module_key
 from app.chunking.tokens import TokenCounter
 
 if TYPE_CHECKING:
-    from tree_sitter import Language, Node
+    from tree_sitter import Language, Node, Query
 
 logger = logging.getLogger("trustbook.chunking")
 
@@ -196,6 +199,122 @@ GRAMMARS: dict[str, Grammar] = {
 }
 
 
+# Structure (D-077): blocks whose statements count as the enclosing level's own (``try:`` imports,
+# ``if TYPE_CHECKING:``), declarations that bind their ``name``, imports, and what a class's
+# declaration line leaves out.
+_BLOCK_TYPES = frozenset(
+    {"if_statement", "elif_clause", "else_clause", "try_statement", "except_clause"}
+    | {"except_group_clause", "finally_clause", "with_statement", "block", "catch_clause"}
+    | {"statement_block"}
+)
+_NAMED_DECLARATIONS = frozenset({"type_alias_declaration", "delegate_declaration"})
+_IMPORT_TYPES = frozenset(
+    {"import_statement", "import_from_statement", "future_import_statement", "using_directive"}
+)
+_DECL_PREFIX = frozenset({"attribute_list", "decorator", "comment"})
+_IDENTIFIER = re.compile(r"(?:[^\W\d]|\$)[\w$]*")
+_TARGET_PATTERNS = frozenset({"pattern_list", "tuple_pattern", "list_pattern", "tuple", "list"})
+_OPEN_SPACE = re.compile(r"([(\[]) ")
+_CLOSE_SPACE = re.compile(r" ([)\]])")
+_TRAILING_COMMA = re.compile(r",([)\]])")
+_FROM_IMPORT = re.compile(r"from\s*(\S+?)\s*import\b\s*(.*)", re.DOTALL)
+MAX_STRUCTURE_TEXT = 200
+
+
+def _target_names(node: Node | None) -> list[str]:
+    """The plain names an assignment target binds (``a``, ``a, b``); none for ``x.y`` / ``x[0]``."""
+    if node is None:
+        return []
+    if node.type == "identifier":
+        return [_name(node) or ""]
+    if node.type in _TARGET_PATTERNS:
+        return [name for child in node.named_children for name in _target_names(child)]
+    return []
+
+
+def _without_values(text: str) -> str:
+    """``text`` without ``= value`` inside brackets: ``record P(int X = 0)`` → ``record P(int X)``,
+    ``class A(B, metaclass=M)`` → ``class A(B, metaclass)``. Comparisons and ``=>`` stay."""
+    out: list[str] = []
+    depth = 0
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char in "([{<":
+            depth += 1
+        elif char in ")]}>" and not (char == ">" and i and text[i - 1] == "="):
+            depth = max(0, depth - 1)
+        elif (
+            char == "="
+            and depth > 0
+            and text[i + 1 : i + 2] not in ("=", ">")
+            and (not i or text[i - 1] not in "=!<>")
+        ):
+            inner = 0
+            j = i + 1
+            while j < len(text):
+                if text[j] in "([{<":
+                    inner += 1
+                elif text[j] in ")]}>":
+                    if inner == 0:
+                        break
+                    inner -= 1
+                elif text[j] == "," and inner == 0:
+                    break
+                j += 1
+            while out and out[-1] == " ":
+                out.pop()
+            i = j
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _python_import(
+    statement: str, path: str, files: SourceFiles | None
+) -> tuple[list[str], str | None]:
+    """``(names bound, target file)`` of a Python import statement on one line
+    (``from .compat import (a, b as c)``, ``import os.path, x as y``)."""
+    names: list[str] = []
+    from_import = _FROM_IMPORT.fullmatch(statement)
+    if from_import is not None:
+        module, imported = from_import.group(1), from_import.group(2)
+        items = [i.strip() for i in imported.strip().strip("()").split(",") if i.strip()]
+        for item in items:
+            name, _, alias = item.partition(" as ")
+            if name.strip() != "*":
+                names.append(alias.strip() or name.strip())
+        single = items[0].partition(" as ")[0].strip() if len(items) == 1 else None
+        target = files.python(path, module.strip(), single) if files is not None else None
+        return names, target
+    items = [i.strip() for i in statement.removeprefix("import ").split(",") if i.strip()]
+    for item in items:
+        name, _, alias = item.partition(" as ")
+        names.append(alias.strip() or name.strip().split(".")[0])  # ``import a.b`` binds ``a``
+    if files is None or len(items) != 1:
+        return names, None
+    return names, files.python(path, items[0].partition(" as ")[0].strip())
+
+
+def _class_keys(path: str, owner: tuple[str, ...]) -> tuple[str, str] | None:
+    """``(parent key, up key)`` of the class ``owner`` in ``path``; ``None`` for a class without a
+    usable name (``(anonymous)``)."""
+    try:
+        up = class_key(path, ".".join(owner[:-1])) if len(owner) > 1 else module_key(path)
+        return class_key(path, ".".join(owner)), up
+    except ValueError:
+        return None
+
+
+def _row_of(binding: tuple[int, str]) -> int:
+    return binding[0]
+
+
+def _clip(text: str, limit: int = MAX_STRUCTURE_TEXT) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 def language_for_path(path: str) -> str | None:
     """The tree-sitter language for ``path`` (``None``: use the fallback chunker)."""
     name = path.rsplit("/", 1)[-1]
@@ -230,6 +349,36 @@ def _language(name: str) -> Language | None:
     except (ImportError, ValueError):
         logger.warning("No tree-sitter grammar for %s; using the fallback chunker", name)
     return None
+
+
+@functools.cache
+def _statement_query(name: str) -> Query | None:
+    """A query for every named node kind of the grammar that :func:`_is_statement` accepts
+    (supertypes and hidden kinds left out), or ``None`` when it does not compile."""
+    language = _language(name)
+    if language is None:
+        return None
+    from tree_sitter import Query
+
+    supertypes = set(language.supertypes)
+    kinds = sorted(
+        {
+            kind
+            for i in range(language.node_kind_count)
+            if language.node_kind_is_named(i)
+            and language.node_kind_is_visible(i)
+            and i not in supertypes
+            and (kind := language.node_kind_for_id(i)) is not None
+            and _is_statement(kind)
+        }
+    )
+    if not kinds:
+        return None
+    try:
+        return Query(language, "[" + " ".join(f"({kind})" for kind in kinds) + "] @statement")
+    except Exception:  # an unusual grammar: the walk finds the same rows
+        logger.warning("No statement query for %s; walking the tree instead", name)
+        return None
 
 
 def _rows(node: Node) -> tuple[int, int]:
@@ -268,21 +417,46 @@ class _Piece:
     symbol: str | None
     kind: ChunkKind
     part: int | None = None  # 1, 2, … for the groups of a split data literal
+    # The class path whose family the piece belongs to (D-077); () for the module.
+    owner: tuple[str, ...] = ()
 
 
 class _FileChunker:
     """Chunks one parsed file. Rows are 0-based line numbers within the file."""
 
     def __init__(
-        self, text: str, lines: list[tuple[int, int]], counter: TokenCounter, grammar: Grammar
+        self,
+        text: str,
+        lines: list[tuple[int, int]],
+        counter: TokenCounter,
+        grammar: Grammar,
+        source: bytes = b"",
     ) -> None:
         self.text = text
         self.lines = lines
         self.line_text = [text[s:e] for s, e in lines]
         self.tokens = [counter.count(line) + 1 for line in self.line_text]
         self.grammar = grammar
+        self.source = source  # the parsed bytes (tree-sitter node offsets are into these)
         self.statement_rows: set[int] = set()
         self.pieces: list[_Piece] = []
+        # Structure (D-077), recorded during the walk: per class path its declaration row and
+        # value-free declaration; per owner (class path, () = module) the names it binds, by
+        # row; the module-level import statements.
+        self.classes: dict[tuple[str, ...], tuple[int, str | None]] = {}
+        self.bindings: dict[tuple[str, ...], list[tuple[int, str]]] = {}
+        self.import_nodes: list[Node] = []
+        self.binding_types = (
+            grammar.wrappers
+            | grammar.containers
+            | grammar.functions
+            | grammar.properties
+            | grammar.variables
+            | grammar.fields
+            | _DATA_DECLARATIONS
+            | _NAMED_DECLARATIONS
+            | {"expression_statement"}
+        )
 
     # --- line helpers ------------------------------------------------------------------------
 
@@ -299,7 +473,16 @@ class _FileChunker:
     def _sum(self, first: int, last: int) -> int:
         return sum(self.tokens[first : last + 1])
 
-    def _collect_statement_rows(self, root: Node) -> None:
+    def _collect_statement_rows(self, root: Node, language: str | None = None) -> None:
+        query = _statement_query(language) if language is not None else None
+        if query is not None:  # the same nodes as the walk below, found by tree-sitter (faster)
+            from tree_sitter import QueryCursor
+
+            for nodes in QueryCursor(query).captures(root).values():
+                for node in nodes:
+                    if _is_statement(node.type) and self._starts_line(node):
+                        self.statement_rows.add(node.start_point[0])
+            return
         stack = [root]
         while stack:
             node = stack.pop()
@@ -513,23 +696,29 @@ class _FileChunker:
         cursor = first
         for member in members:
             if member.first > cursor:
-                self._run(cursor, member.first - 1, cuts, run_symbol, run_target)
+                self._run(cursor, member.first - 1, cuts, run_symbol, run_target, scope)
             self._member(member, scope)
             cursor = member.last + 1
         if cursor <= last:
-            self._run(cursor, last, cuts, run_symbol, run_target)
+            self._run(cursor, last, cuts, run_symbol, run_target, scope)
 
     def _member(self, member: _Member, scope: tuple[str, ...]) -> None:
         symbol = ".".join((*scope, member.name))
         if member.kind == "data":
-            self._literal(member, symbol)
+            self._literal(member, symbol, scope)
             return
         body = member.node.child_by_field_name("body")
+        if member.kind == "container":
+            path = (*scope, member.name)
+            self.classes[path] = (member.node.start_point[0], self._declaration(member.node))
+            if body is not None:
+                self._collect_bindings(list(body.named_children), path)
         if member.kind == "function" or body is None:
             kind: ChunkKind = "class" if member.kind == "container" else "function"
             if kind == "function" and scope:
                 kind = "method"
-            self._function(member.first, member.last, symbol, kind)
+            owner = (*scope, member.name) if kind == "class" else scope
+            self._function(member.first, member.last, symbol, kind, owner)
             return
         self._region(
             member.first,
@@ -543,19 +732,29 @@ class _FileChunker:
 
     # --- packing -----------------------------------------------------------------------------
 
-    def _function(self, first: int, last: int, symbol: str, kind: ChunkKind) -> None:
+    def _function(
+        self, first: int, last: int, symbol: str, kind: ChunkKind, owner: tuple[str, ...]
+    ) -> None:
         tokens = self._sum(first, last)
         if tokens <= SYMBOL_MAX_TOKENS:
-            self._emit(first, last, symbol, kind)
+            self._emit(first, last, symbol, kind, owner=owner)
             return
         parts = -(-tokens // SYMBOL_MAX_TOKENS)
         target = -(-tokens // parts)
         cuts = sorted(r for r in self.statement_rows if first < r <= last)
         for a, b in self._pack(first, last, cuts, target, SYMBOL_MAX_TOKENS):
-            self._emit(a, b, symbol, kind)
+            self._emit(a, b, symbol, kind, owner=owner)
 
-    def _run(self, first: int, last: int, cuts: list[int], symbol: str | None, target: int) -> None:
-        """Module-level code, or a class's own lines (``symbol``: the class)."""
+    def _run(
+        self,
+        first: int,
+        last: int,
+        cuts: list[int],
+        symbol: str | None,
+        target: int,
+        owner: tuple[str, ...],
+    ) -> None:
+        """Module-level code, or a class's own lines (``symbol``: the class, ``owner`` its path)."""
         while first <= last and self._blank(first):
             first += 1
         while last >= first and self._blank(last):
@@ -566,9 +765,9 @@ class _FileChunker:
         kind: ChunkKind = "class" if symbol else "module"
         inside = [r for r in cuts if first < r <= last]
         for a, b in self._pack(first, last, inside, target, limit):
-            self._emit(a, b, symbol, kind)
+            self._emit(a, b, symbol, kind, owner=owner)
 
-    def _literal(self, member: _Member, symbol: str) -> None:
+    def _literal(self, member: _Member, symbol: str, owner: tuple[str, ...]) -> None:
         """A data literal: balanced groups of whole elements, each named ``symbol`` (part n).
 
         Cuts only fall where an element starts a line; the comment lines directly before an
@@ -577,7 +776,7 @@ class _FileChunker:
         first, last = member.first, member.last
         total = self._sum(first, last)
         if total <= DATA_TARGET_TOKENS + DATA_TARGET_TOKENS // 2:
-            self._emit(first, last, symbol, "data")
+            self._emit(first, last, symbol, "data", owner=owner)
             return
         parts = -(-total // DATA_TARGET_TOKENS)
         target = -(-total // parts)
@@ -598,7 +797,7 @@ class _FileChunker:
         groups = self._pack(first, last, sorted(cuts), target, SYMBOL_MAX_TOKENS, balanced=True)
         pieces = [(a, b) for a, b in groups if not self._empty(a, b)]
         for n, (a, b) in enumerate(pieces, start=1):
-            self._emit(a, b, symbol, "data", n if len(pieces) > 1 else None)
+            self._emit(a, b, symbol, "data", n if len(pieces) > 1 else None, owner=owner)
 
     def _units(self, first: int, last: int, cuts: Iterable[int]) -> Iterator[tuple[int, int]]:
         """Row ranges of ``first..last`` split at ``cuts``."""
@@ -667,17 +866,25 @@ class _FileChunker:
         return [(a, b) for a, b, _ in groups]
 
     def _emit(
-        self, first: int, last: int, symbol: str | None, kind: ChunkKind, part: int | None = None
+        self,
+        first: int,
+        last: int,
+        symbol: str | None,
+        kind: ChunkKind,
+        part: int | None = None,
+        *,
+        owner: tuple[str, ...] = (),
     ) -> None:
         while first < last and self._blank(first):
             first += 1
         while last > first and self._blank(last):
             last -= 1
         if not self._empty(first, last):
-            self.pieces.append(_Piece(first, last, symbol, kind, part))
+            self.pieces.append(_Piece(first, last, symbol, kind, part, owner))
 
-    def chunk(self, root: Node) -> list[_Piece]:
-        self._collect_statement_rows(root)
+    def chunk(self, root: Node, language: str | None = None) -> list[_Piece]:
+        self._collect_statement_rows(root, language)
+        self._collect_bindings(list(root.named_children), ())
         self._region(
             0,
             len(self.lines) - 1,
@@ -688,6 +895,217 @@ class _FileChunker:
             MODULE_TARGET_TOKENS,
         )
         return sorted(self.pieces, key=lambda p: p.first)
+
+    # --- structure (D-077) -------------------------------------------------------------------
+
+    def _level_nodes(self, children: list[Node]) -> Iterator[Node]:
+        """The statements at one level: namespace members and the statements inside top-level
+        ``if`` / ``try`` / ``with`` blocks count as the level's own."""
+        for child in children:
+            if child.type in _BLOCK_TYPES:
+                yield from self._level_nodes(list(child.named_children))
+                continue
+            if self.grammar.namespaces:
+                inner = self._unwrap(child)
+                body = inner.child_by_field_name("body")
+                if inner.type in self.grammar.namespaces and body is not None:
+                    yield from self._level_nodes(list(body.named_children))
+                    continue
+            yield child
+
+    def _collect_bindings(self, children: list[Node], owner: tuple[str, ...]) -> None:
+        """Record the names bound at the level of ``owner`` (and, for the module, its imports)."""
+        found = self.bindings.setdefault(owner, [])
+        for node in self._level_nodes(children):
+            if owner == () and node.type in _IMPORT_TYPES:
+                self.import_nodes.append(node)
+                continue
+            found.extend(self._bound_names(node, at_module=owner == ()))
+
+    def _bound_names(self, node: Node, *, at_module: bool) -> list[tuple[int, str]]:
+        """``(row, name)`` of each name the statement ``node`` binds at its own level."""
+        grammar = self.grammar
+        if node.type not in self.binding_types:  # comments, calls, ``pass``, conditions
+            return []
+        inner = self._unwrap(node)
+        kind = inner.type
+        row = inner.start_point[0]
+        names: list[str] = []
+        if (
+            kind in grammar.containers
+            or kind in grammar.functions
+            or kind in grammar.properties
+            or kind in _NAMED_DECLARATIONS
+        ):
+            names.append(_name(inner.child_by_field_name("name")) or "")
+        elif kind in grammar.variables or kind in _DATA_DECLARATIONS:
+            holder = inner
+            if not any(c.type == "variable_declarator" for c in holder.named_children):
+                holder = next(
+                    (c for c in inner.named_children if c.type == "variable_declaration"), inner
+                )
+            for declarator in holder.named_children:
+                if declarator.type == "variable_declarator":
+                    names.append(_name(declarator.child_by_field_name("name")) or "")
+        elif kind in grammar.fields:
+            target = inner.child_by_field_name("property") or inner.child_by_field_name("name")
+            names.append(_name(target) or "")
+        elif kind == "expression_statement":
+            for child in inner.named_children:
+                assignment: Node | None = child
+                while assignment is not None and assignment.type in _DATA_ASSIGNMENTS:
+                    right = assignment.child_by_field_name("right")
+                    # ``X: int`` (no value) declares a class attribute; at module level only an
+                    # assignment binds a constant, as the column-0 ``NAME =`` lookup reads it.
+                    if right is not None or not at_module:
+                        names.extend(_target_names(assignment.child_by_field_name("left")))
+                    assignment = right
+        return [(row, name) for name in names if _IDENTIFIER.fullmatch(name)]
+
+    def _flat(self, node: Node, start_byte: int | None = None, end_byte: int | None = None) -> str:
+        """``node``'s source (``start_byte``..``end_byte`` of it) on one line: comments left out,
+        whitespace collapsed, no space inside brackets and no trailing comma."""
+        start = node.start_byte if start_byte is None else start_byte
+        end = node.end_byte if end_byte is None else end_byte
+        raw = self.source[start:end]
+        if any(m in raw for m in (b"#", b"//", b"/*")):  # else no comment: skip the walk
+            skip: list[tuple[int, int]] = []
+            stack = [node]
+            while stack:
+                current = stack.pop()
+                if current.type == "comment":
+                    skip.append((current.start_byte, current.end_byte))
+                    continue
+                # Only the nodes inside the range (a class's header, not its whole body).
+                stack.extend(
+                    c for c in current.children if c.start_byte < end and c.end_byte > start
+                )
+            parts: list[bytes] = []
+            cursor = start
+            for a, b in sorted(skip):
+                if a >= end:
+                    break
+                parts.append(self.source[cursor:a])
+                cursor = max(cursor, b)
+            parts.append(self.source[cursor:end] if cursor < end else b"")
+            raw = b" ".join(parts)
+        flat = " ".join(raw.decode("utf-8", errors="replace").split())
+        if "(" in flat or "[" in flat:
+            flat = _CLOSE_SPACE.sub(r"\1", _OPEN_SPACE.sub(r"\1", flat))
+            flat = _TRAILING_COMMA.sub(r"\1", flat)
+        return flat
+
+    def _declaration(self, node: Node) -> str | None:
+        """A class's declaration line without values: ``class HTTPAdapter(BaseAdapter)``.
+
+        From its first keyword or modifier (attributes and decorators left out) to its body,
+        a trailing ``:`` / ``;`` dropped, defaults (``= value``) removed.
+        """
+        first = next((c for c in node.children if c.type not in _DECL_PREFIX), None)
+        if first is None:
+            return None
+        body = node.child_by_field_name("body")
+        flat = self._flat(node, first.start_byte, body.start_byte if body is not None else None)
+        flat = _without_values(flat).rstrip(":;{ ")
+        return _clip(flat) or None
+
+    def _import(self, node: Node, path: str, files: SourceFiles | None) -> Import:
+        names: list[str] = []
+        target: str | None = None
+        kind = node.type
+        text = self._flat(node)  # joined by the node: brackets, line breaks and comments
+        if self.grammar is GRAMMARS["python"]:
+            if kind != "future_import_statement":
+                names, target = _python_import(text, path, files)
+        elif kind == "import_statement":  # JavaScript / TypeScript
+            source = node.child_by_field_name("source")
+            for clause in node.named_children:
+                if clause.type == "import_require_clause":
+                    source = clause.child_by_field_name("source")
+                    names.extend(_name(c) or "" for c in clause.named_children[:1])
+                if clause.type != "import_clause":
+                    continue
+                for part in clause.named_children:
+                    if part.type == "identifier":
+                        names.append(_name(part) or "")
+                    elif part.type == "namespace_import":
+                        names.extend(_name(c) or "" for c in part.named_children[-1:])
+                    elif part.type == "named_imports":
+                        for spec in part.named_children:
+                            if spec.type == "import_specifier":
+                                bound = spec.child_by_field_name(
+                                    "alias"
+                                ) or spec.child_by_field_name("name")
+                                names.append(_name(bound) or "")
+            if source is not None and files is not None:
+                fragment = next((c for c in source.named_children), None)
+                target = files.script(path, _name(fragment) or "")
+        elif kind == "using_directive":  # C#: ``using Alias = A.B;`` binds Alias
+            alias = node.child_by_field_name("name")
+            if alias is not None:
+                names.append(_name(alias) or "")
+        first, last = _rows(node)
+        return Import(
+            line=first + 1,
+            end_line=last + 1,
+            text=_clip(text),
+            names=tuple(dict.fromkeys(n for n in names if _IDENTIFIER.fullmatch(n))),
+            target=target,
+        )
+
+    def structures(
+        self, pieces: list[_Piece], path: str, files: SourceFiles | None
+    ) -> list[tuple[str | None, Structure | None]]:
+        """Each piece's parent key and structure, in the order of ``pieces`` (file order).
+
+        A method's parent is its class; every class chunk (head and later class-level runs) has
+        its own class as parent; functions, module runs and module-level data have the module.
+        ``head``: the class chunk holding the declaration line, and the file's first chunk.
+        ``defines``: names bound at the parent's level whose statement starts in the piece.
+        ``imports``: module-level imports starting in a module chunk.
+        """
+        imports = sorted(
+            (self._import(node, path, files) for node in self.import_nodes),
+            key=lambda i: i.line,
+        )
+        bindings = {o: sorted(found, key=_row_of) for o, found in self.bindings.items()}
+        import_rows = [i.line - 1 for i in imports]
+        class_keys: dict[tuple[str, ...], tuple[str, str] | None] = {}
+        result: list[tuple[str | None, Structure | None]] = []
+        for index, piece in enumerate(pieces):
+            rows = range(piece.first, piece.last + 1)
+            found = bindings.get(piece.owner, [])
+            low = bisect.bisect_left(found, piece.first, key=_row_of)
+            high = bisect.bisect_right(found, piece.last, key=_row_of)
+            defines = tuple(dict.fromkeys(name for _, name in found[low:high]))
+            if not piece.owner:
+                own = tuple(
+                    imports[
+                        bisect.bisect_left(import_rows, piece.first) : bisect.bisect_right(
+                            import_rows, piece.last
+                        )
+                    ]
+                )
+                structure = Structure(
+                    "module", path, None, index == 0, defines=defines, imports=own
+                )
+                result.append((module_key(path), structure))
+                continue
+            title = ".".join(piece.owner)
+            if piece.owner not in class_keys:
+                class_keys[piece.owner] = _class_keys(path, piece.owner)
+            keys = class_keys[piece.owner]
+            if keys is None:  # an anonymous class has no key
+                result.append((None, None))
+                continue
+            key, up = keys
+            declaration_row, declaration = self.classes.get(piece.owner, (-1, None))
+            head = piece.kind == "class" and declaration_row in rows
+            structure = Structure(
+                "class", title, up, head, declaration if head else None, defines=defines
+            )
+            result.append((key, structure))
+        return result
 
 
 def _line_spans(text: str, start: int, end: int) -> list[tuple[int, int]]:
@@ -703,21 +1121,34 @@ def _line_spans(text: str, start: int, end: int) -> list[tuple[int, int]]:
 
 
 def chunk_syntax(
-    text: str, start: int, end: int, path: str, counter: TokenCounter, language: str
+    text: str,
+    start: int,
+    end: int,
+    path: str,
+    counter: TokenCounter,
+    language: str,
+    files: SourceFiles | None = None,
 ) -> list[ChunkDraft] | None:
-    """tree-sitter chunks of the file at ``text[start:end]``, or ``None`` when it does not parse."""
+    """tree-sitter chunks of the file at ``text[start:end]``, or ``None`` when it does not parse.
+
+    Each chunk carries its parent key and structure (D-077); ``files``: the source's files, to
+    resolve import targets (none without it).
+    """
     compiled = _language(language)
     if compiled is None:
         return None
     from tree_sitter import Parser
 
-    tree = Parser(compiled).parse(text[start:end].encode("utf-8"))
+    source = text[start:end].encode("utf-8")
+    tree = Parser(compiled).parse(source)
     if tree.root_node.has_error:
         return None
     lines = _line_spans(text, start, end)
-    pieces = _FileChunker(text, lines, counter, GRAMMARS[language]).chunk(tree.root_node)
+    chunker = _FileChunker(text, lines, counter, GRAMMARS[language], source)
+    pieces = chunker.chunk(tree.root_node, language)
+    parents = chunker.structures(pieces, path, files)
     drafts: list[ChunkDraft] = []
-    for piece in pieces:
+    for piece, (parent_key, structure) in zip(pieces, parents, strict=True):
         c_start, c_end = lines[piece.first][0], lines[piece.last][1]
         body = header_line(path, piece.symbol, piece.first + 1, piece.last + 1, piece.part)
         body += "\n" + text[c_start:c_end]
@@ -728,18 +1159,26 @@ def chunk_syntax(
             "symbol": piece.symbol,
             "kind": piece.kind,
         }
-        drafts.append(ChunkDraft(body, c_start, c_end, locator, counter.count(body)))
+        drafts.append(
+            ChunkDraft(body, c_start, c_end, locator, counter.count(body), parent_key, structure)
+        )
     return drafts
 
 
 def chunk_source_code(
-    text: str, start: int, end: int, path: str, counter: TokenCounter
+    text: str,
+    start: int,
+    end: int,
+    path: str,
+    counter: TokenCounter,
+    files: SourceFiles | None = None,
 ) -> list[ChunkDraft]:
-    """Chunks of one code file: tree-sitter when the language has a grammar, else SPEC §7.3."""
+    """Chunks of one code file: tree-sitter when the language has a grammar, else SPEC §7.3
+    (without parent: fallback chunks have no structure, D-077)."""
     language = language_for_path(path)
     if language is not None:
         try:
-            drafts = chunk_syntax(text, start, end, path, counter, language)
+            drafts = chunk_syntax(text, start, end, path, counter, language, files)
         except Exception:
             logger.warning("tree-sitter chunking failed for a %s file", language, exc_info=True)
             drafts = None

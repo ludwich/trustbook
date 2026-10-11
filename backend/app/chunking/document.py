@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.chunking.headings import FENCE, Heading
+from app.chunking.structure import Structure
 from app.chunking.tokens import TokenCounter
 from app.chunking.units import Unit, split_units
 
@@ -25,17 +26,25 @@ MIN_SECTION_TOKENS = 100
 Locate = Callable[[int, int], dict[str, Any]]
 # A chunk's first line for its body ``text[start:end]`` (a folder file's ``File:`` line).
 Header = Callable[[int, int], str]
+# A chunk's parent for its body ``text[start:end]``: ``(parent key, structure)`` (D-077).
+Parent = Callable[[int, int], tuple[str | None, Structure | None]]
 
 
 @dataclass(frozen=True)
 class ChunkDraft:
-    """A chunk before it gets an id: ``text`` is what is embedded and shown to the model."""
+    """A chunk before it gets an id: ``text`` is what is embedded and shown to the model.
+
+    ``parent_key`` / ``structure``: the chunk's parent (D-077), ``None`` when it has none. They
+    never change ``text`` or ``locator``: parent data is not citable.
+    """
 
     text: str
     start: int
     end: int
     locator: dict[str, Any]
     token_count: int
+    parent_key: str | None = None
+    structure: Structure | None = None
 
 
 def _overlap(previous: list[Unit], limit: int, *, align_lines: bool = False) -> list[Unit]:
@@ -170,6 +179,7 @@ def chunk_document(
     overlap: int = OVERLAP_TOKENS,
     prefix: str = "",
     header: Header | None = None,
+    parent: Parent | None = None,
     headings: Sequence[Heading] | None = None,
     fence: re.Pattern[str] = FENCE,
     align_lines: bool = False,
@@ -178,7 +188,8 @@ def chunk_document(
 
     ``align_lines``: chunks hold whole lines (for files, whose locators name lines), indentation
     of the first line included. ``header(start, end)``: a first line naming where the body is
-    (instead of the fixed ``prefix``). ``headings``: the document's headings
+    (instead of the fixed ``prefix``). ``parent(start, end)``: the chunk's parent key and
+    structure (D-077; none without it). ``headings``: the document's headings
     (:func:`app.chunking.headings.find_headings`) instead of the Markdown ``#`` lines, with
     ``fence`` the lines that open or close a code block in their syntax.
     """
@@ -207,6 +218,7 @@ def chunk_document(
             c_start, c_end = _whole_lines(text, c_start, c_end, start, end)
         body = text[c_start:c_end]
         first = header(c_start, c_end) + "\n" if header is not None else prefix
+        parent_key, structure = parent(c_start, c_end) if parent is not None else (None, None)
         drafts.append(
             ChunkDraft(
                 text=first + body,
@@ -214,6 +226,8 @@ def chunk_document(
                 end=c_end,
                 locator=locate(c_start, c_end),
                 token_count=counter.count(first + body),
+                parent_key=parent_key,
+                structure=structure,
             )
         )
     return drafts
