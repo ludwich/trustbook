@@ -940,54 +940,74 @@ under test. Choices under §15:
   - `HTTPAdapter`: a method chunk's class is named only by its symbol `HTTPAdapter.send`.
 - **Decision** (all general, none specific to `requests`):
   - Quoted-phrase anchors and verbatim checks (layer 5 backticked spans and the judge's `code` anchors) also match
-    after removing inline markup on **both** sides (RST ``` ``x`` ```, Markdown `` `x` ``, `*x*`, `**x**`, `_x_`)
-    and collapsing whitespace. Emphasis needs a non-word character outside its markers and no space inside, so
-    `__init__`, `*args, **kwargs`, `2*x*y` and `_codes` are untouched. One trailing `.,;:` of a quoted phrase is not
-    required (English puts the sentence's full stop inside the quotes). The exact match is tried first; the
-    normalised one only adds matches where every word is present in order: a quoted phrase with one word changed
-    (`status code` for `response code`) still fails (test, and live: vetoed, "not in the cited chunks").
+    after removing inline markup and collapsing whitespace. The source side drops RST ``` ``x`` ```, Markdown
+    `` `x` ``, `*x*` and `**x**`; the sentence side drops only ``` ``x`` ``` and `` `x` `` (a sentence's `*test*` is
+    a glob, not emphasis). Emphasis needs a non-word character outside its markers and no space inside, so
+    `*args, **kwargs` and `2*x*y` are untouched. One trailing `.,;:` of a quoted phrase is not required (English
+    puts the sentence's full stop inside the quotes). The exact match is tried first; the normalised one only adds
+    matches where every word is present in order: a quoted phrase with one word changed (`status code` for
+    `response code`) still fails (test, and live: vetoed, "not in the cited chunks").
+  - **Review correction:** underscore emphasis (`_x_`) is not removed. It turned Python sunder names into words on
+    both sides (`_value_` → `value`, `self._value_` → `self.value`), so layer 5 passed `` `self.value` `` against a
+    chunk with only `self._value_` and `` `_missing_` `` against prose saying "missing".
+  - **Review correction:** a quoted phrase must match at word boundaries and may not start right after a negation
+    (not, no, never, nor, cannot, neither, …n't), in the raw and in the normalised text. Stripping `**not**` had
+    made "a check to see if the response code is 200 OK" a substring of "is not a check to see …", so the inverted
+    quote was accepted (as a rescue, too). The raw path was a plain substring test before, so this is also
+    stricter than phase 3. A true sentence that negates outside the quote (`is not "a check …"`) is now vetoed:
+    a false refusal, never a false pass.
   - Two or more capitals followed by `s` (URLs, APIs, IDs) is a prose word, like HTTP and URL (D-045). Names with
     digits (`MD5s`) stay anchors.
   - A chunk's names (its header line and `locator.symbol`) include each dotted component (`HTTPAdapter.send` →
     `HTTPAdapter`, `send`), from the symbol and from the header's symbol (a split literal's `(part N)` excluded).
-- **Grounding:** nothing passes that would not pass with the markup typed out; layer 5 still needs every
+- **Grounding:** nothing passes that would not pass with the source's markup typed out; layer 5 still needs every
   backticked name in a cited chunk.
 
-### D-073 Confirmation vetoes look at the whole cited chunks; rescues keep evidence-line anchoring
+### D-073 Confirmation evidence lines count as their docstring field; rescues keep evidence-line anchoring
 - **Finding:** a checker-passed true sentence was vetoed when the judge said *supported* but named too few lines:
   "When max_retries is left at its default, Requests does not retry failed connections." cites `HTTPAdapter`
   (adapters.py 158-199) whose docstring has `:param max_retries:` on one line and "By default, Requests does not
-  retry failed connections" two lines below; the judge named only the latter, so the D-063 rule "evidence lines
-  missing an anchor" vetoed it. Same for the `200` and `requests.codes` vetoes in the gate log.
-- **Decision (SPEC §15: the judge confirms; it does not have to find every line):** for a sentence the checker
-  passed, a verdict vetoes when it
+  retry failed connections" two lines below, in the same field; the judge named only the latter, so the D-063 rule
+  "evidence lines missing an anchor" vetoed it.
+- **Decision:** for a sentence the checker passed (a confirmation), each evidence line of a code chunk counts as
+  the whole **docstring field** it is in: a reStructuredText field (`:param name:`, `:returns:`, `:raises X:`) or a
+  Google-style entry (`name (type): text`) under a section line (`Args:`, `Returns:`, `Raises:`, …), plus its
+  continuation lines (indented deeper, no blank line). A field's name is the subject of every line of it, so the
+  binding between the anchor and the judged statement is kept. A verdict still vetoes when it
   1. says not supported (unchanged), or
   2. names evidence outside the sentence's cited chunks or outside a chunk's lines (unchanged), or
-  3. names evidence lines holding a **longer name** that starts with a missing anchor (`socks5h` for `socks5`,
-     `2000` for `200`: the judge conflated two names), or
-  4. leaves an anchor out of its evidence lines **and** the anchor occurs nowhere in the cited chunks (whole text,
-     header line, file and symbols; a split literal's `(part N)` is not searched, D-058).
-  Anchors missing only from the evidence lines no longer veto. The repeat-alone rule (D-063) is unchanged. A
-  **rescue** (checker failed) still needs every anchor in the evidence lines (D-045): there the judge's lines are
-  the only support. The outcome carries the absent anchors (`JudgeOutcome.absent`) for D-074.
+  3. names evidence lines that, widened to their docstring fields, lack one of the sentence's anchors (D-063,
+     narrowed only by the field). When those lines hold a longer name starting with the anchor (`socks5h` for
+     `socks5`) the reason says so.
+  Ordinary code, list items (changelog bullets) and prose chunks (web pages, PDFs, transcripts: numbered a sentence
+  per line) are never widened. The repeat-alone rule (D-063) is unchanged. A **rescue** (checker failed) still needs
+  every anchor in the named evidence lines (D-045). `JudgeOutcome.absent` lists a veto's anchors that are in none
+  of the cited chunks, for D-074; it never decides a veto.
+- **Review correction (the first version of D-073 is withdrawn):** it dropped the veto whenever every missing
+  anchor occurred *anywhere* in the cited chunks (header line included). For a checker pass that is the test layer
+  5 had already applied, so the evidence-line binding did nothing: a name or value swapped within one chunk passed
+  (reproduced: `` `DEFAULT_RETRIES` is 10 `` next to `DEFAULT_POOLSIZE = 10`; `` `DEFAULT_POOLSIZE` is 64 `` with
+  64 only in the header's `(lines 60-64)`; "the warranty lasts 30 days" on a page saying 12 months and returns
+  within 30 days; `pool_block` set to `DEFAULT_POOLSIZE`), and it lost the one measured correct veto of the gate
+  runs: ref-near-03, "CPython 3.12 support was added in 2.31" citing HISTORY.md 172-213, judge evidence line 188;
+  the chunk's next release heading `2.31.0 (2023-05-22)` at line 205 made `2.31` count as found. Its "Measured"
+  lists had no same-chunk swap, so they could not show this. All of these are vetoed again (tests).
 - **Measured** (live Smoke space in `trustbook-g3`, real HHEM, reranker and judge Qwen3.6-35B-A3B, seed 42; scripts
-  `scratchpad/r2b/claims.py`, `replay.py`):
-  - 51 hand-written claims (the D-045 and D-063 false-claim lists, rebuilt on the current chunks, plus the round-2
-    true sentences), with the checker replaced by a stub that passes everything so **every** claim goes through
-    the confirmation: new code 51/51 as expected (twice), the `p3g` code 49/51 (it vetoed the true `max_retries`
-    and quoted-docstring sentences). Every false claim was vetoed or failed layer 5: the 9 distinct D-063 false
-    checker passes (socks5h→client ×2 phrasings × web and `.rst`, the D-063 c2 chunk rebuilt without its socks5h
-    sentence ×2 phrasings, `Response.ok` "only exactly 200", `trust_env` True, `HOME_NETRC`) all vetoed with "the
-    judge found no support"; the quoted phrase with a changed word vetoed on rule 4.
-  - The round-2 true sentences with 2 false controls (multi-02 HTTPAdapter mounts ×2 phrasings, a `URLs`
-    longest-prefix sentence, `max_retries`, the quoted docstring; false: `SOCKSAdapter` mounts, "shortest" prefix,
-    the changed-word quote), forced confirmation, 2 runs each: `p3g` 13/16 both times (vetoed `URLs`,
-    `max_retries`, the quote), new 16/16 both times.
-  - With the real checker: 50/51 (the one miss is a true prose paraphrase at 0.36, never rescued since D-064).
-  - 36 recorded first replies (12 questions × 3, 108 sentences) replayed through the `p3g` and the new verifier:
-    106 identical; the `max_retries` sentence vetoed before is kept; one code-05 sentence rescued in the `p3g`
-    replay was not rescued in the new one (the judge named other lines; the strict rescue path is unchanged, so
-    this is judge noise). No reply's outcome (verified, partial, refused) changed.
+  `scratchpad/r2c/claims3.py` = the round-2 `r2b/claims.py` 56 claims + 6 review false claims, `r2b/replay.py`):
+  - Forced confirmation (checker stub passes everything), twice: 61/62 both times. The `max_retries` sentence is
+    kept ("not in the evidence lines: max_retries (in their docstring field)"); the quoted docstring, `URLs` and
+    HTTPAdapter sentences pass; every D-045/D-063 false claim fails; the review's false claims fail (2.31 vetoed
+    "not in the evidence lines: 2.31"; the negation-dropping quote ×2, `DEFAULT_RETRIES` 10, `DEFAULT_POOLSIZE` 0:
+    "the judge found no support"). The one miss is the false "added in the release preceding 2.31.0": the judge
+    names lines that hold `2.31.0` and says supported. The `p3g` verifier passes it identically (not a regression;
+    the 2.32.0 heading is in the previous chunk, so the judge cannot see which release the entry is under; root
+    cause is missing section context, see the gate notes).
+  - Real checker: 59/62: the false "preceding 2.31.0" above; the true prose paraphrase at 0.36 (never rescued since
+    D-064); the true "mounts one HTTPAdapter" at 0.41, a rescue the judge did not anchor (the strict rescue path is
+    unchanged; the first D-073 code and this one fail it identically).
+  - 36 recorded first replies (108 sentences) replayed: 107 identical to the first D-073 code; the one difference
+    is a code-05 rescue the judge's lines supported this time (judge noise, the rescue path is unchanged). Against
+    `p3g`, the `max_retries` sentence vetoed before is kept.
 
 ### D-074 The regeneration is told which sentences failed and why
 - **Finding:** the one regeneration (D-063) only said "Some sentences were not supported", without saying which. On
@@ -1015,7 +1035,7 @@ under test. Choices under §15:
 - Refused (`unsupported`) and partially verified answers store `diagnostics.failed_sentences: [{"text", "reason"}]`
   for the reply the outcome rests on (the second after a regeneration, unless it was unusable), both capped at 300
   characters. Reasons: the layer 5 problems, `judge veto: <reason>`, `checker score 0.31 < 0.5` (plus
-  `; judge: <reason>` when a rescue was refused, e.g. "not in the evidence lines: x (all in the cited chunks)"),
+  `; judge: <reason>` when a rescue was refused, e.g. "not in the evidence lines: x (in their docstring field)"),
   or `no citations`. **Why:** a false refusal stored no sentence text, so the gate runs could only be diagnosed by
   re-running the model.
 

@@ -529,20 +529,26 @@ citing code only).
 
 ### Gate 3 round 2: anchors, confirmation, regeneration feedback, failed sentences (D-072–D-076)
 - **Anchor matching (D-072).** Quoted-phrase anchors and verbatim checks (layer 5's backticked spans, the judge's
-  `code` anchors) also match after inline markup is removed on **both** sides and whitespace runs are collapsed:
-  RST literals (``` ``x`` ```), Markdown code spans (`` `x` ``), emphasis `*x*`, `**x**`, `_x_` (only with a
-  non-word character outside the markers, so `__init__`, `*args`, `2*x*y` are untouched). One trailing `.,;:` of a
-  quoted phrase is not required. Every word must still be there in order: a quoted phrase with one word changed
-  fails. Plural acronyms (two or more capitals + `s`: URLs, APIs, IDs) are prose words, not identifier anchors. A
-  chunk's names (header line and `locator.symbol`) include each dotted component (`HTTPAdapter.send` →
-  `HTTPAdapter`, `send`).
+  `code` anchors) also match after inline markup is removed and whitespace runs are collapsed. The **source** side
+  drops RST literals (``` ``x`` ```), Markdown code spans (`` `x` ``) and asterisk emphasis `*x*`, `**x**` (only
+  with a non-word character outside the markers, so `*args`, `2*x*y` are untouched); the **sentence** side drops
+  literals and code spans only. Underscores are never markup (`_value_`, `_missing_`, `__init__` stay names). One
+  trailing `.,;:` of a quoted phrase is not required. A quoted phrase must match at word boundaries and not right
+  after a negation (`not`, `no`, `never`, `nor`, `cannot`, `neither`, `…n't`), raw or normalised: "a check to see
+  …" quoted from "is **not** a check to see …" fails. Every word must still be there in order: a quoted phrase
+  with one word changed fails. Plural acronyms (two or more capitals + `s`: URLs, APIs, IDs) are prose words, not
+  identifier anchors. A chunk's names (header line and `locator.symbol`) include each dotted component
+  (`HTTPAdapter.send` → `HTTPAdapter`, `send`).
 - **Confirmation veto (D-073).** For a checker-passed sentence the judge's verdict vetoes when it says *not
-  supported*, names evidence outside the sentence's cited chunks or outside a cited chunk's lines, names evidence
-  lines that hold a longer name starting with a missing anchor (`socks5h` for `socks5`), or when an anchor is
-  missing from the evidence lines **and** from the whole text of every cited chunk (header line, file and symbol
-  included; a split literal's `(part N)` excluded). Anchors missing only from the evidence lines (the judge named
-  too few lines) no longer veto. The repeat-alone rule (D-063) is unchanged. Rescues (checker failed) keep the
-  strict D-045 anchoring to the evidence lines.
+  supported*, names evidence outside the sentence's cited chunks or outside a cited chunk's lines, or names
+  evidence lines that lack one of the sentence's anchors (D-063). For that last test, and only for a
+  confirmation, each evidence line of a **code** chunk is widened to the **docstring field** it belongs to: an RST
+  field (`:param max_retries:`, `:returns:`, `:raises X:`) or a Google-style entry under a section line (`Args:`,
+  `Returns:`, …), with its continuation lines (indented deeper, no blank line). Ordinary code, list items and prose
+  chunks are never widened, and the rest of the cited chunks never counts (a value elsewhere in a chunk is usually
+  another name's: `DEFAULT_RETRIES = 0` next to `DEFAULT_POOLSIZE = 10`, the next release heading of a changelog).
+  The repeat-alone rule (D-063) is unchanged. Rescues (checker failed) keep the strict D-045 anchoring to the named
+  evidence lines. `JudgeOutcome.absent` lists a veto's anchors that are in no cited chunk (for D-074).
 - **Regeneration feedback (D-074).** The one regeneration's system prompt is `ANSWER_SYSTEM`, then
   `REGENERATE_INSTRUCTION`, then:
   ```
