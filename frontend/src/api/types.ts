@@ -228,6 +228,8 @@ export type CalibrationStatus = "pending" | "running" | "done" | "failed";
 
 export interface Calibration {
   version: number;
+  /** v6+: calibration version, chunker version and embedding model it was measured with. */
+  pipeline?: string | null;
   measured_at: string;
   cpu_count: number;
   /** Prose chunks per second (~350 tokens, one model call at a time). */
@@ -355,6 +357,8 @@ export interface Locator {
   start_line?: number;
   end_line?: number;
   symbol?: string | null;
+  /** Code chunks (Phase 3): what the lines hold; null for fallback code and document files. */
+  kind?: "function" | "method" | "class" | "module" | "data" | null;
 }
 
 export interface Chunk {

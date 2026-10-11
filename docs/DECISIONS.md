@@ -570,3 +570,85 @@ grounding correctness > data safety > simplicity > performance > features.
   tied to `CHUNKER_VERSION` and the embedding model revision so it cannot be forgotten (the Phase 3 chunker left
   the Phase 2 "Indexing code" rate in place).
 - **Scope:** Phase 3b (agent CLI + Claude Code skill) is queued after Gate 3 passes, not mixed into the fixes.
+
+### D-056 Chunking: data literals split by element, locator kind, document files on whole lines
+- **Finding (ref-near-10):** the `_codes` table in `status_codes.py` (lines 23-104, ~1,300 tokens) was one
+  module-level statement. It was cut only at its inner comments and packed with the docstring, giving a
+  747-token chunk (lines 40-91) without a symbol. That chunk held the 429 row but was vector #7, absent from
+  the full-text top 40 and reranked #40 of 40, so it never reached the context. A prototype with 150-token
+  groups put the 429 chunk at vector #1 / full-text #2 / fused #1 (in context), and brought the right row into
+  context for 6 of 6 entry questions (base: 3 of 6). Smaller groups did the retrieval work; the symbol in the
+  header is a small full-text gain and shows the model the table's name.
+- **Decision (data literals):** an assignment of one collection literal to one name at module or class level is
+  a member of its own above `DATA_MIN_TOKENS` (250), syntax-driven for all four grammars (Python
+  dict/list/tuple/set, also wrapped in one call such as `frozenset({…})`; JS/TS object/array incl. `as const`,
+  `Object.freeze(…)`, `module.exports =`, `export default`; C# initializer and collection expressions incl.
+  `new Dictionary<K, V> { … }`). It is cut only where an element starts a line, so multi-line elements stay
+  whole, and the comment lines above an element go with it. Groups are balanced around `DATA_TARGET_TOKENS`
+  (150): parts = ceil(total / 150), and a small last group joins the one before. Each group is named by the
+  qualified assignment (`_codes`, `FlaskyStyle.styles`, `Codes.Names`) with a part number in the header
+  (`… · _codes (part 6) (lines 77-85)`); `locator.symbol` is the bare name. Chunks stay verbatim whole lines.
+  Full-text search drops the part number with the line numbers (D-051).
+- **Decision (locator kind):** code locators carry `kind`: `function` | `method` | `class` | `module` |
+  `data`, and `null` for fallback-chunked code and document files. A function inside a class (any depth) is a
+  `method`; a class's own lines are `class`. Retrieval can now look up a function's definition by symbol.
+- **Finding (ref-near-07):** the document chunker cuts at sentence ends, so a file chunk could end inside a
+  line while its locator claimed the whole line. `advanced.rst` 639-693 stopped after the second of three
+  sentences on line 693; the viewer and the eval showed line 693, including the `socks5h` sentence the chunk
+  did not hold, and the model cited that chunk for the `socks5h` claim. Setting `end_line` to the last whole
+  line instead would have dropped the partial text from the range (the other half of the same error).
+- **Decision (whole lines):** chunks of document files located by line (folder sources, not paged PDFs) end
+  on line ends. Units are also split at line ends and marked "line start" / "clean start" (a sentence,
+  paragraph, list item or table row starts there). When the target is reached inside a line, the chunk ends at
+  the latest line end with at least half the target before it, preferring a clean one; the rest of the line
+  starts the next chunk, and the 80-token overlap also starts on a line. Only one line longer than the 800-token
+  maximum is cut inside, and its locator then names the line(s) the text is part of. A line break counts as one
+  token, as in the code chunkers. Web pages and paged documents are unchanged (their locators name sections or
+  pages, not lines). This is a general rule: any line-located file in any language.
+- **Measured** on the `requests` folder source with the production tokenizer (the Smoke snapshot re-chunked by
+  the image's chunker and by this one):
+  - Code: 856 → 872 chunks; only `status_codes.py` (5 → 12) and `docs/_themes/flask_theme_support.py`
+    (3 → 12) change. `_codes` is 8 parts of 164-182 tokens; line 85 (429) is in part 6, lines 77-85. The
+    largest chunk drops from 1,492 tokens (`FlaskyStyle.styles`) to 1,261. Mean 191 → 188 tokens.
+    872/872 chunks are exact line ranges (before 856/856).
+  - Kinds: method 487, function 145, class 74, module 66, data 18; null 219 (137 document + 82 fallback code).
+  - Document files: 129 → 137 chunks, mean 445 → 424 tokens, max 585 → 543. Chunks whose line range holds
+    exactly their text: 99/129 → 137/137 (the other 30 ended or started inside a line). 98 of 107 neighbour
+    pairs still overlap (before 90 of 99). Line 693 of `advanced.rst` is now whole in chunk 681-723.
+- `CHUNKER_VERSION` = `p3-treesitter-4`: refreshes re-chunk every file.
+
+### D-057 Calibration is tied to the chunker and the embedding model (Gate 3 item C)
+- `CALIBRATION_VERSION` = 6 (the Phase 3 chunks). Saved results also record `pipeline` =
+  `calibration-<version>|chunker-<CHUNKER_VERSION>|embeddings-<model id>@<revision>` (the revision from
+  `models.lock.json`). On startup calibration is queued when the saved version is older **or** its pipeline
+  differs from the installed one, so a chunking or embedding change re-measures without anyone remembering to
+  bump the version. Results saved before v6 have no pipeline and are re-measured.
+- Not changed: the estimate's chunk-size constants (`app/ingest/estimate.py`, measured on the Phase 2 chunker:
+  code 1,125 bytes / 360 tokens per chunk). Re-measured on `requests` with this chunker: code 540 bytes / 188
+  tokens per chunk, documents 1,318 / 424. Estimates convert through tokens per byte, which moved little
+  (code 0.320 in the constants vs 0.348 measured, documents 0.318 vs 0.322), so code estimates run about 9%
+  low. Left for the estimate owner; the per-chunk embedding overhead of twice as many code chunks is not
+  modelled either way.
+
+### D-058 A split literal's part number is not code; its definition is its parts (review of D-056)
+- **Finding (layer 5):** the deterministic checks searched the whole chunk text, header included. Each split
+  data literal's header says `(part N)` with N from 1 to about 12, so "`_codes` … retries 6 times" citing part 6
+  passed the literal check (`missing_literals` returned only the other wrong number) and could then be rescued
+  by the code judge. A layer-5 failure is never rescued, so the part number weakened layer 5.
+- **Decision:** `missing_literals` and `missing_identifiers` drop the header's `(part N)` before searching
+  (`app/chunking/header.py`, which also owns `header_line`). Nothing else changes; the checks are only
+  stricter. The header's `(lines a-b)` is still searched, as before D-056: the prompt shows every chunk as
+  "file, lines a–b", so a sentence restating where code is ("lines 23–104") must keep passing in any language,
+  and removing them would reject true location statements. Their hole (a value equal to a range end) predates
+  this phase and is unchanged.
+- **Finding (Gate 1 G3):** constant definitions are found by a `NAME = ` line at column 0, which only part 1 of a
+  split literal has. For `ERROR_MESSAGES = {…}` (30 entries, 513 tokens) used as `ERROR_MESSAGES[code]`, the
+  extra was part 1 (lines 1-8) while 'E025' is in part 4. Before D-056 the table was one chunk. `requests` has
+  no UPPER_CASE literal over 250 tokens, so the D-056 measurement could not show it.
+- **Decision:** a definition that is part 1 of a split literal brings the literal's parts (same source, file and
+  `locator.symbol`, consecutive part numbers), counted as **one** of the 3 extras, up to 800 tokens (the
+  chunker's module chunk maximum, so a literal of that size comes in whole as before). A bigger literal brings
+  the parts the reranker scored highest for the question first, then the parts in order; they are added in
+  line order and go through the same budget fit as other extras. Part 1 alone in the context no longer counts
+  as the name's definition, so the rest still comes. Lower-case literals (`_codes`) are not constants and are
+  unaffected. General: syntax-driven for every grammar the chunker splits.

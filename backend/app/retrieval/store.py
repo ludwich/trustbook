@@ -134,6 +134,27 @@ def chunks_assigning(engine: Engine, source_id: str, names: Sequence[str]) -> li
     return [_row(chunk, title) for chunk, title in rows]
 
 
+def chunks_of_symbol(engine: Engine, source_id: str, file: str, symbol: str) -> list[ChunkRow]:
+    """Code chunks of one source whose locator names ``file`` and ``symbol``, by ordinal.
+
+    Used to gather the parts of a split data literal (D-056, D-058); ``json_extract`` scans only
+    the source's chunks.
+    """
+    locator = col(Chunk.locator)
+    with Session(engine) as session:
+        rows = session.exec(
+            select(Chunk, Source.title)
+            .join(Source, col(Source.id) == col(Chunk.source_id))
+            .where(
+                col(Chunk.source_id) == source_id,
+                func.json_extract(locator, "$.file") == file,
+                func.json_extract(locator, "$.symbol") == symbol,
+            )
+            .order_by(col(Chunk.ordinal))
+        ).all()
+    return [_row(chunk, title) for chunk, title in rows]
+
+
 def total_tokens(engine: Engine, source_ids: Sequence[str]) -> tuple[int, int]:
     """(chunk count, token count) of the given sources."""
     if not source_ids:

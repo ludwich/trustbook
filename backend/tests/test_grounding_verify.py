@@ -302,6 +302,23 @@ def test_literals_in_code_sentences_must_occur_in_the_cited_code() -> None:
     assert missing_literals("pool_block defaults to None.", [code]) == ["None"]
 
 
+def test_a_split_literals_part_number_is_not_a_number_the_code_states() -> None:
+    """D-058: "(part 6)" in the header must not vouch for "6 times" (reviewer repro)."""
+    from app.chunking.syntax import chunk_source_code
+    from app.chunking.tokens import CharEstimate
+    from app.grounding.code_checks import missing_literals
+
+    rows = "".join(f"    {100 + i}: ('name_{i}', 'alias_{i}', 'other_{i}'),\n" for i in range(80))
+    src = f'"""Status codes."""\n\n_codes = {{\n{rows}}}\n'
+    drafts = chunk_source_code(src, 0, len(src), "status_codes.py", CharEstimate())
+    part6 = next(d for d in drafts if " · _codes (part 6) (lines " in d.text.split("\n", 1)[0])
+    sentence = "`_codes` maps 150 to name_50 and retries 6 times."
+    assert "150" not in part6.text and "160" in part6.text
+    assert missing_literals(sentence, [part6.text]) == ["150", "6"]
+    assert missing_identifiers("`_codes[6]` is a row.", [part6.text]) == ["_codes[6]"]
+    assert missing_literals("`_codes` maps 160 to name_60.", [part6.text]) == []
+
+
 def test_code_sentence_with_a_literal_not_in_the_code_fails_layer_5() -> None:
     chunk = rc(
         "a",

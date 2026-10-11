@@ -480,8 +480,14 @@ def test_folder_source_end_to_end(client: TestClient, space: dict[str, Any], pat
     ]
     # tree-sitter (Phase 3): one chunk per function, with its symbol and line range
     assert [c["locator"] for c in code_chunks] == [
-        {"file": "src/api.py", "start_line": 1, "end_line": 2, "symbol": "get"},
-        {"file": "src/api.py", "start_line": 5, "end_line": 6, "symbol": "post"},
+        {"file": "src/api.py", "start_line": 1, "end_line": 2, "symbol": "get", "kind": "function"},
+        {
+            "file": "src/api.py",
+            "start_line": 5,
+            "end_line": 6,
+            "symbol": "post",
+            "kind": "function",
+        },
     ]
     assert code_chunks[0]["text"].startswith("File: src/api.py · get (lines 1-2)\n")
 

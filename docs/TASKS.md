@@ -32,13 +32,15 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] F1 BLOCKING: bare `raise` in ingest handler `finally` failed every successful job (fixed `2a4924a`, job-status test)
 - [~] F2 Wrong citations from function-level chunks (code-02, docs-04, ref-near-05): fix chunk boundaries/retrieval; never widen the key — list believed-correct citations in GATES.md for approval
 - [~] F3 code-05 answers again; split oversized table chunks (ref-near-10); ref-near-07
+  - [x] chunking (D-056): data literals split by element into named ~150-token parts; `locator.kind`;
+    document files chunked on whole lines (line locators claim only lines the chunk holds); `CHUNKER_VERSION` 4
 - [ ] F4 Run the full gate command 3× on the workbench; all 3 must pass; report all 3 in GATES.md
 - [ ] F5 Eval runs use temperature 0 + fixed seed (per-request generation override used only by the runner; SPEC's 0.2 default unchanged)
 - [ ] F6 Runner `--chat-endpoint` / `--chat-model` overrides; model name in the report header; gate run with a stronger reference model (Qwen3.8-27B-UD-Q4_K_XL, chosen by Ludwig) alongside Qwen3.6, both in GATES.md
 
 - [ ] A One of the 3 workbench gate runs uses the app default (temperature 0.2, no seed), labelled "real-use" in GATES.md
 - [ ] B e2e + eval assert JOB status (done/failed) and the Queue UI state for every source type (paste, upload, URL, YouTube, search, folder)
-- [ ] C Calibration version bumped now (v6) and tied to CHUNKER_VERSION + embedding revision so chunking/embedding changes always re-calibrate
+- [x] C Calibration version bumped now (v6) and tied to CHUNKER_VERSION + embedding revision so chunking/embedding changes always re-calibrate (D-057, `Calibration.pipeline`)
 - [ ] D docs/MODELS.md (per-model Gate 3 results + recommended minimum chat model); README memory note (Docker Desktop/WSL memory, Trustbook's use while indexing)
 
 ## 4. Gate

@@ -193,7 +193,7 @@ RequestLogEntry = {"id":int,"timestamp":str,"capability":str,"endpoint_host":str
 - `POST /api/calibration/run` → `202 Job`
 
 ```
-Calibration = {"version":int,"measured_at":str,"cpu_count":int,      // version 3
+Calibration = {"version":int,"pipeline":str|null,"measured_at":str,"cpu_count":int,      // version 3
                "embedding_chunks_per_s":float|null,"rerank_pairs_per_s":float|null,
                "parse_pages_per_s":float|null,"stt_realtime_factor":float|null,
                "notes":[str],
@@ -202,6 +202,9 @@ Calibration = {"version":int,"measured_at":str,"cpu_count":int,      // version 
                           "reranker_dtype":"float32"|"bfloat16"}|null}
 // stt_realtime_factor = processing seconds per audio second (UI shows "N× faster than real time").
 // runtime is chosen by measurement and applied to the bundled models at startup (DECISIONS D-020).
+// pipeline (version 6+) = "calibration-<CALIBRATION_VERSION>|chunker-<CHUNKER_VERSION>|embeddings-<model>@<revision>".
+// On startup calibration re-runs when version < CALIBRATION_VERSION or pipeline differs from the
+// installed one, so a chunker or embedding-model change always re-measures (D-057).
 ```
 
 ## Phase 1: sources, index, retrieval and chat
@@ -234,7 +237,10 @@ Token counts use the embedding model's tokenizer when the ML runtime is present,
 
 A chunk's `locator` (JSON in `chunks.locator`) is derived from the segments it overlaps:
 `{"pages":[3,4]}`, `{"start_s":61.2,"end_s":95.0,"speaker":null}`, `{"heading":"Install","offset":1234}`,
-`{"file":"src/requests/api.py","start_line":12,"end_line":58,"symbol":null}`.
+`{"file":"src/requests/api.py","start_line":12,"end_line":58,"symbol":"request","kind":"function"}`.
+A file locator's `kind` (Phase 3) is `"function"|"method"|"class"|"module"|"data"` for tree-sitter code
+chunks and `null` for fallback-chunked code and document files; chunks indexed before chunker
+`p3-treesitter-4` have no `kind` (treat as `null`).
 
 ### Sources API
 - `GET /api/spaces/{sid}/sources` → `Source[]` (creation order)
@@ -483,6 +489,33 @@ token budget. The refusal threshold still uses rerank scores.
   (prefixed `File: path · symbol` plus a line range); symbols over 1,500 tokens are split at statement
   boundaries; module-level code is grouped up to 500 tokens; `locator.symbol` is filled. Other languages use the
   SPEC §7.3 fallback chunker.
+- **Locator `kind`** (D-056): every code chunk's locator carries `"kind"`:
+  - `function`: a top-level function (also `const f = () => …`, C# local functions);
+  - `method`: a function, property with code, constructor or operator inside a class/struct/interface;
+  - `class`: a class's own lines (header, docstring, fields; also interfaces, enums, records);
+  - `module`: module-level code (imports, constants, statements, namespace lines);
+  - `data`: a part of a big data literal (below);
+  - `null`: no syntax tree (fallback chunker) or a document file.
+  Retrieval can find a function's definition with `symbol == name and kind in ("function", "method")`.
+- **Data literals** (D-056): an assignment of one collection literal to one name at module or class level
+  (Python dict/list/tuple/set, also one call deep like `frozenset({…})`; JS/TS object/array incl. `as const`,
+  `module.exports = …`, `export default {…}`; C# initializers and collection expressions) over 250 tokens is a
+  member of its own. It is split where an element starts a line into balanced groups of about 150 tokens; the
+  comment lines above an element go with it. Every group's `locator.symbol` is the qualified assignment name
+  (`_codes`, `FlaskyStyle.styles`, `Codes.Names`), `kind` is `data`, and its header names the part:
+  `File: src/requests/status_codes.py · _codes (part 6) (lines 77-85)`. Full-text search indexes the header
+  without line or part numbers. The part number is where the chunk sits, not code: layer 5 (identifier and
+  literal checks) does not search it (D-058).
+- **Constant definitions of a split literal** (D-058): when context code uses an UPPER_CASE name defined by a
+  split data literal, the definition extra is the literal's parts, not only part 1 (the one with `NAME =`). The
+  parts count as one of the 3 extras and are added up to 800 tokens (a literal that size comes in whole); a
+  bigger literal brings the parts with the highest rerank scores first, then the parts in order, in line order.
+  Part 1 alone in the context does not count as the definition.
+- **Document files in folders** (D-056): chunks of a text document located by line (not by page) end on whole
+  lines, so `start_line`–`end_line` hold exactly the chunk's text. When the 500-token target falls inside a line,
+  the chunk ends at an earlier line end (a sentence end when there is one) and the rest of the line starts the
+  next chunk; overlaps start on a line too. Only a single line longer than the 800-token maximum is cut inside
+  that line, and its locator then names the line(s) the text is part of.
 - `Source` gains `"ahead": {"indexed_commit": str, "head_commit": str, "commits_ahead": int|null}|null`, filled when
   the linked folder's HEAD differs from the indexed commit. Commits are counted from the commit graph with a
   permissively licensed library (no GPL `git` binary). The UI shows "Indexed at <short>, folder is N commits
