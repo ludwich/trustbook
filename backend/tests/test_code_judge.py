@@ -12,7 +12,12 @@ import pytest
 
 from app.capabilities.adapters.base import ChatMessage, ChatResult
 from app.chat.pipeline import Answered, answer
-from app.grounding.code_checks import LineRange, SnapshotFiles
+from app.grounding.code_checks import (
+    LineRange,
+    SnapshotFiles,
+    missing_identifiers,
+    missing_literals,
+)
 from app.grounding.code_judge import (
     JUDGE_SCHEMA,
     Anchor,
@@ -795,3 +800,84 @@ def test_the_judge_sees_the_section_and_numbers_only_body_lines() -> None:
     user = judge_messages(list(chunks.values()), statements)[1]["content"]
     title = "[c1] HISTORY.md, lines 184-194, in section “Release History › 2.32.0 (2024-05-20)”"
     assert title in user
+
+
+def test_evidence_spanning_a_later_heading_gets_no_section() -> None:
+    # Lines 187-194 run from the header's section (2.32.0) into the 2.31.0 entry below the
+    # heading at line 190: no section speaks for all of them (D-071).
+    chunk = history_chunk()
+    false = "Requests 2.32.0 fixed versions up to v2.30.0."
+    for start in (184, 187, 189):
+        assert judged_alone(false, start, 194, chunk) == (False, "not in the evidence lines: 2.32")
+    assert judged_alone(false, 194, 194, chunk) == (False, "not in the evidence lines: 2.32")
+    # Starting at the heading itself, the lines are all in 2.31.0.
+    assert judged_alone("Requests 2.31.0 fixed versions up to v2.30.0.", 190, 194, chunk)[0]
+    # Within the header's section a range is still under it.
+    true = "Requests 2.32.0 officially added support for CPython 3.12."
+    assert judged_alone(true, 184, 187, chunk) == (True, "")
+
+
+def section_chunk(
+    path: str, heading_path: str, lines: tuple[int, int], body: str
+) -> RetrievedChunk:
+    text = f"File: {path} · {heading_path} (lines {lines[0]}-{lines[1]})\n{body}"
+    title = heading_path.rsplit(" › ", 1)[-1]
+    return history_chunk(text, file=path, start_line=lines[0], end_line=lines[1], heading=title)
+
+
+def test_a_section_vouches_for_a_number_only_as_written_in_full() -> None:
+    body = "- The pool now keeps 10 connections per host.\n- Added retries."
+    chunk = section_chunk("CHANGELOG.md", "Changelog › 3.0.0 (2025-01-20)", (5, 6), body)
+    assert judged_alone("Since 3.0.0 the pool keeps 10 connections per host.", 5, 5, chunk) == (
+        True,
+        "",
+    )
+    assert judged_alone("3.0.0 (2025-01-20) keeps 10 connections per host.", 5, 5, chunk)[0]
+    for false, missing in [
+        ("Since 3.0.0 the pool keeps 20 connections per host.", "20"),  # 20 of the date
+        ("The pool keeps 3 connections per host.", "3"),  # 3 of 3.0.0
+        ("The pool keeps 2025 connections per host.", "2025"),  # the date's year
+        ("Since 3.0 the pool keeps 10 connections per host.", "3.0"),  # not as written
+    ]:
+        assert judged_alone(false, 5, 5, chunk) == (False, f"not in the evidence lines: {missing}")
+
+
+def test_a_heading_numbering_is_not_a_number_the_section_states() -> None:
+    body = "The connect timeout defaults to 10 seconds."
+    chunk = section_chunk("manual.md", "4 Limits › 4.2 Timeouts", (10, 10), body)
+    assert judged_alone("The connect timeout defaults to 10 seconds.", 10, 10, chunk) == (True, "")
+    for false, missing in [
+        ("The connect timeout defaults to 4 seconds.", "4"),
+        ("The connect timeout defaults to 4.2 seconds.", "4.2"),
+        ("The connect timeout defaults to 9 seconds.", "9"),
+    ]:
+        assert judged_alone(false, 10, 10, chunk) == (
+            False,
+            f"not in the evidence lines: {missing}",
+        )
+
+
+def test_layer_5_reads_what_a_document_header_states() -> None:
+    changelog = (
+        "File: CHANGELOG.md · Changelog › 3.0.0 (2025-01-20) (lines 5-6)\n"
+        "- The pool now keeps 10 connections per host."
+    )
+    assert missing_literals("Since 3.0.0 the pool keeps 10 connections.", [changelog]) == []
+    assert missing_literals("Released on 2025-01-20.", [changelog]) == []
+    assert missing_literals("Since 3.0.0 the pool keeps 20 connections.", [changelog]) == ["20"]
+    assert missing_literals("The pool keeps 3 connections.", [changelog]) == ["3"]
+    assert missing_literals("The pool keeps 2025 connections.", [changelog]) == ["2025"]
+    assert missing_literals("Since 3.0 it keeps 10.", [changelog]) == ["3.0"]
+    # "2.32" written apart from "2.32.0" is not vouched for by the header.
+    history = "File: HISTORY.md · Release History › 2.32.0 (2024-05-20) (lines 1-2)\n- x\n- y"
+    assert missing_literals("2.32.0 changed x.", [history]) == []
+    assert missing_literals("2.32.0 changed x, unlike 2.32.", [history]) == ["2.32"]
+    # A heading's numbering and the chunk's own line numbers are where it is, not what it says.
+    manual = "File: manual.md · 4 Limits › 4.2 Timeouts (lines 10-38)\nThe timeout is 10 seconds."
+    assert missing_literals("The timeout is 10 seconds.", [manual]) == []
+    for false in ("4", "4.2", "38"):
+        assert missing_literals(f"The timeout is {false} seconds.", [manual]) == [false]
+    code = "File: src/a.py · connect (lines 40-52)\ndef connect(timeout=5): ..."
+    assert missing_literals("connect retries 52 times.", [code]) == ["52"]
+    assert missing_identifiers("Pass `52` to it.", [code]) == ["52"]
+    assert missing_identifiers("Call `connect`.", [code]) == []
