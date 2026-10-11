@@ -137,7 +137,19 @@ checks each one:
 
 A source this run added must have its job listed; a source that was already in the space may have an
 older job that `GET /api/jobs` no longer lists (it keeps the last 50 finished), which is noted, not
-an error. If `GET /api/jobs` fails, every check fails. The report shows the metric "Ingest jobs ended
+an error. If `GET /api/jobs` fails, every check fails.
+
+**Earlier jobs and `--refresh`.** A source that was already in the space keeps the job of its last
+ingest. When that job had already ended before this run started (the runner reads `GET /api/jobs`
+first), it may have run on another image: a space indexed by the phase-3-rc image has a failed job
+(F1) on every ready source. Such an **earlier job** says nothing about the image under test, so it is
+not judged: the check only requires the source's current status to be as expected (`ready`, or
+`failed` with `expect: failed`) and notes the job ("job/source mismatch from an earlier ingest" when
+it was one). The metric says how many jobs were not re-checked, e.g. "2/2 (2 ended before this run,
+not re-checked)". `--refresh` (with `--setup`) re-ingests every corpus source already in the space
+(`POST …/sources/{id}/refresh`), so that all of them are indexed by, and their jobs checked on, the
+running image; a source that cannot be refreshed is a "refresh failed" problem. A job that was still
+running when the run started, or that this run started, is always checked in full. The report shows the metric "Ingest jobs ended
 as expected" and an "Ingest jobs" table (source, source status, job status, expected, check); any
 problem makes the run exit 1, whatever the other targets.
 
@@ -205,9 +217,10 @@ text, and nothing is written anywhere else, so a private set stays wherever you 
  "generation_requested": {"temperature": 0, "seed": 42}, // null with --app-default
  "chat": {"model": "Qwen3.6-35B-A3B", "endpoint_host": "192.168.1.5:8080", "preset": "llama_server",
           "overridden": false},                           // null if the API did not say
- "setup": {"jobs_ok": true,                               // null without --setup
+ "setup": {"jobs_ok": true, "refreshed": 0,               // null without --setup
            "jobs": [{"source_id": "…", "job_id": "…", "source_status": "ready",
-                     "job_status": "done", "expect": "ready", "ok": true}]},
+                     "job_status": "done", "expect": "ready", "ok": true,
+                     "earlier": false}]},                 // true: ended before the run
  "questions": [{"id": "code-01", "type": "answerable", "category": "code",
                 "outcome": "answered", "refusal_reason": null, "badge": "partially_verified",
                 "top_rerank": 0.83, "sentence_scores": [0.97, 0.12],

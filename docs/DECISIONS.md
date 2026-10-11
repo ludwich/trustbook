@@ -589,7 +589,8 @@ SPEC §13 and D-055 do not say how the runner does these things. Choices made un
 - **Job checks:** the runner waits for each finished source's ingest job and compares the two statuses, as
   set out in `eval/format.md`. Any problem fails the run (exit 1), like a missed target, because the F1 bug
   was invisible in source status. An entry can declare `expect: failed`. Old jobs no longer listed (only the
-  last 50 finished are kept) are noted, not failed, but only for sources this run did not add.
+  last 50 finished are kept) are noted, not failed, but only for sources this run did not add. Jobs that
+  ended before the run: D-058.
 - **Comparison:** `--compare A.json B.json` lists only questions whose outcome cell differs. Retrieval is "same"
   by `retrieval_fingerprint`. For sidecars without one, an equal top rerank score is used instead and labelled
   "same top score", which is weaker evidence. Repeated runs (`--repeat`) were not added: three separate runs
@@ -597,3 +598,21 @@ SPEC §13 and D-055 do not say how the runner does these things. Choices made un
 - **Sidecar version 2** adds `generation_requested`, `chat`, `setup.jobs`, and per question
   `retrieval_fingerprint`, `generation` and `must_contain_found/total`. It holds no question or answer text
   (D-039's rule).
+
+### D-058 Eval runner: jobs that ended before the run, and `--refresh`
+Review of D-056 found a problem. A gate re-run with `--setup` on a space indexed by `phase-3-rc` always exited 1.
+That image failed every ingest job after indexing the source correctly (F1). Those failed jobs stay listed in
+`GET /api/jobs`, so every source showed as a "job/source mismatch". The cause was that image, not the one
+under test. Choices under §15:
+- **Earlier job:** the runner reads `GET /api/jobs` before it adds anything. A job of a source already in the
+  space that had ended by then may have run on another image. It is noted ("job/source mismatch from an
+  earlier ingest" when it was one), and not judged. The source's current status is still judged, because this
+  run's answers depend on it: a `failed` source that should be `ready` still fails the run. A job that was
+  running when the run started, or that the run started itself, is always checked in full. The metric names
+  how many jobs were not re-checked, so a pass on earlier jobs alone is visible as such.
+- **`--refresh`** (with `--setup`) re-ingests every corpus source already in the space through the refresh
+  route, so every job runs on the image under test and is checked in full. A refused refresh fails the run.
+  The README tells the gate's first run on a new image to use it. The check itself was not loosened: a
+  mismatch on a job of the running image still fails the run.
+- **Sidecar:** `setup.refreshed` (count) and `setup.jobs[].earlier` are added. The sidecar stays version 2,
+  because both fields are additive.

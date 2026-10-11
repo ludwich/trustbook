@@ -517,4 +517,7 @@ What `eval/runner.py` relies on beyond the Phase 1–2 contract (details: `eval/
   origin is refused, because the backend drops a saved key when the chat origin changes.
 - **Job checks:** after `--setup`, the runner checks each source's `Source.job_id` against `GET /api/jobs`.
   Each finished source's job must end `done`, or `failed` for a corpus entry with `expect: failed`. A ready
-  source with a failed job is a job/source mismatch, and the run exits 1.
+  source with a failed job is a job/source mismatch, and the run exits 1. A job that had ended before the run
+  (per the first `GET /api/jobs`) is only noted; its source must still have the expected status. `--refresh`
+  calls `POST /api/spaces/{sid}/sources/{source_id}/refresh` for every corpus source already in the space, so
+  every job is checked on the running image (a refused refresh fails the run).

@@ -122,8 +122,9 @@ Use the report's "Threshold sweep" table to pick the thresholds; for a full swee
 
 ## Gate 3: code questions, cited ranges and latency
 
-Gate 3 runs the same two files against the same space, after Trustbook has re-indexed the folder with
-the Phase 3 code chunker (refresh the `requests` source, or start from a new space). The corpus
+Gate 3 runs the same two files against the same space, after Trustbook has re-indexed the corpus with
+the Phase 3 code chunker: add `--refresh` to the first run on a new image (it re-ingests every corpus
+source already in the space and checks each new ingest job), or start from a new space. The corpus
 folder from step 1 is also the checkout the cited ranges are checked against (`--code-root`):
 
 ```sh
@@ -165,9 +166,18 @@ llama-server with several parallel slots, do not honour a seed. `--setup` also c
 **ingest job**: a source that is ready while its job failed is reported as a "job/source mismatch",
 and the run exits 1 (see `eval/format.md`, "Corpus file").
 
+Jobs that ended before the run started are only noted, because they may come from an older image.
+A space indexed by `phase-3-rc` has a failed job on every source (F1), even though each source was
+indexed correctly. So the first run after pulling a new `-rc` image takes `--refresh`. It re-ingests
+all five corpus sources (the four URLs are fetched again) and checks every new job on that image.
+Later runs on the same image can leave `--refresh` out. Their report then says "N ended before this
+run, not re-checked", and those jobs were already checked by the first run.
+
 ```sh
 # The Gate 3 command above, three times (F4); keep each report and its .json sidecar.
-uv run --project backend python eval/runner.py … --report gate-3-run1.md
+# The first run re-ingests and checks every source on the image under test.
+uv run --project backend python eval/runner.py … --refresh --report gate-3-run1.md
+uv run --project backend python eval/runner.py … --report gate-3-run2.md
 
 # One of the three is the real-use run: the app's own temperature 0.2, no seed (A).
 uv run --project backend python eval/runner.py … --app-default --report gate-3-real-use.md
