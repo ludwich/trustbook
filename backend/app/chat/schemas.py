@@ -75,13 +75,11 @@ class GenerationUsed(BaseModel):
 class CitationChange(BaseModel):
     """How Trustbook changed one sentence's citations (chunk ids only, never text).
 
-    ``added``: cited before verification because the sentence names something only they contain
-    (D-056). ``dropped``: near-copies of a kept citation (D-052 extension). ``swapped``:
+    ``dropped``: near-copies of a kept citation (D-052 extension). ``swapped``:
     ``[from, to]`` pairs, a near-copy replaced by the chunk that defines the named symbol.
     """
 
     sentence: int
-    added: list[str] = Field(default_factory=list)
     dropped: list[str] = Field(default_factory=list)
     swapped: list[list[str]] = Field(default_factory=list)
 

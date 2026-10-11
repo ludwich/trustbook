@@ -5,8 +5,8 @@
    any model call.
 3. Layer 3: numbered chunks, forced-citation JSON, one retry on unusable JSON, sentences without
    valid chunk ids dropped. No sentences returned → ``not_in_sources``; sentences returned but
-   none valid, or unusable JSON twice → ``invalid_output``. A sentence naming a backticked
-   identifier that only an uncited context chunk holds also cites that chunk (D-056).
+   none valid, or unusable JSON twice → ``invalid_output``. The model's citations are checked as
+   given (never completed, D-060).
 4. Layers 4 and 5 (:mod:`app.grounding.verify`): every sentence is checked against its cited
    chunks. When the refusal rule would fire (more than half failing, or the first sentence
    failing), one regeneration with the same chunks plus
@@ -14,8 +14,8 @@
    rule: more than half failing, or the first sentence failing → refuse (``unsupported``).
    Otherwise the failing sentences are removed (``partially_verified``) or none fail
    (``verified``). With the grounding checker off, layer 4 is skipped and the badge is
-   ``unverified``. The judge rescues sentences the checker failed and confirms borderline checker
-   passes (D-045, D-056); ``diagnostics.sentence_methods`` records which passed them.
+   ``unverified``. The judge rescues sentences about code the checker failed and confirms checker
+   passes (D-045, D-056, D-060); ``diagnostics.sentence_methods`` records which passed them.
 5. Citations of passing sentences are chosen (:mod:`app.chat.citation_choice`, D-052 and its
    extension): supporting chunks only, near-copies collapsed, the defining chunk preferred.
 
@@ -29,7 +29,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
-from app.chat.citation_choice import choose, complete_citations, upgrade_candidates
+from app.chat.citation_choice import choose, upgrade_candidates
 from app.chat.citations import number_citations
 from app.chat.llm import ChatAdapterFactory, generate_structured
 from app.chat.output import DraftSentence, InvalidOutputError, ParsedAnswer, parse_answer
@@ -164,16 +164,14 @@ class Kept:
 
 @dataclass
 class _Changes:
-    added: dict[int, tuple[str, ...]] = field(default_factory=dict)
     dropped: dict[int, tuple[str, ...]] = field(default_factory=dict)
     swapped: dict[int, list[tuple[str, str]]] = field(default_factory=dict)
 
     def out(self, chunks: Mapping[str, RetrievedChunk]) -> list[CitationChange]:
-        ids = sorted(set(self.added) | set(self.dropped) | set(self.swapped))
+        ids = sorted(set(self.dropped) | set(self.swapped))
         changes = [
             CitationChange(
                 sentence=i,
-                added=[chunks[label].chunk_id for label in self.added.get(i, ())],
                 dropped=[chunks[label].chunk_id for label in self.dropped.get(i, ())],
                 swapped=[
                     [chunks[a].chunk_id, chunks[b].chunk_id] for a, b in self.swapped.get(i, [])
@@ -181,23 +179,7 @@ class _Changes:
             )
             for i in ids
         ]
-        return [c for c in changes if c.added or c.dropped or c.swapped]
-
-
-def complete_all(
-    sentences: list[DraftSentence], chunks: Mapping[str, RetrievedChunk]
-) -> tuple[list[DraftSentence], dict[int, tuple[str, ...]]]:
-    """:func:`~app.chat.citation_choice.complete_citations` for every sentence of a reply."""
-    completed: list[DraftSentence] = []
-    added: dict[int, tuple[str, ...]] = {}
-    for i, sentence in enumerate(sentences):
-        done, labels = complete_citations(sentence, chunks)
-        completed.append(done)
-        if labels:
-            added[i] = labels
-    if added:
-        logger.info("Completed the citations of %d sentence(s)", len(added))
-    return completed, added
+        return [c for c in changes if c.dropped or c.swapped]
 
 
 def choose_citations(
@@ -339,7 +321,7 @@ def answer(
     if parsed.dropped:
         logger.info("Dropped %d sentence(s) without valid citations", len(parsed.dropped))
 
-    sentences, added = complete_all(parsed.sentences, chunks)
+    sentences = parsed.sentences
     checked = check_sentences(verifier, sentences, chunks)
     regenerated = False
     if checked.refuse:
@@ -362,13 +344,13 @@ def answer(
             # The first reply was refused and the second has nothing usable.
             return Refused(
                 refusal("unsupported", question),
-                _diagnostics(diagnostics, checked, verifier, True, _Changes(added=added), chunks),
+                _diagnostics(diagnostics, checked, verifier, True, _Changes(), chunks),
             )
         parsed = second
-        sentences, added = complete_all(parsed.sentences, chunks)
+        sentences = parsed.sentences
         checked = check_sentences(verifier, sentences, chunks)
 
-    changes = _Changes(added=added)
+    changes = _Changes()
     if checked.refuse:
         logger.info(
             "Refused: %d of %d sentence(s) failed verification (first passed: %s)",

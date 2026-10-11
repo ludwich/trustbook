@@ -1,4 +1,4 @@
-"""Citation completion, the near-copy collapse and the guarded upgrade (D-052 extension, D-056)."""
+"""The near-copy collapse and the guarded upgrade (D-052 extension); no completion (D-060)."""
 
 from __future__ import annotations
 
@@ -6,13 +6,12 @@ from collections.abc import Sequence
 
 from app.chat.citation_choice import (
     choose,
-    complete_citations,
     containment,
     names_symbol,
     upgrade_candidates,
 )
 from app.chat.output import DraftSentence
-from app.chat.pipeline import Answered, answer
+from app.chat.pipeline import Answered, Refused, answer
 from app.chat.prompt import labelled
 from app.grounding.code_checks import LineRange, SnapshotFiles
 from app.grounding.verify import Verifier
@@ -237,38 +236,9 @@ def status_context() -> dict[str, RetrievedChunk]:
     )
 
 
-def test_completion_adds_the_same_file_chunk_holding_the_missing_name() -> None:
-    chunks = status_context()
-    done, added = complete_citations(DraftSentence(NAMED, ("c3",)), chunks)
-    assert added == ("c2",)  # same file first, although c1 also holds requests.codes
-    assert done.chunk_ids == ("c3", "c2")
-
-
-def test_completion_adds_nothing_for_names_no_chunk_has() -> None:
-    chunks = status_context()
-    for text in (
-        "`requests.codes.rate_limited` is 429.",
-        "`codes.TOO_MANY_REQUESTS` is 429.",
-        "`too_many_requests` and `rate_limited` mean 429.",
-    ):
-        sentence = DraftSentence(text, ("c3",))
-        assert complete_citations(sentence, chunks) == (sentence, ())
-    complete = DraftSentence("`too_many_requests` means 429.", ("c3",))
-    assert complete_citations(complete, chunks) == (complete, ())  # nothing missing
-
-
-def test_completion_adds_at_most_two_chunks() -> None:
-    chunks = labelled(
-        [RetrievedChunk(str(i), "s", "T", f"defines `name{i}` here", {}, 5, 0.5) for i in range(4)]
-    )
-    text = "Uses `name1`, `name2` and `name3`."
-    sentence = DraftSentence(text, ("c1",))
-    assert complete_citations(sentence, chunks) == (sentence, ())
-    two = DraftSentence("Uses `name1` and `name2`.", ("c1",))
-    assert complete_citations(two, chunks)[1] == ("c2", "c3")
-
-
-def test_completed_sentence_is_verified_on_its_new_citations() -> None:
+def test_a_name_missing_from_the_cited_chunk_fails_layer_5_without_completion() -> None:
+    # D-060: the model cited the table (c3) for `requests.codes`, which only c1 and c2 hold.
+    # Layer 5 fails the sentence; no other chunk is cited on its behalf (SPEC §8 layer 5).
     found = list(status_context().values())
     retrieval = Retrieval(chunks=found, ranked=found, source_ids=["s1", "s2"])
 
@@ -280,15 +250,18 @@ def test_completed_sentence_is_verified_on_its_new_citations() -> None:
             return {"src/requests/status_codes.py": [(1, 200)]}
 
     def checker(pairs: Sequence[tuple[str, str]]) -> list[float]:
-        return [0.9 if "429" in premise else 0.1 for premise, _ in pairs]
+        return [0.9 for _ in pairs]
 
+    reply = answer_json((NAMED, ["c3"]))
+    chat = ScriptedChat(reply, reply)  # the reply and its one regeneration
     outcome = answer(
         "Which names on requests.codes mean 429?",
         retrieve=lambda _q: retrieval,
-        chat_adapter=lambda: ScriptedChat(answer_json((NAMED, ["c3"]))),
+        chat_adapter=lambda: chat,
         refuse_threshold=0.15,
         verifier=Verifier(checker, threshold=0.5, files=Snap()),
     )
-    assert isinstance(outcome, Answered) and outcome.badge == "verified"
-    assert [c.chunk_id for c in outcome.sentences[0].citations] == ["table", "doc"]
-    assert outcome.diagnostics.citation_changes[0].added == ["doc"]
+    assert isinstance(outcome, Refused) and outcome.refusal.reason == "unsupported"
+    assert outcome.diagnostics.sentence_scores == [0.0]
+    assert outcome.diagnostics.citation_changes == []
+    assert len(chat.calls) == 2

@@ -1,12 +1,8 @@
-"""Which chunks a sentence cites: completion before verification, choice after it.
+"""Which chunks a sentence cites: the choice after verification (D-052 and its extension).
 
-**Completion (before verification, D-056).** A sentence that names a backticked identifier missing
-from its cited chunks, while another chunk of the same context contains it, also cites that chunk
-(same file as a cited chunk first, then context order; at most :data:`MAX_ADDED`). Nothing is added
-when some missing name is in no context chunk, so the sentence still fails layer 5. The completed
-sentence then goes through every grounding layer as if the model had cited the chunk itself.
-
-**Choice (after verification, D-052 and its extension).** For a sentence the checker passed:
+The model's citations are never completed before verification: a sentence naming a backticked
+identifier that its cited chunks lack fails layer 5, even when another context chunk holds the
+name (D-060). For a sentence the checker passed:
 
 1. D-052: when some cited chunks support it on their own, only those stay cited.
 2. Near-copies: of the chunks that each support it alone, one whose supporting window
@@ -20,7 +16,7 @@ sentence then goes through every grounding layer as if the model had cited the c
    problems). See :func:`upgrade_candidates`.
 
 Citations are only ever removed when another kept citation supports the sentence alone, and only
-added (completion, upgrade) when the result is verified like any model citation. A choice that
+swapped in (upgrade) when the new chunk passes verification alone. A choice that
 would leave a backticked name or a literal outside the kept chunks is not made.
 """
 
@@ -34,7 +30,6 @@ from app.chat.output import DraftSentence
 from app.grounding.code_checks import missing_identifiers, missing_literals, support_window
 from app.retrieval.service import RetrievedChunk
 
-MAX_ADDED = 2  # completion adds at most this many chunks to one sentence
 COPY_CONTAINMENT = 0.9  # share of a window's word 3-grams found in another window: a near-copy
 MIN_WINDOW_SHINGLES = 4  # shorter windows say too little to call two chunks copies
 SHINGLE_WORDS = 3
@@ -46,45 +41,6 @@ _SHINGLE_WORD = re.compile(r"[A-Za-z0-9_]+")
 def _file(chunk: RetrievedChunk) -> str | None:
     file = chunk.locator.get("file")
     return file if isinstance(file, str) and file else None
-
-
-# --- completion ------------------------------------------------------------------------------
-
-
-def complete_citations(
-    sentence: DraftSentence, chunks: Mapping[str, RetrievedChunk]
-) -> tuple[DraftSentence, tuple[str, ...]]:
-    """``sentence`` citing also the context chunks that hold its uncited backticked names, and
-    the labels added (none when nothing is missing or a missing name is in no context chunk)."""
-    texts = [chunks[label].text for label in sentence.chunk_ids]
-    missing = missing_identifiers(sentence.text, texts)
-    if not missing:
-        return sentence, ()
-    position = {label: i for i, label in enumerate(chunks)}
-    files = {f for label in sentence.chunk_ids if (f := _file(chunks[label])) is not None}
-    candidates = sorted(
-        (label for label in chunks if label not in sentence.chunk_ids),
-        key=lambda label: (_file(chunks[label]) not in files, position[label]),
-    )
-    added: list[str] = []
-    for name in missing:
-        span = f"`{name}`"
-        if not missing_identifiers(span, texts):
-            continue  # an earlier addition holds it too
-        pick = next(
-            (
-                label
-                for label in candidates
-                if label not in added
-                and not missing_identifiers(span, [*texts, chunks[label].text])
-            ),
-            None,
-        )
-        if pick is None or len(added) == MAX_ADDED:
-            return sentence, ()
-        added.append(pick)
-        texts.append(chunks[pick].text)
-    return replace(sentence, chunk_ids=(*sentence.chunk_ids, *added)), tuple(added)
 
 
 # --- near-copies -----------------------------------------------------------------------------
