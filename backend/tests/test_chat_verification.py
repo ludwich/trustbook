@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from app.chat.pipeline import NOT_IN_SOURCES, Answered, Refused, answer, retrieval_fingerprint
-from app.chat.prompt import ANSWER_SYSTEM, REGENERATE_INSTRUCTION
+from app.chat.prompt import ANSWER_SYSTEM, FEEDBACK_HEADING, FEEDBACK_TASK, REGENERATE_INSTRUCTION
 from app.chat.schemas import Stage
 from app.grounding.verify import Verifier
 from app.retrieval.service import Retrieval, RetrievedChunk
@@ -73,6 +73,7 @@ def test_all_sentences_pass_is_verified_with_scores_and_diagnostics() -> None:
         "citation_changes": [],
         "retrieval_fingerprint": retrieval_fingerprint(FOUND.chunks),
         "generation": {"temperature": 0.2, "seed": None},
+        "failed_sentences": [],
     }
     assert stages == ["retrieving", "generating", "checking"]
     assert len(chat.calls) == 1
@@ -121,6 +122,10 @@ def test_first_sentence_failing_regenerates_once_then_refuses() -> None:
     )
     assert outcome.diagnostics.sentence_scores == [0.2, 1.0, 1.0]
     assert outcome.diagnostics.regenerated is True
+    # The refusal keeps the failed sentence of the reply it rests on and why (D-075).
+    assert [f.model_dump() for f in outcome.diagnostics.failed_sentences] == [
+        {"text": "Bad again.", "reason": "checker score 0.20 < 0.5"}
+    ]
     assert len(chat.calls) == 2
     assert stages == ["retrieving", "generating", "checking", "generating", "checking"]
 
@@ -135,7 +140,12 @@ def test_first_sentence_failing_can_recover_on_the_regeneration() -> None:
     assert [s.text for s in outcome.sentences] == ["Better.", "Good."]
     assert outcome.diagnostics.regenerated is True
     second = chat.calls[1]["messages"]
-    assert second[0]["content"] == f"{ANSWER_SYSTEM}\n\n{REGENERATE_INSTRUCTION}"
+    feedback = (
+        f"{FEEDBACK_HEADING}\n"
+        '1. "Bad first." (cited c1): not supported by the cited chunks.\n'
+        f"{FEEDBACK_TASK}"
+    )
+    assert second[0]["content"] == f"{ANSWER_SYSTEM}\n\n{REGENERATE_INSTRUCTION}\n\n{feedback}"
 
 
 def test_more_than_half_failing_regenerates_once_and_can_recover() -> None:
@@ -154,7 +164,14 @@ def test_more_than_half_failing_regenerates_once_and_can_recover() -> None:
     assert len(chat.calls) == 2
     first, second = (c["messages"] for c in chat.calls)
     assert first[0]["content"] == ANSWER_SYSTEM
-    assert second[0]["content"] == f"{ANSWER_SYSTEM}\n\n{REGENERATE_INSTRUCTION}"
+    # Only the failed sentences are listed, each with its reason (D-074).
+    feedback = (
+        f"{FEEDBACK_HEADING}\n"
+        '1. "Bad 1." (cited c1): not supported by the cited chunks.\n'
+        '2. "Bad 2." (cited c2): not supported by the cited chunks.\n'
+        f"{FEEDBACK_TASK}"
+    )
+    assert second[0]["content"] == f"{ANSWER_SYSTEM}\n\n{REGENERATE_INSTRUCTION}\n\n{feedback}"
     assert second[1] == first[1]  # same chunks and question
     assert REGENERATE_INSTRUCTION == (
         "Some sentences were not supported by the cited chunks. "
@@ -231,6 +248,7 @@ def test_refusals_before_generation_carry_the_top_score() -> None:
         "citation_changes": [],
         "retrieval_fingerprint": retrieval_fingerprint(low.chunks),
         "generation": None,  # no answer call
+        "failed_sentences": [],
     }
     none = Retrieval(chunks=[], ranked=[], source_ids=[])
     outcome, _ = run(ScriptedChat(), found=none)

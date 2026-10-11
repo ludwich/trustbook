@@ -851,9 +851,10 @@ def test_a_heading_numbering_is_not_a_number_the_section_states() -> None:
         ("The connect timeout defaults to 4.2 seconds.", "4.2"),
         ("The connect timeout defaults to 9 seconds.", "9"),
     ]:
+        # Vetoed; the numbering is not stated, so the anchor is in none of the cited text (D-074).
         assert judged_alone(false, 10, 10, chunk) == (
             False,
-            f"not in the evidence lines: {missing}",
+            f"not in the cited chunks: {missing}",
         )
 
 

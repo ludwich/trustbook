@@ -208,11 +208,13 @@ file that is not a sidecar. Version 1 sidecars work, with less to compare.
 ## Scores sidecar (`--report out.md` → `out.json`)
 
 With `--report`, the runner also writes a JSON file next to the report (`out.md` → `out.json`;
-another name gets `.json` appended). It holds **ids and numbers only**, never question or answer
-text, and nothing is written anywhere else, so a private set stays wherever you keep it.
+another name gets `.json` appended). It holds ids and numbers, never question text, and nothing is
+written anywhere else, so a private set stays wherever you keep it. The only answer text is
+`failed_sentences` (version 3, D-076): the sentences of a refused or partially verified answer that
+failed verification, and why, each capped at 300 characters.
 
 ```json
-{"version": 2, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
+{"version": 3, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
  "thresholds": {"refuse": 0.15, "verify": 0.5},          // GET /api/settings; null if unavailable
  "generation_requested": {"temperature": 0, "seed": 42}, // null with --app-default
  "chat": {"model": "Qwen3.6-35B-A3B", "endpoint_host": "192.168.1.5:8080", "preset": "llama_server",
@@ -227,7 +229,8 @@ text, and nothing is written anywhere else, so a private set stays wherever you 
                 "sentence_methods": ["checker", null], "regenerated": false,
                 "removed_sentences": 1, "citations": 2, "citations_correct": 2,
                 "must_contain_found": 1, "must_contain_total": 1, "latency_s": 4.1,
-                "retrieval_fingerprint": "…", "generation": {"temperature": 0, "seed": 42}}],
+                "retrieval_fingerprint": "…", "generation": {"temperature": 0, "seed": 42},
+                "failed_sentences": [{"text": "…", "reason": "checker score 0.12 < 0.5"}]}],
  "false_refusals": {"docs": {"num": 0, "den": 5, "value": 0.0}, "code": {…}, "multi": {…}, "other": {…}},
  "false_refusals_code": {"num": 1, "den": 17, "value": 0.06},
  "cited_ranges": {"num": 48, "den": 48, "value": 1.0},     // only with --code-root
@@ -244,8 +247,11 @@ checker's best score over the cited chunks, `0.0` when a deterministic code chec
 at any threshold), `null` when the checker is off. `sentence_methods` (same order) says what passed
 each sentence: `checker`, `code_judge` (it failed the checker and passed the code judge; its score
 is still the checker's) or `null` (failed, or checker off). They are `null` for answers from an
-API without them. Version 1 sidecars (before Gate 3's rework) lack `generation_requested`, `chat`,
-`setup`, `must_contain_*`, `retrieval_fingerprint` and `generation`.
+API without them. `failed_sentences` comes from `diagnostics.failed_sentences` (`null` when the API
+did not send it); the report lists them under "False refusals: failed sentences" for every answerable
+question that was refused. Version 1 sidecars (before Gate 3's rework) lack `generation_requested`, `chat`,
+`setup`, `must_contain_*`, `retrieval_fingerprint` and `generation`; versions 1 and 2 lack
+`failed_sentences`.
 
 ## Threshold sweep
 

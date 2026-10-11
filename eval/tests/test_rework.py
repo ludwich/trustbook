@@ -68,7 +68,7 @@ def test_default_run_sends_temperature_0_and_seed_42_and_says_so(tmp_path: Path)
     assert "- Generation: temperature 0, seed 42 (eval override" in text
     assert "do not honour a seed" in text
     data = json.loads(sidecar.read_text())
-    assert data["version"] == 2
+    assert data["version"] == 3
     assert data["generation_requested"] == {"temperature": 0.0, "seed": 42}
 
 
@@ -139,6 +139,57 @@ def test_generation_and_fingerprint_from_diagnostics(tmp_path: Path) -> None:
     assert rows["code-1"]["generation"] == {"temperature": 0.0, "seed": 42}
     assert rows["docs-1"]["retrieval_fingerprint"] is None
     assert rows["code-1"]["must_contain_total"] == 1
+
+
+def test_false_refusals_list_their_failed_sentences(tmp_path: Path) -> None:
+    # D-075: the app reports each failed sentence and why; the runner keeps them (capped) in the
+    # sidecar and lists them under every false refusal in the report.
+    api = good_api()
+    long = "word " * 100
+    failed = [
+        {"text": 'Response.ok is "not a check | 200 OK".', "reason": "judge veto: no support"},
+        {"text": long, "reason": "checker score 0.20 < 0.5"},
+        {"text": 7, "reason": "not a sentence"},  # malformed entries are skipped
+    ]
+    refused = {"reason": "unsupported", "message": "Not in your sources", "suggestion": None}
+    message = {
+        "id": "m",
+        "content": {"sentences": []},
+        "badge": "refused",
+        "removed_sentences": [],
+        "diagnostics": {"sentence_scores": [0.0, 0.2], "failed_sentences": failed},
+    }
+    api.answers["Max redirects?"] = sse(("refused", refused), ("done", {"message": message}))
+    code, text, _, sidecar = run(api, tmp_path)
+    assert "#### False refusals: failed sentences" in text
+    assert "- `code-1` (refused, unsupported):" in text
+    assert '  - “Response.ok is "not a check \\| 200 OK".” — judge veto: no support' in text
+    assert "  - “word word" in text and "— checker score 0.20 < 0.5" in text
+    data = json.loads(sidecar.read_text())
+    assert data["version"] == 3
+    rows = {q["id"]: q for q in data["questions"]}
+    kept = rows["code-1"]["failed_sentences"]
+    assert [f["reason"] for f in kept] == ["judge veto: no support", "checker score 0.20 < 0.5"]
+    assert len(kept[1]["text"]) == 300 and kept[1]["text"].endswith("…")
+    assert rows["docs-1"]["failed_sentences"] is None  # this answer's API sent no diagnostics
+    assert code == 0, text  # no target was set for this run
+
+
+def test_a_false_refusal_without_diagnostics_says_so() -> None:
+    q = runner.Question(
+        id="q1", question="Q?", type="answerable", category="docs", expected_sources=("s",)
+    )
+    plain = runner.QuestionResult(q, outcome="refused", refusal_reason="not_in_sources")
+    empty = runner.QuestionResult(q, outcome="refused", refusal_reason="unsupported")
+    empty.failed_sentences = []
+    lines = runner.render_false_refusals([plain, empty])
+    assert lines[0] == "#### False refusals: failed sentences"
+    assert "  - the API did not report failed sentences" in lines
+    assert "  - no failed sentences (the model gave no usable answer)" in lines
+    answered = runner.QuestionResult(q, outcome="answered")
+    assert runner.render_false_refusals([answered]) == []
+    assert runner.read_failed_sentences("nope") is None
+    assert runner.read_failed_sentences([{"text": "a"}]) == [{"text": "a", "reason": ""}]
 
 
 # ---------------------------------------------------------------------------------------------
