@@ -85,10 +85,7 @@ def test_mock_judge_supports_two_shared_words_and_names_the_lines() -> None:
     assert data["verdicts"][0] == {
         "index": 1,
         "supported": True,
-        "evidence": [
-            {"chunk": "c1", "start_line": 10, "end_line": 10},
-            {"chunk": "c1", "start_line": 11, "end_line": 11},
-        ],
+        "evidence": [{"chunk": "c1", "start_line": 10, "end_line": 12}],  # the whole cited chunk
     }
     assert data["verdicts"][1]["supported"] is False  # no word shared
     # Through the real acceptance rules: the first passes, the second fails.

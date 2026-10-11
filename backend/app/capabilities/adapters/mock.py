@@ -12,8 +12,8 @@ Test hooks (docs/ARCHITECTURE.md, "Test hooks"):
 
 - A question containing ``TB-UNSUPPORTED`` gets one extra sentence, :data:`UNSUPPORTED_SENTENCE`,
   citing ``c1``. It fails verification, so the answer is ``partially_verified``.
-- Code judge prompts (schema with ``verdicts``): a statement is supported when its cited lines
-  share at least two content words with it; those lines are named as evidence.
+- Judge prompts (schema with ``verdicts``): a statement is supported when its cited lines share
+  at least two content words with it; each cited chunk's whole line range is the evidence.
 - :class:`MockSearchAdapter`: the ``mock`` web-search provider, fixed results for any query.
 """
 
@@ -76,9 +76,12 @@ def grounded_answer(chunks: Sequence[PromptChunk], question: str) -> dict[str, A
 
 
 def judge_verdicts(prompt: str) -> dict[str, Any]:
-    """Mock code judge: supported when the cited lines share 2+ content words with the statement.
+    """Mock judge: supported when the cited lines share 2+ content words with the statement.
 
-    The lines that share a word are the evidence, one range per line.
+    The evidence is each cited chunk's whole line range. A real judge names the exact lines; the
+    mock exists for UI tests, and picking only word-sharing lines missed lines that hold a
+    statement's anchors (``DEFAULT_POOL_SIZE = 10``), so the confirmation step vetoed true answers.
+    The anchoring rules themselves are unchanged and tested with explicit judge replies.
     """
     chunks, statements = parse_judge_prompt(prompt)
     verdicts: list[dict[str, Any]] = []
@@ -87,11 +90,12 @@ def judge_verdicts(prompt: str) -> dict[str, Any]:
         shared: set[str] = set()
         evidence: list[dict[str, Any]] = []
         for label in statement.labels:
-            for number, line in chunks.get(label, []):
-                common = terms & set(content_terms(line))
-                if common:
-                    shared |= common
-                    evidence.append({"chunk": label, "start_line": number, "end_line": number})
+            lines = chunks.get(label, [])
+            for _number, line in lines:
+                shared |= terms & set(content_terms(line))
+            if lines:
+                first, last = lines[0][0], lines[-1][0]
+                evidence.append({"chunk": label, "start_line": first, "end_line": last})
         supported = len(shared) >= JUDGE_MIN_SHARED
         verdicts.append(
             {"index": index, "supported": supported, "evidence": evidence if supported else []}
