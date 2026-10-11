@@ -34,7 +34,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [~] F3 code-05 answers again; split oversized table chunks (ref-near-10); ref-near-07
 - [ ] F4 Run the full gate command 3× on the workbench; all 3 must pass; report all 3 in GATES.md
 - [ ] F5 Eval runs use temperature 0 + fixed seed (per-request generation override used only by the runner; SPEC's 0.2 default unchanged)
-- [ ] F6 Runner `--chat-endpoint` / `--chat-model` overrides; model name in the report header; gate run with a stronger reference model (Qwen3.5-122B-A10B) alongside Qwen3.6, both in GATES.md
+- [ ] F6 Runner `--chat-endpoint` / `--chat-model` overrides; model name in the report header; gate run with a stronger reference model (Qwen3.8-27B-UD-Q4_K_XL, chosen by Ludwig) alongside Qwen3.6, both in GATES.md
 
 - [ ] A One of the 3 workbench gate runs uses the app default (temperature 0.2, no seed), labelled "real-use" in GATES.md
 - [ ] B e2e + eval assert JOB status (done/failed) and the Queue UI state for every source type (paste, upload, URL, YouTube, search, folder)

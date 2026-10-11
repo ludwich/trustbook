@@ -562,7 +562,7 @@ grounding correctness > data safety > simplicity > performance > features.
   that only the eval runner sends. The app's SPEC default (temperature 0.2) is unchanged. One of the three
   workbench gate runs deliberately uses that default, labelled "real-use", to show behaviour in normal use.
 - **Model comparison:** the runner takes `--chat-endpoint` / `--chat-model`, and the report header names the model.
-  Gate 3 is also run with a stronger reference model (`Qwen3.5-122B-A10B` on Ludwig's server) so failures can be
+  Gate 3 is also run with a stronger reference model (`Qwen3.8-27B-UD-Q4_K_XL` on Ludwig's server, his choice) so failures can be
   attributed to the pipeline or to the model. Results go to `docs/MODELS.md` with a recommended minimum model.
 - **Job status, not only source status:** e2e and eval assert the ingest **job** status and the Queue UI state for
   every source type. A bare `raise` once failed every job while every source looked ready.
