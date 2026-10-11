@@ -570,3 +570,23 @@ grounding correctness > data safety > simplicity > performance > features.
   tied to `CHUNKER_VERSION` and the embedding model revision so it cannot be forgotten (the Phase 3 chunker left
   the Phase 2 "Indexing code" rate in place).
 - **Scope:** Phase 3b (agent CLI + Claude Code skill) is queued after Gate 3 passes, not mixed into the fixes.
+
+### D-056 e2e: every source type's ingest job must agree with its source (item B)
+- `frontend/e2e/job-status.spec.ts` adds one source of each type and waits until **both** the source
+  (ready/failed) and its job from `GET /api/jobs` (via `source.job_id`) have finished. A source turns ready
+  a moment before its job closes, so polling only the source would miss a job that fails afterwards (the F1 bug).
+- **The invariant** (helper `expectSourceMatchesJob`): ready ⇔ job `done` with no error; failed ⇔ job `failed`
+  whose `error` equals the source's `failure_reason`. After each test every source left in the space is
+  checked the same way. The Queue page must list the job under "Recently finished" with the matching
+  badge (Done/Failed), the reason for a failure, and never under "In progress and waiting".
+- **Per type:** paste through the UI (Done), text-file upload through the UI (Done), PDF upload (the existing
+  OCR spec now also checks its job), folder (Done; needs `E2E_BROWSE_ROOT`), LAN URL (Failed, local-network
+  reason), `https://example.com/` (Done; skipped only when a HEAD probe from the test runner fails, so an
+  offline runner is not a false failure), YouTube "Me at the zoo" (Done **or** Failed with a reason, since
+  captions may be blocked from CI; the outcome is recorded as a test annotation), web search with the mock
+  provider (its specific results are `*.example.com` sub-domains that do not resolve → Failed, "Trustbook could
+  not reach this site.").
+- **The bug class itself:** after a successful paste the header processing indicator returns to empty, the
+  Queue shows exactly one job for the space, Done, no Failed row and no unfinished list, and the API lists the
+  space's jobs as `["done"]`.
+- No app code or API changed; the Queue's existing `job-<id>` test ids and badges were enough.
