@@ -23,8 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from app.chunking.dispatch import CHUNKER_VERSION, chunk_file, chunk_snapshot
+from app.chunking.dispatch import CHUNKER_VERSION, chunk_file, chunk_snapshot, snapshot_files
 from app.chunking.document import ChunkDraft
+from app.chunking.structure import structure_json
 from app.chunking.tokens import TokenCounter
 from app.db.models import Chunk, SourceFile
 from app.ingest.folder import FolderSnapshot, PreviousFile, PreviousSnapshot
@@ -133,12 +134,15 @@ def _new_rows(source_id: str, drafts: Iterable[ChunkDraft]) -> list[Chunk]:
             end_offset=d.end,
             locator=json.dumps(d.locator),
             token_count=d.token_count,
+            parent_key=d.parent_key,
+            structure=structure_json(d.structure) if d.structure is not None else None,
         )
         for d in drafts
     ]
 
 
 def _moved(chunk: Chunk, delta: int) -> Chunk:
+    # Parent keys and structure are file-relative (D-077): they move with the file unchanged.
     return Chunk(
         id=chunk.id,
         source_id=chunk.source_id,
@@ -148,6 +152,8 @@ def _moved(chunk: Chunk, delta: int) -> Chunk:
         end_offset=chunk.end_offset + delta,
         locator=chunk.locator,
         token_count=chunk.token_count,
+        parent_key=chunk.parent_key,
+        structure=chunk.structure,
     )
 
 
@@ -165,13 +171,14 @@ def plan_chunks(
     files: list[SourceFile] = []
     if isinstance(snapshot, FolderSnapshot):
         kept_by_path = previous.chunks if previous is not None else {}
+        paths = snapshot_files(snapshot)
         for entry in snapshot.files:
             old_start = snapshot.reused.get(entry.path)
             kept = kept_by_path.get(entry.path)
             if old_start is not None and kept is not None:
                 file_rows = [_moved(c, entry.start - old_start) for c in kept]
             else:
-                file_rows = _new_rows(source_id, chunk_file(snapshot, entry, counter))
+                file_rows = _new_rows(source_id, chunk_file(snapshot, entry, counter, paths))
                 new_rows.extend(file_rows)
             rows.extend(file_rows)
             sha = snapshot.hashes.get(entry.path)

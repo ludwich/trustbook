@@ -134,6 +134,27 @@ def test_refresh_without_changes_embeds_nothing(client: TestClient, paths: Paths
     ]
 
 
+def test_refresh_keeps_each_kept_chunks_parent(client: TestClient, paths: Paths) -> None:
+    """D-077: parent keys and structure are file-relative, so a reused file's chunks keep them
+    while their offsets move; the chunk API never shows them (they are not citable)."""
+    services = services_of(client)
+    root, sid, source_id = _setup(client, paths)
+    first = _chunks(services, sid, source_id)
+    send = _by_symbol(first, "src/b.py", "Client.send")
+    assert send.parent_key == "src/b.py::Client"
+    assert send.structure is not None and '"kind":"class"' in send.structure
+    readme = next(c for c in first if json.loads(c.locator)["file"] == "README.md")
+    assert readme.parent_key == "README.md#L1"
+    (root / "src" / "a.py").write_text("import os\n\n\n" + A_PY)  # b.py moves in the snapshot
+    _refresh(client, sid, source_id)
+    moved = _by_symbol(_chunks(services, sid, source_id), "src/b.py", "Client.send")
+    assert moved.id == send.id and moved.start_offset > send.start_offset
+    assert (moved.parent_key, moved.structure) == (send.parent_key, send.structure)
+    shown = client.get(f"/api/spaces/{sid}/chunks/{send.id}").json()
+    assert "parent_key" not in shown and "structure" not in shown
+    assert "parent" not in json.dumps(shown["locator"])
+
+
 def test_failed_refresh_forgets_file_records(
     client: TestClient, paths: Paths, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -283,4 +283,6 @@ def _row(chunk: Chunk, title: str) -> ChunkRow:
         text=chunk.text,
         locator=parse_locator(chunk.locator),
         token_count=chunk.token_count,
+        parent_key=chunk.parent_key,
+        structure=parse_structure(chunk.structure),
     )

@@ -78,6 +78,10 @@ class Chunk(SQLModel, table=True):
     end_offset: int
     locator: str = "{}"
     token_count: int
+    # The chunk's parent (D-077, migration 005): its parent key and the JSON structure record
+    # (app/chunking/structure.py). Navigation data for retrieval only, never citable.
+    parent_key: str | None = None
+    structure: str | None = None
 
 
 class Conversation(SQLModel, table=True):

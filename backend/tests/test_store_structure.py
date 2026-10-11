@@ -1,14 +1,17 @@
-"""D-077 interface: ChunkRow parent fields, FileRows and chunks_at_ordinals."""
+"""D-077: ChunkRow parent fields, FileRows, chunks_at_ordinals, migration 005 and refresh."""
 
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine, event, text
 
+from app.chunking.dispatch import CHUNKER_VERSION
+from app.chunking.document import ChunkDraft
 from app.chunking.structure import (
     Structure,
     class_key,
@@ -17,7 +20,9 @@ from app.chunking.structure import (
     structure_json,
 )
 from app.db.engine import get_engine
-from app.db.migrate import migrate
+from app.db.migrate import MIGRATIONS_ROOT, migrate
+from app.ingest import incremental
+from app.jobs.calibration import pipeline_key
 from app.retrieval.service import RetrievedChunk
 from app.retrieval.store import ChunkRow, FileRows, chunks_at_ordinals, load_chunks
 from tests.chat_helpers import add_source
@@ -32,17 +37,18 @@ AddRow = Callable[..., str]
 
 
 def _engine(tmp_path: Path, *, parent_columns: bool) -> Engine:
+    """A space.db at the latest schema, or (``parent_columns=False``) one migrated only up to
+    004, as a space.db looks before migration 005 (D-077)."""
     db = tmp_path / "space.db"
-    migrate(db, "space")
-    engine = get_engine(db)
     if parent_columns:
-        with engine.begin() as conn:
-            names = {r[1] for r in conn.execute(text("PRAGMA table_info(chunks)"))}
-            # The columns of migration 005 (D-077), added here until the migration exists.
-            for column in ("parent_key", "structure"):
-                if column not in names:
-                    conn.execute(text(f"ALTER TABLE chunks ADD COLUMN {column} TEXT"))
-    return engine
+        migrate(db, "space")
+    else:
+        root = tmp_path / "migrations"
+        (root / "space").mkdir(parents=True)
+        for path in sorted((MIGRATIONS_ROOT / "space").glob("00[1-4]_*.sql")):
+            shutil.copy(path, root / "space" / path.name)
+        migrate(db, "space", root)
+    return get_engine(db)
 
 
 @pytest.fixture
@@ -205,3 +211,65 @@ def test_chunks_at_ordinals(engine: Engine) -> None:
 
     assert chunks_at_ordinals(engine, source, [0], [other]) == {}
     assert chunks_at_ordinals(engine, source, [], [source]) == {}
+
+
+# --- migration 005, rows and refresh (D-077) ---------------------------------------------------
+
+
+def test_migration_005_applies_to_an_existing_space_db(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, parent_columns=False)  # a space.db as it was before 005
+    source = add_source(engine, "requests")
+    old = adder(engine, source, parent_columns=False)(0)
+    engine.dispose()
+    assert migrate(tmp_path / "space.db", "space") == 5
+    engine = get_engine(tmp_path / "space.db")
+    with engine.connect() as conn:
+        columns = {r[1] for r in conn.execute(text("PRAGMA table_info(chunks)"))}
+        indexes = {r[1] for r in conn.execute(text("PRAGMA index_list(chunks)"))}
+    assert {"parent_key", "structure"} <= columns
+    assert "chunks_parent" in indexes
+    row = load_chunks(engine, [old], [source])[old]
+    assert (row.parent_key, row.structure) == (None, None)  # old rows: no parent until refresh
+
+
+def test_rows_carry_the_parent_through_the_orm(engine: Engine) -> None:
+    source = add_source(engine, "requests")
+    add = adder(engine, source)
+    good = add(0, parent_key=class_key(ADAPTERS, "HTTPAdapter"), structure=structure_json(HEAD))
+    broken = add(1, parent_key=module_key(ADAPTERS), structure='{"kind": "module", "title": 3}')
+    rows = load_chunks(engine, [good, broken], [source])
+    assert rows[good].parent_key == class_key(ADAPTERS, "HTTPAdapter")
+    assert rows[good].structure == HEAD
+    assert rows[broken].parent_key == module_key(ADAPTERS)
+    assert rows[broken].structure is None  # a misshapen record reads as no structure
+
+
+def test_new_rows_store_the_structure_and_moved_rows_keep_it() -> None:
+    draft = ChunkDraft(
+        "File: x.py (lines 1-2)\nA = 1\nB = 2",
+        10,
+        20,
+        {"file": "x.py"},
+        9,
+        module_key("x.py"),
+        MODULE,
+    )
+    (row,) = incremental._new_rows("s", [draft])
+    assert row.parent_key == module_key("x.py")
+    assert row.structure == structure_json(MODULE)
+    plain = ChunkDraft("transcript turn", 0, 5, {"start_s": 0.0}, 3)
+    (none,) = incremental._new_rows("s", [plain])
+    assert (none.parent_key, none.structure) == (None, None)
+    moved = incremental._moved(row, 100)
+    assert (moved.start_offset, moved.end_offset) == (110, 120)
+    assert (moved.parent_key, moved.structure) == (row.parent_key, row.structure)
+    assert moved.id == row.id and moved.text == row.text
+
+
+def test_chunker_version_six_changes_the_calibration_pipeline() -> None:
+    """D-077: the chunker bump re-chunks every file on refresh and makes saved calibration
+    rates stale (D-057), without anyone bumping CALIBRATION_VERSION."""
+    assert CHUNKER_VERSION == "p3-treesitter-6"
+    current = pipeline_key("google/embeddinggemma-2", "rev")
+    assert "chunker-p3-treesitter-6" in current
+    assert current != current.replace("p3-treesitter-6", "p3-treesitter-5")
