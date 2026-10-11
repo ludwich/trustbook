@@ -28,10 +28,18 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] Cited file/line ranges exist at the indexed commit; eval runner metric "cited ranges valid" against the checkout (Gate 3)
 - [x] Secrets: planted fake secret in a generated test folder is skipped (Gate 3), test generated at runtime (never commit a secret-looking string)
 
+## 3b. Gate 3 failure fixes (Ludwig, 2026-10-11)
+- [x] F1 BLOCKING: bare `raise` in ingest handler `finally` failed every successful job (fixed `2a4924a`, job-status test)
+- [~] F2 Wrong citations from function-level chunks (code-02, docs-04, ref-near-05): fix chunk boundaries/retrieval; never widen the key — list believed-correct citations in GATES.md for approval
+- [~] F3 code-05 answers again; split oversized table chunks (ref-near-10); ref-near-07
+- [ ] F4 Run the full gate command 3× on the workbench; all 3 must pass; report all 3 in GATES.md
+- [ ] F5 Eval runs use temperature 0 + fixed seed (per-request generation override used only by the runner; SPEC's 0.2 default unchanged)
+- [ ] F6 Runner `--chat-endpoint` / `--chat-model` overrides; model name in the report header; gate run with a stronger reference model (Qwen3.5-122B-A10B) alongside Qwen3.6, both in GATES.md
+
 ## 4. Gate
 - [x] CI green, PR `phase-3 → main` (#4), `:phase-3-rc` published from `92a8b12` (e2e gate passes)
 - [x] GATES.md Gate 3 checklist incl. per-category false refusals and p95 latency
-- [x] `docker image prune -f`; stop and summarise — **waiting for Ludwig's Gate 3 verdict** (this commit is pushed with the merge)
+- [ ] `docker image prune -f`; stop and summarise (Gate 3 attempt 1 failed; fixing)
 
 ## Notes for a restarted session
 - Quality bar script (stops on first failure): scratchpad `qbar.sh`; never chain checks through `| tail`.
