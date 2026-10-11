@@ -36,8 +36,17 @@ FENCE = re.compile(r" {0,3}(```|~~~)")
 # A line that is something else than a title: bullet item, table row, quote, directive, field.
 _NOT_TITLE = re.compile(r"[-*+][ \t]|[|>]|\.\.[ \t]|:[A-Za-z]|```|~~~")
 MIN_ADORNMENT = 3
+# Text documents written in Markdown; other text files (.rst, .txt, …) get reStructuredText
+# heading rules. Documents parsed from other formats (PDF, Word, …) are Markdown too.
+MARKDOWN_EXTENSIONS = frozenset({"md", "markdown"})
 SEPARATOR = " › "
 MAX_PATH_CHARS = 200
+
+
+def markdown_file(path: str) -> bool:
+    """Whether a text file's headings follow Markdown rules (by its extension)."""
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    return "." in name and name.rsplit(".", 1)[-1].lower() in MARKDOWN_EXTENSIONS
 
 
 @dataclass(frozen=True)

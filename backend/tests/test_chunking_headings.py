@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.chunking.dispatch import chunk_file, chunk_snapshot
 from app.chunking.document import pack_units
-from app.chunking.header import document_header, header_context
+from app.chunking.header import document_header, header_context, section_at
 from app.chunking.headings import Heading, HeadingPaths, find_headings, path_text
 from app.chunking.units import Unit, split_units
 from app.index.base import search_text
@@ -86,6 +86,11 @@ def test_document_header_and_its_context() -> None:
     assert document_header("a.pdf", "Results", None) == "File: a.pdf · Results"
     assert header_context("File: a.md (lines 1-2)\nx", "a.md") == ""
     assert header_context("no header", "a.md") == ""
+    # The section of a body line: the header's, until a heading inside the chunk takes over.
+    chunk = header + "\n2.32.0 (2024-05-20)\n---\n- entry\n\n2.31.0 (2023-05-22)\n---\n- old"
+    assert section_at(chunk, "HISTORY.md", 159, 161) == "Release History › 2.32.0 (2024-05-20)"
+    assert section_at(chunk, "HISTORY.md", 159, 163) == "2.31.0 (2023-05-22)"
+    assert section_at(chunk, "HISTORY.md", 159, 165) == "2.31.0 (2023-05-22)"
     # Full-text search keeps the heading path and drops only the line numbers (D-051).
     assert search_text(header + "\nbody") == (
         "File: HISTORY.md · Release History › 2.32.0 (2024-05-20)\nbody"

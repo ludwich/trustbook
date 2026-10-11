@@ -7,7 +7,7 @@ from typing import Any
 
 from app.chunking.document import ChunkDraft, Header, Locate, chunk_document
 from app.chunking.header import document_header
-from app.chunking.headings import HeadingPaths, find_headings, path_text
+from app.chunking.headings import HeadingPaths, find_headings, markdown_file, path_text
 from app.chunking.syntax import chunk_source_code
 from app.chunking.tokens import TokenCounter
 from app.chunking.transcript import chunk_transcript
@@ -56,17 +56,6 @@ class _LineIndex:
 
     def line(self, offset: int) -> int:
         return bisect.bisect_left(self._newlines, offset) + 1
-
-
-# Text documents written in Markdown; other text files (.rst, .txt, …) get reStructuredText
-# heading rules. Documents parsed from other formats (PDF, Word, …) are Markdown too.
-MARKDOWN_EXTENSIONS = frozenset({"md", "markdown"})
-
-
-def _markdown_file(path: str, parsed: bool) -> bool:
-    name = path.rsplit("/", 1)[-1]
-    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-    return parsed or extension in MARKDOWN_EXTENSIONS
 
 
 def _file_document_locator(
@@ -133,7 +122,7 @@ def chunk_file(snapshot: Snapshot, entry: FileEntry, counter: TokenCounter) -> l
     paged = any(s.file == entry.path and s.page is not None for s in snapshot.segments)
     parsed = any(s.file == entry.path and s.start_line is None for s in snapshot.segments)
     headings = find_headings(
-        text, entry.start, entry.end, markdown=_markdown_file(entry.path, parsed)
+        text, entry.start, entry.end, markdown=parsed or markdown_file(entry.path)
     )
     sections = HeadingPaths(headings)
     return chunk_document(

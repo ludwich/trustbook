@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import re
 
+from app.chunking.headings import find_headings, markdown_file
+
 # ``(part N)`` of a split data literal's header, which is always the chunk's first line.
 _PART_IN_HEADER = re.compile(r"\A(File: [^\n]*?) \(part (\d+)\)(?= \(lines \d+-\d+\))")
 _LINES_SUFFIX = re.compile(r" \(lines \d+-\d+\)\Z")
@@ -59,6 +61,22 @@ def header_context(chunk_text: str, path: str) -> str:
     if not first.startswith(prefix):
         return ""
     return _LINES_SUFFIX.sub("", first[len(prefix) :]).strip()
+
+
+def section_at(chunk_text: str, path: str, first_line: int, line: int) -> str:
+    """The section a document file's chunk puts line ``line`` in (``first_line`` is its first body
+    line): the header's heading path, or, below a heading inside the body, that heading's title.
+
+    Strict on purpose: a line after a later heading in the chunk is never given the header's
+    section, and only the innermost title of a heading inside the body is returned.
+    """
+    context = header_context(chunk_text, path)
+    body = chunk_text.partition("\n")[2]
+    for heading in reversed(find_headings(body, 0, len(body), markdown=markdown_file(path))):
+        at = first_line + body.count("\n", 0, heading.start)
+        if first_line < at <= line:
+            return heading.title
+    return context
 
 
 def header_part(chunk_text: str) -> int | None:
