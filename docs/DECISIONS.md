@@ -969,7 +969,7 @@ under test. Choices under §15:
 - **Measured** on the `requests` folder (the Smoke snapshot's corpus re-chunked inside trustbook-g3 with the
   production tokenizer; scripts in the session scratchpad `r2chunk/`):
   - Document chunks 137 → 173 (code chunks unchanged), mean 424 → 328 tokens, max 543 → 560. HISTORY.md 44 → 63,
-    quickstart.rst 12 → 17, advanced.rst 29 → 33, api.rst 5 → 8; 18 of 30 files unchanged.
+    quickstart.rst 12 → 17, advanced.rst 29 → 33, api.rst 5 → 8; the count is unchanged for 22 of 30 files.
   - Line range equals the body exactly (first line's indentation included): 94/137 → 173/173.
   - 170/173 chunks name a heading; the 3 without are files with no heading (two issue templates,
     requirements-dev.txt).
@@ -1022,7 +1022,7 @@ behaviour is new):
 - `app/retrieval/definitions.py` (`code_body`, `code_file`, split-literal parts): strips the first line and reads
   the locator; a document's `header_part` is `None` (no `· symbol (part N)`), so nothing changes.
 - `app/spaces/chunk_context.py` (viewer): line-located chunks show the file's lines from the snapshot; the header is
-  stripped like a code chunk's. `label_for` already prints `<file> · Section: <heading>` for paged documents.
+  stripped like a code chunk's. Paged documents keep their label (`<file> · Page 3`); pages win over the heading.
 - `app/capabilities/adapters/mock.py`: strips any `File:` first line before quoting (the mock never quotes headers).
 - `app/ingest/incremental.py` and the viewer's offset check compare the body (`endswith`), so reused file records
   still match; a record from another `CHUNKER_VERSION` is re-chunked.
