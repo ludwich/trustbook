@@ -624,3 +624,63 @@ def test_import_resolution_within_the_snapshot() -> None:
     assert files.script("web/src/a.ts", "./y") == "web/src/y.js"
     assert files.script("web/src/a.ts", "react") is None
     assert files.script("web/src/a.ts", "../../../x") is None
+
+
+JS_BLOCKS = """import { TIMEOUT } from './config';
+if (process.env.FAST) {
+  const TIMEOUT = 1;
+  let RETRIES = 2;
+  var HOISTED = 3;
+  function local() { return 4; }
+  class Local {}
+  warm(TIMEOUT);
+} else {
+  const OTHER = 5;
+}
+try {
+  const TRIED = 6;
+} catch (e) {
+  let CAUGHT = 7;
+} finally {
+  var LAST = 8;
+}
+{
+  const BARE = 9;
+}
+export const TOP = 10;
+export function fetchIt(url) { return fetch(url, { timeout: TIMEOUT }); }
+"""
+TS_NAMESPACE = """namespace Inner {
+  export const HIDDEN = 1;
+}
+export const SHOWN = 2;
+"""
+PY_BLOCKS = """if FAST:
+    TIMEOUT = 1
+else:
+    TIMEOUT = 2
+try:
+    LIMIT = 3
+except ImportError:
+    LIMIT = 4
+"""
+
+
+def test_only_names_of_the_module_scope_are_module_defines() -> None:
+    """JS/TS blocks have their own scope: a ``const`` / ``let`` / ``function`` / ``class`` in a
+    top-level ``if``, ``try`` or bare block is not the module's, a ``var`` is; a TS namespace's
+    members are ``Inner.x``. Python's ``if`` / ``try`` blocks share the module's scope."""
+    files = {"lib/client.js": JS_BLOCKS, "lib/ns.ts": TS_NAMESPACE, "lib/flags.py": PY_BLOCKS}
+    drafts = chunk_snapshot(code_snapshot(files), CharEstimate())
+
+    def module_defines(path: str) -> set[str]:
+        return {
+            name
+            for d in of_file(drafts, path)
+            if d.structure is not None and d.parent_key == module_key(path)
+            for name in d.structure.defines
+        }
+
+    assert module_defines("lib/client.js") == {"HOISTED", "LAST", "TOP", "fetchIt"}
+    assert module_defines("lib/ns.ts") == {"SHOWN"}
+    assert module_defines("lib/flags.py") == {"TIMEOUT", "LIMIT"}

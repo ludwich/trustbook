@@ -84,10 +84,10 @@ FILES = {
 }
 
 
-def snapshot() -> Snapshot:
+def snapshot(files: dict[str, str] | None = None) -> Snapshot:
     builder = SnapshotBuilder()
     entries: list[FileEntry] = []
-    for path, body in FILES.items():
+    for path, body in (FILES if files is None else files).items():
         builder.text(f"# {path}\n\n")
         start, end = builder.add(body, file=path, start_line=1, end_line=body.count("\n") + 1)
         builder.text("\n\n")
@@ -95,10 +95,12 @@ def snapshot() -> Snapshot:
     return Snapshot(builder.build(), "files", builder.segments, files=entries)
 
 
-def index(engine: Engine, *, structure: bool) -> tuple[str, list[ChunkRow]]:
+def index(
+    engine: Engine, *, structure: bool, files: dict[str, str] | None = None
+) -> tuple[str, list[ChunkRow]]:
     """A source holding the fixture's chunks (``structure=False``: as rows indexed before
     chunker p3-treesitter-6, without parent data), and its rows by ordinal."""
-    drafts = chunk_snapshot(snapshot(), CharEstimate())
+    drafts = chunk_snapshot(snapshot(files), CharEstimate())
     if not structure:
         drafts = [dataclasses.replace(d, parent_key=None, structure=None) for d in drafts]
     source = add_source(engine, "pkg")
@@ -274,3 +276,26 @@ def test_without_the_row_cache_structured_rows_take_the_old_path(engine: Engine)
         (c.locator, n) for c, n, _ in callee_extras([plain_send], plain)
     ]
     assert module_key(ADAPTERS) in {r.parent_key for r in rows}
+
+
+BLOCK_SCOPED = {
+    "lib/config.js": "export const TIMEOUT = 30;\n",
+    "lib/client.js": (
+        "import { TIMEOUT } from './config';\nif (process.env.FAST) {\n  const TIMEOUT = 1;\n"
+        "  warm(TIMEOUT);\n}\n"
+        "export function fetchIt(url) { return fetch(url, { timeout: TIMEOUT }); }\n"
+    ),
+}
+
+
+def test_a_block_scoped_js_const_is_never_a_modules_definition(engine: Engine) -> None:
+    """``const TIMEOUT = 1`` inside a top-level ``if`` block is not the module's ``TIMEOUT``: the
+    function uses the imported one, so the block's value must not be added as its definition."""
+    source, rows = index(engine, structure=True, files=BLOCK_SCOPED)
+    fetch_it = chunk(rows, "lib/client.js", "fetchIt")
+    file_rows = FileRows(engine, [source])
+    wanted = [w for w in definitions.wanted_names([fetch_it]) if w.name == "TIMEOUT"]
+    assert wanted and definitions.family_definition(file_rows, wanted[0]) is None
+    found = definition_extras(engine, [fetch_it], file_rows=file_rows)
+    assert not any("TIMEOUT = 1" in e.row.text for e in found)
+    assert found == definition_extras(engine, [fetch_it])

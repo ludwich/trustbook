@@ -201,12 +201,18 @@ GRAMMARS: dict[str, Grammar] = {
 
 # Structure (D-077): blocks whose statements count as the enclosing level's own (``try:`` imports,
 # ``if TYPE_CHECKING:``), declarations that bind their ``name``, imports, and what a class's
-# declaration line leaves out.
+# declaration line leaves out. Only Python blocks share their level's scope: in JavaScript and
+# TypeScript a block's ``const`` / ``let`` / ``class`` / ``function`` is the block's own, and only
+# ``var`` (:data:`_HOISTED`) binds at the enclosing level.
 _BLOCK_TYPES = frozenset(
     {"if_statement", "elif_clause", "else_clause", "try_statement", "except_clause"}
     | {"except_group_clause", "finally_clause", "with_statement", "block", "catch_clause"}
     | {"statement_block"}
 )
+_HOISTED = frozenset({"variable_declaration"})
+# Namespaces whose members are the file's own top-level declarations (C#); a TypeScript
+# ``namespace N { … }`` member is ``N.x``, not a name of the module.
+_SHARED_NAMESPACES = frozenset({"namespace_declaration"})
 _NAMED_DECLARATIONS = frozenset({"type_alias_declaration", "delegate_declaration"})
 _IMPORT_TYPES = frozenset(
     {"import_statement", "import_from_statement", "future_import_statement", "using_directive"}
@@ -898,17 +904,24 @@ class _FileChunker:
 
     # --- structure (D-077) -------------------------------------------------------------------
 
-    def _level_nodes(self, children: list[Node]) -> Iterator[Node]:
-        """The statements at one level: namespace members and the statements inside top-level
-        ``if`` / ``try`` / ``with`` blocks count as the level's own."""
+    def _level_nodes(self, children: list[Node], *, scoped: bool = False) -> Iterator[Node]:
+        """The statements at one level: C# namespace members and the statements inside
+        top-level ``if`` / ``try`` / ``with`` blocks count as the level's own; in a block of a
+        language with block scope (``scoped``) only a hoisted ``var`` does."""
+        python = self.grammar is GRAMMARS["python"]
         for child in children:
             if child.type in _BLOCK_TYPES:
-                yield from self._level_nodes(list(child.named_children))
+                inside = list(child.named_children)
+                yield from self._level_nodes(inside, scoped=scoped or not python)
+                continue
+            if scoped:
+                if child.type in _HOISTED:
+                    yield child
                 continue
             if self.grammar.namespaces:
                 inner = self._unwrap(child)
                 body = inner.child_by_field_name("body")
-                if inner.type in self.grammar.namespaces and body is not None:
+                if inner.type in _SHARED_NAMESPACES and body is not None:
                     yield from self._level_nodes(list(body.named_children))
                     continue
             yield child
