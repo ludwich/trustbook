@@ -12,6 +12,12 @@ Test hooks (docs/ARCHITECTURE.md, "Test hooks"):
 
 - A question containing ``TB-UNSUPPORTED`` gets one extra sentence, :data:`UNSUPPORTED_SENTENCE`,
   citing ``c1``. It fails verification, so the answer is ``partially_verified``.
+- A question containing ``TB-OUTLINE-FACT`` gets one extra sentence naming, in backticks, a name
+  that only the prompt's code outline shows (D-077), citing ``c1``. The outline is not a chunk, so
+  the sentence fails layer 5 and is removed. Without an outline nothing is added.
+
+The mock never quotes the outline otherwise: answers and judge verdicts read only the numbered
+chunks (:func:`~app.chat.prompt.parse_prompt` returns the outline separately).
 - Judge prompts (schema with ``verdicts``): a statement is supported when its cited lines share
   at least two content words with it; each cited chunk's whole line range is the evidence.
 - :class:`MockSearchAdapter`: the ``mock`` web-search provider, fixed results for any query.
@@ -37,6 +43,9 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 MAX_QUOTE_CHARS = 300
 UNSUPPORTED_TRIGGER = "TB-UNSUPPORTED"
 UNSUPPORTED_SENTENCE = "This also requires a licence key from the vendor."
+OUTLINE_FACT_TRIGGER = "TB-OUTLINE-FACT"
+OUTLINE_FACT_SENTENCE = "The file also defines `{name}`."
+_OUTLINE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 JUDGE_MIN_SHARED = 2
 
 
@@ -67,8 +76,29 @@ def _best_sentence(chunk: PromptChunk, terms: set[str]) -> str:
     return truncate(best, MAX_QUOTE_CHARS)
 
 
-def grounded_answer(chunks: Sequence[PromptChunk], question: str) -> dict[str, Any]:
-    """1–2 sentences quoting the best-matching chunk(s), or no sentences when nothing matches."""
+def outline_only_name(chunks: Sequence[PromptChunk], outline: str) -> str | None:
+    """The first name of the outline's ``module:`` or class lines that no chunk contains."""
+    texts = [c.text for c in chunks]
+    for line in outline.splitlines():
+        _, sep, names = line.partition(": ")
+        if not sep or line.strip().startswith("imports:"):
+            continue
+        for name in _OUTLINE_NAME.findall(names):
+            if name in ("class", "and", "more"):
+                continue
+            if not any(re.search(rf"(?<!\w){re.escape(name)}(?!\w)", t) for t in texts):
+                return str(name)
+    return None
+
+
+def grounded_answer(
+    chunks: Sequence[PromptChunk], question: str, outline: str = ""
+) -> dict[str, Any]:
+    """1–2 sentences quoting the best-matching chunk(s), or no sentences when nothing matches.
+
+    ``outline``: the prompt's code outline; never quoted (only the ``TB-OUTLINE-FACT`` hook names
+    one of its names).
+    """
     terms = set(content_terms(question))
     scored = [(_overlap(terms, c.text), i, c) for i, c in enumerate(chunks)]
     matching = sorted((s for s in scored if s[0] > 0), key=lambda s: (-s[0], s[1]))
@@ -83,6 +113,11 @@ def grounded_answer(chunks: Sequence[PromptChunk], question: str) -> dict[str, A
             sentences.append({"text": text, "chunk_ids": [second.label]})
     if UNSUPPORTED_TRIGGER in question and chunks:
         sentences.append({"text": UNSUPPORTED_SENTENCE, "chunk_ids": [chunks[0].label]})
+    if OUTLINE_FACT_TRIGGER in question and chunks:
+        name = outline_only_name(chunks, outline)
+        if name is not None:
+            text = OUTLINE_FACT_SENTENCE.format(name=name)
+            sentences.append({"text": text, "chunk_ids": [chunks[0].label]})
     return {"sentences": sentences}
 
 
@@ -193,11 +228,11 @@ class MockChatAdapter:
         if isinstance(properties, dict) and "sentences" in properties:
             # The prompt with the chunks is the first user message (a retry appends more).
             prompt = next((m["content"] for m in messages if m["role"] == "user"), "")
-            chunks, question = parse_prompt(prompt)
+            parts = parse_prompt(prompt)
             if "questions" in properties:
-                data = grounded_overview(chunks)
+                data = grounded_overview(parts.chunks)
             else:
-                data = grounded_answer(chunks, question or "")
+                data = grounded_answer(parts.chunks, parts.question or "", parts.outline)
             text = json.dumps(data, ensure_ascii=False)
             return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
         if last_user.strip().lower().startswith("reply with ok"):

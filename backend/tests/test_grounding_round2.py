@@ -582,8 +582,8 @@ def test_the_regeneration_gets_the_feedback_and_its_citations_are_checked_as_giv
     )
     outcome = run(chat, {})
     assert isinstance(outcome, Refused) and outcome.refusal.reason == "unsupported"
-    system = chat.calls[1]["messages"][0]["content"]
-    assert f'1. "{first}" (cited c2): `requests.codes.teapot` is not in c2; it is in c1.' in system
+    user = chat.calls[1]["messages"][1]["content"]
+    assert f'1. "{first}" (cited c2): `requests.codes.teapot` is not in c2; it is in c1.' in user
     assert [f.model_dump() for f in outcome.diagnostics.failed_sentences] == [
         {"text": first, "reason": "`requests.codes.teapot` is not in the cited chunks"}
     ]
@@ -611,12 +611,11 @@ def test_a_verified_answer_has_no_failed_sentences() -> None:
 def test_the_first_answer_prompt_has_no_feedback() -> None:
     found = [code("d", CODES_DOC, 1, 3, "src/requests/status_codes.py")]
     failed = [FailedSentence("x", ("c1",))]
-    plain = answer_messages(QUESTION, found, failed=failed)[0]["content"]
-    assert FEEDBACK_HEADING not in plain  # only the regeneration carries it
-    assert (
-        FEEDBACK_HEADING
-        in answer_messages(QUESTION, found, regenerate=True, failed=failed)[0]["content"]
-    )
+    plain = answer_messages(QUESTION, found, failed=failed)
+    assert all(FEEDBACK_HEADING not in m["content"] for m in plain)  # only the regeneration
+    again = answer_messages(QUESTION, found, regenerate=True, failed=failed)
+    assert FEEDBACK_HEADING in again[1]["content"]  # in the user message (D-079)
+    assert again[0] == plain[0]  # the system message is the same on both attempts
 
 
 @pytest.mark.parametrize(

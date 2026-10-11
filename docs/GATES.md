@@ -284,6 +284,30 @@ Other checks:
 | Memory during the run | 6.3 GB, no OOM |
 | CI on `phase-3` | see PR checks |
 
+### Round 2b: parent context and latency (D-077..D-080; to be filled at the gate)
+
+Every run's report has a "Latency and judge calls" section (`eval/runner.py`, defined in `eval/format.md`); its
+numbers go in this table. N is the answers that reached generation; answers refused before any answer call are
+listed apart. "Over 60 s" is flagged in the report only when the computed p95 is over 60 s (at most 2 of 45 over
+60 s guarantee p95 ≤ 60 s; 3 can still give a p95 under 60 s).
+
+| Run | Model, temperature | Parent context / outline | Precision | Refusals | Code FR | Latency p50 / p95 | Over 60 s | Judge calls / answer: mean / p95 / max (0 / 1 / 2 / ≥3) | Judge s p50 / p95 (share) | Answer calls mean / max | Regenerations | First-call prompt tokens p50 / p95 | Promoted / outline tokens p95 | Outline-only failures (regenerated) | Promoted citations (correct) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pre-gate on | Qwen3.6, 0 / seed 42, changed questions only | on / on | | | | | | | | | | | | | |
+| pre-gate off | Qwen3.6, 0 / seed 42, changed questions only | off / off | | | | | | | | | | | | | |
+| 1 | Qwen3.6, 0 / seed 42 | on / on | | | | | | | | | | | | | |
+| 2 | Qwen3.6, 0 / seed 42 | on / on | | | | | | | | | | | | | |
+| real-use | Qwen3.6, 0.2 (app default) | on / on | | | | | | | | | | | | | |
+| reference | Qwen3.8-27B, 0 / seed 42 | on / on | | | | | | | | | | | | | |
+
+**How to verify:** each row's numbers are in that run's report under "Latency and judge calls" (and the
+`latency` block of its sidecar, version 4). The switches are `retrieval.parent_context` / `retrieval.outline`
+(`PUT /api/settings` with `{"retrieval": {...}}`, no restart); the run's sidecar records them as
+`retrieval_settings`. `--compare` lists questions whose outline alone changed separately ("outline only").
+**If the computed p95 is over 60 s,** the levers are, in order and never a threshold (D-080): outline off if
+outline-only failures caused regenerations; `EXPANSION_TOKENS` 900 → 500 and `EXPAND_TOP` 3 → 2; parent context
+off (recorded in D-077).
+
 ### Known limits
 - Big data tables (e.g. `status_codes.py`) are single chunks, and answers about one entry can be missed
   (ref-near-10).

@@ -43,8 +43,17 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
     transcripts later: ~1–2k-token window with speakers + timestamps); citations always the child's exact
     lines/timestamps, never the parent; replace the D-032 constant lookup and the callee lookup where possible
     (DECISION); fixes ref-near-03 (release heading outside the chunk); CHUNKER_VERSION/calibration bump if chunks change
-- [ ] Latency: judge calls per answer in diagnostics + eval report; judge calls/answer and p95 in GATES.md;
-  p95 ≤ 60 s with Qwen3.6 (strict judge now also runs on prose and borderline passes)
+    - [~] slice A (D-077 data, D-078): parent keys + structure records at chunk time, `p3-treesitter-6`, space
+      migration 005, D-032 constants / D-058 literal parts through the module family (`FileRows`); parity run
+    - [x] slice B (D-077 expansion, D-079, D-080): `retrieval/parents.py` (promotions + code outline, caps
+      120/300 tokens; fitting keeps the expanded class line last), `retrieval.parent_context` / `retrieval.outline`
+      switches, outline section after the chunks with its own rule (system message unchanged), regeneration text
+      in the user message, grounding isolation tests, diagnostics (`judge_calls`, timings, tokens, expansions)
+    - [ ] merge A + B; retrieval-only diff over 45 questions; seeded on/off run of the changed questions
+    - [ ] D-069 claim replay keeps false passes at 0; fill the D-078 parity numbers
+- [~] Latency: judge calls per answer in diagnostics + eval report (D-080, done in slice B); judge calls/answer and
+  p95 in GATES.md (round 2b table added, to fill); p95 ≤ 60 s with Qwen3.6 (strict judge now also runs on prose
+  and borderline passes): 3 Qwen3.6 runs (one real-use) + 1 Qwen3.8-27B run
 - [ ] F4 Run the full gate command 3× on the workbench; all 3 must pass; report all 3 in GATES.md
 - [x] F5 Eval runs use temperature 0 + fixed seed (per-request generation override used only by the runner; SPEC's 0.2 default unchanged)
 - [~] F6 Runner `--chat-endpoint` / `--chat-model` overrides (done); model name in the report header (done); gate run with a stronger reference model (Qwen3.8-27B-UD-Q4_K_XL, chosen by Ludwig) alongside Qwen3.6, both in GATES.md

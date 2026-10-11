@@ -29,6 +29,7 @@ from tests.chat_helpers import (
 )
 from tests.conftest import AppFactory
 from tests.fakes import FakeGrounding, Router
+from tests.parent_helpers import ADAPTERS, adapters_specs, add_rows, doc, with_parent_rows
 
 GUIDE = "Requests is an HTTP library for Python. Proxies are configured with the proxies argument."
 QUOTE = "Proxies are configured with the proxies argument."
@@ -160,6 +161,10 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
     assert diagnostics.pop("judge_seconds") is None
     fingerprint = diagnostics.pop("retrieval_fingerprint")
     assert isinstance(fingerprint, str) and len(fingerprint) == 16
+    timings = diagnostics.pop("timings")
+    assert len(timings["generation_s"]) == 2 and len(timings["verification_s"]) == 2
+    assert timings["citation_s"] is None and timings["gate_s"] >= 0
+    assert len(diagnostics.pop("prompt_tokens")) == 2
     assert diagnostics == {
         "top_rerank": 1.0,
         "sentence_scores": [0.0],
@@ -170,12 +175,27 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
         "generation": {"temperature": 0.2, "seed": None},
         # The second reply's failed sentence and why it failed (D-075).
         "failed_sentences": [{"text": "Another invention.", "reason": "checker score 0.00 < 0.5"}],
+        # Latency (D-080): two answer calls and two passes, no judge call.
+        "judge_calls": 0,
+        "judge_calls_per_pass": [0, 0],
+        "answer_calls": 2,
+        "completion_tokens": [None, None],
+        "outline_only": [0, 0],
+        "expansions": [],
+        "promoted_tokens": 0,
+        "outline_tokens": 0,
+        "outline_fingerprint": None,
+        "promoted_cited": [0, 0],
     }
     assert len(chat.calls) == 2  # answer, regeneration
-    # The regeneration is told which sentence of the first reply failed and why (D-074).
-    system = chat.calls[1]["messages"][0]["content"]
-    assert '1. "Made-up fact." (cited c1): not supported by the cited chunks.' in system
-    assert "Made-up fact." not in chat.calls[0]["messages"][0]["content"]
+    # The regeneration is told which sentence of the first reply failed and why (D-074), in the
+    # user message; the system message is the same on both attempts (D-079).
+    first, second = (call["messages"] for call in chat.calls)
+    assert (
+        '1. "Made-up fact." (cited c1): not supported by the cited chunks.' in second[1]["content"]
+    )
+    assert "Made-up fact." not in first[1]["content"]
+    assert second[0] == first[0]
 
 
 def test_generation_override_reaches_the_answer_and_judge_calls(
@@ -462,3 +482,97 @@ def test_gate_log_routes(env: Env) -> None:
     assert missing.status_code == 404
     assert missing.json() == {"detail": "Gate log entry not found."}
     assert env.client.get("/api/spaces/nope/gate-log").status_code == 404
+
+
+# --- parent context and latency diagnostics (D-077, D-079, D-080) ----------------------------
+
+PARENT_QUESTION = "How does send use the connection and urlparse request url?"
+
+
+def adapters_source(env: Env, monkeypatch: pytest.MonkeyPatch) -> tuple[str, dict[int, str]]:
+    """A folder source with ``adapters.py`` (structure as slice A stores it) and notes that
+    outrank the class head, so ``HTTPAdapter.send`` is a child whose head gets promoted."""
+    with_parent_rows(monkeypatch)
+    source = add_source(env.engine, "requests", source_type="folder", group="code")
+    notes = [
+        doc(
+            20 + n,
+            1,
+            5,
+            f"Note {n} about the request.",
+            section=None,
+            head=False,
+            file=f"notes{n}.md",
+        )
+        for n in range(8)
+    ]
+    ids = add_rows(env.engine, env.index, source, [*adapters_specs(), *notes])
+    folder = env.services.spaces.get(env.space_id).folder / "sources" / source
+    folder.mkdir(parents=True)
+    segments = [{"start": 0, "end": 9999, "file": ADAPTERS, "start_line": 1, "end_line": 300}]
+    (folder / "map.json").write_text(
+        json.dumps({"version": 1, "kind": "files", "segments": segments})
+    )
+    return source, ids
+
+
+def stored_locator(env: Env, chunk_id: str) -> dict[str, Any]:
+    from sqlalchemy import text as sql
+
+    with env.engine.connect() as conn:
+        raw = conn.execute(sql("SELECT locator FROM chunks WHERE id = :id"), {"id": chunk_id})
+        value: dict[str, Any] = json.loads(raw.scalar_one())
+    return value
+
+
+def test_a_code_answer_reports_parent_context_judge_calls_and_timings(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, ids = adapters_source(env, monkeypatch)
+    message = env.ask(f"{PARENT_QUESTION} TB-OUTLINE-FACT")[-1][1]["message"]
+    d = message["diagnostics"]
+    # The class head is promoted for the send child; the outline goes with it.
+    assert d["expansions"] == [{"chunk_id": ids[2], "kind": "class_head", "referrer": ids[5]}]
+    assert d["promoted_tokens"] == 60 and d["outline_tokens"] > 0
+    assert isinstance(d["outline_fingerprint"], str) and len(d["outline_fingerprint"]) == 16
+    # The mock's outline-only sentence is removed and counted (D-079: it fails closed).
+    assert message["badge"] == "partially_verified"
+    (removed,) = message["removed_sentences"]
+    assert removed.startswith("The file also defines `") and d["outline_only"] == [1]
+    # Latency (D-080).
+    assert d["answer_calls"] == 1 and len(d["prompt_tokens"]) == 1 and d["prompt_tokens"][0] > 0
+    assert d["judge_calls"] >= 1 and d["judge_calls_per_pass"] == [d["judge_calls"]]
+    timings = d["timings"]
+    assert set(timings) == {
+        "retrieval_s",
+        "generation_s",
+        "verification_s",
+        "citation_s",
+        "gate_s",
+        "total_s",
+    }
+    assert len(timings["generation_s"]) == 1 and len(timings["verification_s"]) == 1
+    assert timings["total_s"] >= timings["retrieval_s"] >= 0 and timings["gate_s"] >= 0
+    # Citations are the child chunks' own locators, never a parent span.
+    for sentence in message["content"]["sentences"]:
+        for citation in sentence["citations"]:
+            assert citation["locator"] == stored_locator(env, citation["chunk_id"])
+            assert "parent_key" not in citation["locator"]
+
+
+def test_the_outline_changes_only_the_outline_fingerprint(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapters_source(env, monkeypatch)
+    on = env.ask(PARENT_QUESTION)[-1][1]["message"]["diagnostics"]
+    put = env.client.put("/api/settings", json={"retrieval": {"outline": False}})
+    assert put.status_code == 200
+    no_outline = env.ask(PARENT_QUESTION)[-1][1]["message"]["diagnostics"]
+    assert no_outline["retrieval_fingerprint"] == on["retrieval_fingerprint"]
+    assert no_outline["outline_fingerprint"] is None and no_outline["outline_tokens"] == 0
+    assert no_outline["expansions"] == on["expansions"]  # promotions stay
+    env.client.put("/api/settings", json={"retrieval": {"parent_context": False}})
+    off = env.ask(PARENT_QUESTION)[-1][1]["message"]["diagnostics"]
+    assert off["expansions"] == [] and off["promoted_tokens"] == 0
+    # The promoted chunk was a numbered chunk: the context fingerprint covers it.
+    assert off["retrieval_fingerprint"] != on["retrieval_fingerprint"]

@@ -23,18 +23,24 @@
    extension): supporting chunks only, near-copies collapsed, the defining chunk preferred.
 
 Citation numbers are given after removal, in order of first use among the kept sentences.
+
+Parent context (D-077, D-079): the retrieval's promoted chunks are ordinary numbered chunks; its
+code outline goes into the prompt after the chunks and nowhere else. No check reads it: it is not
+a chunk, so nothing only the outline shows can verify. The diagnostics count such failures
+(``outline_only``) and record the time, judge calls and answer calls of each step (D-080).
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from app.chat.citation_choice import choose, upgrade_candidates
 from app.chat.citations import number_citations
-from app.chat.llm import ChatAdapterFactory, generate_structured
+from app.chat.llm import AnswerCall, ChatAdapterFactory, generate_structured
 from app.chat.output import DraftSentence, InvalidOutputError, ParsedAnswer, parse_answer
 from app.chat.prompt import (
     ANSWER_SCHEMA,
@@ -47,6 +53,7 @@ from app.chat.schemas import (
     Badge,
     CitationChange,
     Diagnostics,
+    ExpansionOut,
     FailedSentenceOut,
     Generation,
     GenerationUsed,
@@ -54,10 +61,12 @@ from app.chat.schemas import (
     RefusalReason,
     SentenceOut,
     Stage,
+    Timings,
 )
 from app.chat.text import content_terms, question_topic
 from app.grounding.code_checks import name_in, unescape_markdown, without_location
 from app.grounding.verify import Checked, Verifier
+from app.retrieval.parents import outline_fingerprint, outline_text
 from app.retrieval.service import Retrieval, RetrievedChunk
 
 logger = logging.getLogger("trustbook.chat")
@@ -320,6 +329,96 @@ def retrieval_fingerprint(chunks: Sequence[RetrievedChunk]) -> str | None:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
+def outline_only(
+    sentences: Sequence[DraftSentence],
+    checked: Checked,
+    chunks: Mapping[str, RetrievedChunk],
+    outline: str,
+) -> int:
+    """Diagnostics only (D-077): failed sentences missing a name or literal that the outline
+    shows and no labelled chunk holds. Never used to decide a sentence."""
+    if not outline:
+        return 0
+    return sum(
+        1
+        for check in checked.checks
+        if not check.passed
+        and any(
+            name_in(name, [outline]) and not any(_holds(name, c) for c in chunks.values())
+            for name in check.missing
+        )
+    )
+
+
+def _round(seconds: float) -> float:
+    return round(seconds, 3)
+
+
+@dataclass
+class _Meter:
+    """What one answer spent: time, answer calls and judge calls per step (D-080)."""
+
+    started: float = field(default_factory=time.perf_counter)
+    retrieval: Retrieval | None = None
+    retrieval_s: float | None = None
+    calls: list[AnswerCall] = field(default_factory=list)
+    verification_s: list[float] = field(default_factory=list)
+    judge_per_pass: list[int] = field(default_factory=list)
+    outline_only: list[int] = field(default_factory=list)
+    citation_s: float | None = None
+    promoted_cited: tuple[int, int] = (0, 0)
+
+    def check(
+        self,
+        verifier: Verifier,
+        sentences: list[DraftSentence],
+        chunks: Mapping[str, RetrievedChunk],
+    ) -> Checked:
+        """One verification pass (:func:`check_sentences`), timed and counted."""
+        started, judged = time.perf_counter(), verifier.judge_calls
+        checked = check_sentences(verifier, sentences, chunks)
+        self.verification_s.append(_round(time.perf_counter() - started))
+        self.judge_per_pass.append(verifier.judge_calls - judged)
+        outline = outline_text(self.retrieval.outline) if self.retrieval is not None else ""
+        self.outline_only.append(outline_only(sentences, checked, chunks, outline))
+        return checked
+
+    def update(self, verifier: Verifier) -> dict[str, object]:
+        update: dict[str, object] = {
+            "judge_calls": verifier.judge_calls,
+            "judge_calls_per_pass": list(self.judge_per_pass),
+            "answer_calls": len(self.calls),
+            "timings": Timings(
+                retrieval_s=self.retrieval_s,
+                generation_s=[_round(c.seconds) for c in self.calls],
+                verification_s=list(self.verification_s),
+                citation_s=self.citation_s,
+                total_s=_round(time.perf_counter() - self.started),
+            ),
+            "prompt_tokens": [c.prompt_tokens for c in self.calls],
+            "completion_tokens": [c.completion_tokens for c in self.calls],
+            "outline_only": list(self.outline_only),
+            "promoted_cited": list(self.promoted_cited),
+        }
+        retrieval = self.retrieval
+        if retrieval is not None:
+            promoted = retrieval.promoted
+            update["expansions"] = [
+                ExpansionOut(chunk_id=c.chunk_id, kind=c.expansion or "", referrer=c.referrer)
+                for c in promoted
+            ]
+            update["promoted_tokens"] = sum(max(0, c.token_count) for c in promoted)
+            update["outline_tokens"] = sum(b.tokens for b in retrieval.outline)
+            update["outline_fingerprint"] = outline_fingerprint(retrieval.outline)
+        return update
+
+
+def promoted_cited(kept: Sequence[Kept], chunks: Mapping[str, RetrievedChunk]) -> tuple[int, int]:
+    """(kept sentences citing a promoted chunk, those of them also citing another chunk)."""
+    citing = [k for k in kept if any(chunks[i].expansion is not None for i in k.sentence.chunk_ids)]
+    return len(citing), sum(1 for k in citing if len(set(k.sentence.chunk_ids)) > 1)
+
+
 def answer(
     question: str,
     *,
@@ -333,10 +432,39 @@ def answer(
     """Answer ``question`` from the space's sources or refuse. Adapter errors propagate.
 
     ``generation`` overrides the answer call's temperature and seed (eval runs, F5); the seed
-    also goes to the judge through the verifier the caller built.
+    also goes to the judge through the verifier the caller built. Every outcome's diagnostics
+    carry the time, answer calls and judge calls it took (D-080).
     """
+    meter = _Meter()
+    outcome = _answer(
+        question,
+        meter,
+        retrieve=retrieve,
+        chat_adapter=chat_adapter,
+        refuse_threshold=refuse_threshold,
+        verifier=verifier,
+        on_stage=on_stage,
+        generation=generation,
+    )
+    diagnostics = outcome.diagnostics.model_copy(update=meter.update(verifier))
+    return replace(outcome, diagnostics=diagnostics)
+
+
+def _answer(
+    question: str,
+    meter: _Meter,
+    *,
+    retrieve: Callable[[str], Retrieval],
+    chat_adapter: ChatAdapterFactory,
+    refuse_threshold: float,
+    verifier: Verifier,
+    on_stage: Callable[[Stage], None],
+    generation: Generation | None,
+) -> Outcome:
     on_stage("retrieving")
+    started = time.perf_counter()
     retrieval = retrieve(question)
+    meter.retrieval, meter.retrieval_s = retrieval, _round(time.perf_counter() - started)
     if not retrieval.source_ids:
         return Refused(refusal("no_sources", question))
     top = retrieval.top_score
@@ -359,11 +487,18 @@ def answer(
     def generate(regenerate: bool, failed: Sequence[FailedSentence] = ()) -> ParsedAnswer:
         return generate_structured(
             adapter,
-            answer_messages(question, retrieval.chunks, regenerate=regenerate, failed=failed),
+            answer_messages(
+                question,
+                retrieval.chunks,
+                outline=retrieval.outline,
+                regenerate=regenerate,
+                failed=failed,
+            ),
             ANSWER_SCHEMA,
             lambda text: parse_answer(text, chunks.keys()),
             temperature=temperature,
             seed=seed,
+            calls=meter.calls,
         )
 
     try:
@@ -382,7 +517,7 @@ def answer(
         logger.info("Dropped %d sentence(s) without valid citations", len(parsed.dropped))
 
     sentences = parsed.sentences
-    checked = check_sentences(verifier, sentences, chunks)
+    checked = meter.check(verifier, sentences, chunks)
     regenerated = False
     if checked.refuse:
         # One regeneration whenever the refusal rule would fire: more than half failed, or the
@@ -408,7 +543,7 @@ def answer(
             )
         parsed = second
         sentences = parsed.sentences
-        checked = check_sentences(verifier, sentences, chunks)
+        checked = meter.check(verifier, sentences, chunks)
 
     changes = _Changes()
     if checked.refuse:
@@ -423,7 +558,10 @@ def answer(
             _diagnostics(diagnostics, checked, verifier, regenerated, changes, chunks, sentences),
         )
 
+    started = time.perf_counter()
     kept, removed = choose_citations(question, sentences, checked, chunks, verifier, changes)
+    meter.citation_s = _round(time.perf_counter() - started)
+    meter.promoted_cited = promoted_cited(kept, chunks)
     diagnostics = _diagnostics(
         diagnostics, checked, verifier, regenerated, changes, chunks, sentences
     )

@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import ServicesDep
-from app.config import Power, Settings, Thresholds
+from app.config import Power, RetrievalSettings, Settings, Thresholds
 from app.jobs.pool import workers_for_power
 
 router = APIRouter()
@@ -37,6 +37,16 @@ class SettingsOut(BaseModel):
     workers_by_power: WorkersByPower
     thresholds: Thresholds
     hints_dismissed: list[str]
+    retrieval: RetrievalSettings
+
+
+class RetrievalUpdate(BaseModel):
+    """The D-077 kill switches; a field left out keeps its value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parent_context: bool | None = None
+    outline: bool | None = None
 
 
 class SettingsUpdate(BaseModel):
@@ -44,6 +54,7 @@ class SettingsUpdate(BaseModel):
 
     power: Power | None = None
     dismiss_hint: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
+    retrieval: RetrievalUpdate | None = None
 
 
 def _settings_out(settings: Settings) -> SettingsOut:
@@ -58,6 +69,7 @@ def _settings_out(settings: Settings) -> SettingsOut:
         ),
         thresholds=settings.thresholds,
         hints_dismissed=list(settings.hints_dismissed),
+        retrieval=settings.retrieval,
     )
 
 
@@ -99,6 +111,11 @@ def put_settings(body: SettingsUpdate, services: ServicesDep) -> SettingsOut:
             settings.power = body.power
         if body.dismiss_hint is not None and body.dismiss_hint not in settings.hints_dismissed:
             settings.hints_dismissed.append(body.dismiss_hint)
+        if body.retrieval is not None:
+            if body.retrieval.parent_context is not None:
+                settings.retrieval.parent_context = body.retrieval.parent_context
+            if body.retrieval.outline is not None:
+                settings.retrieval.outline = body.retrieval.outline
 
     updated = services.settings.update(apply)
     services.pool.resize(workers_for_power(updated.power))

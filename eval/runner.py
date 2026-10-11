@@ -4,8 +4,9 @@
 Asks every question in one or more YAML question files (format: ``eval/format.md``) against a
 space of a running Trustbook, then prints a Markdown report ready to paste into ``docs/GATES.md``:
 citation precision, correct-refusal rate, ``must_contain`` hit rate, false refusals (overall, per
-category and on code questions), answer latency p50/p95 and, with ``--code-root``, whether every
-cited file/line range exists in a checkout of the corpus.
+category and on code questions), answer latency p50/p95, judge calls and time per answer, answers
+over 60 s and regenerations (D-080) and, with ``--code-root``, whether every cited file/line range
+exists in a checkout of the corpus.
 
 Usage (from the repo root, with the backend's virtualenv)::
 
@@ -608,6 +609,20 @@ class QuestionResult:
     # ``diagnostics.failed_sentences``: each failed sentence of a refused or partially verified
     # answer and why it failed (D-075); None when the API did not send them.
     failed_sentences: list[dict[str, str]] | None = None
+    # Latency (D-080) and parent context (D-077) from ``diagnostics``; None when not sent.
+    judge_calls: int | None = None
+    judge_calls_per_pass: list[int] | None = None
+    judge_seconds: float | None = None
+    answer_calls: int | None = None
+    timings: dict[str, Any] | None = None
+    prompt_tokens: list[int] | None = None
+    completion_tokens: list[int | None] | None = None
+    expansions: list[dict[str, Any]] | None = None
+    promoted_tokens: int | None = None
+    outline_tokens: int | None = None
+    outline_fingerprint: str | None = None
+    outline_only: list[int] | None = None
+    promoted_cited: list[int] | None = None
 
     @property
     def answer_text(self) -> str:
@@ -824,6 +839,263 @@ def sweep(
     return rows
 
 
+# ---------------------------------------------------------------------------------------------
+# Latency and judge calls (D-080; rules in eval/format.md, "Latency and judge calls")
+# ---------------------------------------------------------------------------------------------
+
+
+def reached_generation(r: QuestionResult) -> bool | None:
+    """Whether the answer made an answer call (None: the API did not report ``answer_calls``)."""
+    if r.answer_calls is None:
+        return None
+    return r.answer_calls > 0
+
+
+def allowed_over(n: int, limit_p: float = 95.0) -> int:
+    """How many of ``n`` latencies may exceed a bound while :func:`percentile` ``limit_p`` stays
+    within it: those above the upper rank the interpolation reads (2 of 45 for p95)."""
+    if n <= 0:
+        return 0
+    return n - 1 - math.ceil((n - 1) * limit_p / 100.0)
+
+
+def promoted_citations(r: QuestionResult) -> dict[str, int] | None:
+    """Citations of the answer to promoted chunks (D-077) and how many of them are correct
+    (inside an expected locator); None when the API sent no ``expansions``."""
+    if r.expansions is None:
+        return None
+    promoted = {e["chunk_id"] for e in r.expansions}
+    pairs = [
+        (c, ok)
+        for c, ok in zip(r.citations, r.correct or [False] * len(r.citations), strict=False)
+        if c.chunk_id in promoted
+    ]
+    return {"n": len(pairs), "correct": sum(1 for _, ok in pairs if ok)}
+
+
+@dataclass(frozen=True)
+class Latency:
+    """The per-run latency and judge numbers of the report and the sidecar."""
+
+    generated: list[QuestionResult]  # answers that reached generation (N)
+    before_generation: list[str]  # ids refused before any answer call
+    unknown: list[str]  # ids without ``answer_calls`` (an older API, or an error)
+    timed: list[QuestionResult]  # answered or refused, with a latency (the p50/p95 set)
+
+    @property
+    def judge_calls(self) -> list[int]:
+        return [r.judge_calls for r in self.generated if r.judge_calls is not None]
+
+    @property
+    def judge_seconds(self) -> list[float]:
+        return [r.judge_seconds or 0.0 for r in self.generated if r.judge_calls is not None]
+
+    @property
+    def judge_share(self) -> float | None:
+        total = sum(r.latency_s or 0.0 for r in self.generated)
+        return sum(r.judge_seconds or 0.0 for r in self.generated) / total if total else None
+
+    @property
+    def answer_calls(self) -> list[int]:
+        return [r.answer_calls for r in self.generated if r.answer_calls is not None]
+
+    @property
+    def regenerated(self) -> list[QuestionResult]:
+        return [r for r in self.generated if r.regenerated]
+
+    @property
+    def over(self) -> list[QuestionResult]:
+        return [r for r in self.timed if (r.latency_s or 0.0) > P95_FLAG_S]
+
+    @property
+    def first_prompt_tokens(self) -> list[int]:
+        return [r.prompt_tokens[0] for r in self.generated if r.prompt_tokens]
+
+    def tokens(self, name: str) -> list[int]:
+        values = [getattr(r, name) for r in self.generated]
+        return [v for v in values if isinstance(v, int)]
+
+    @property
+    def outline_only(self) -> list[QuestionResult]:
+        return [r for r in self.generated if r.outline_only and any(r.outline_only)]
+
+    @property
+    def promoted_citations(self) -> tuple[int, int]:
+        found = [p for p in (promoted_citations(r) for r in self.generated) if p is not None]
+        return sum(p["n"] for p in found), sum(p["correct"] for p in found)
+
+
+def latency_stats(results: Sequence[QuestionResult]) -> Latency:
+    generated: list[QuestionResult] = []
+    before: list[str] = []
+    unknown: list[str] = []
+    for r in results:
+        reached = reached_generation(r)
+        if reached is None:
+            unknown.append(r.question.id)
+        elif reached:
+            generated.append(r)
+        elif r.outcome == "refused":
+            before.append(r.question.id)
+    timed = [r for r in results if r.outcome in ("answered", "refused") and r.latency_s is not None]
+    return Latency(generated, before, unknown, timed)
+
+
+def _stats(values: Sequence[float]) -> dict[str, float | None]:
+    return {
+        "mean": sum(values) / len(values) if values else None,
+        "p50": percentile(values, 50),
+        "p95": percentile(values, 95),
+        "max": max(values) if values else None,
+    }
+
+
+def _distribution(calls: Sequence[int]) -> dict[str, int]:
+    return {
+        "0": sum(1 for c in calls if c == 0),
+        "1": sum(1 for c in calls if c == 1),
+        "2": sum(1 for c in calls if c == 2),
+        "3+": sum(1 for c in calls if c >= 3),
+    }
+
+
+def latency_json(results: Sequence[QuestionResult]) -> dict[str, Any]:
+    """The run's latency and judge numbers for the sidecar (numbers and ids only)."""
+    lat = latency_stats(results)
+    promoted, correct = lat.promoted_citations
+    return {
+        "generated": len(lat.generated),
+        "before_generation": lat.before_generation,
+        "unknown": lat.unknown,
+        "judge_calls": _stats(lat.judge_calls) | {"distribution": _distribution(lat.judge_calls)},
+        "judge_seconds": {
+            "p50": percentile(lat.judge_seconds, 50),
+            "p95": percentile(lat.judge_seconds, 95),
+            "share": lat.judge_share,
+        },
+        "answer_calls": _stats(lat.answer_calls),
+        "regenerated": len(lat.regenerated),
+        "over_60_s": [r.question.id for r in lat.over],
+        "timed": len(lat.timed),
+        "allowed_over_60_s": allowed_over(len(lat.timed)),
+        "first_prompt_tokens": _stats(lat.first_prompt_tokens),
+        "promoted_tokens": _stats(lat.tokens("promoted_tokens")),
+        "outline_tokens": _stats(lat.tokens("outline_tokens")),
+        "outline_only": {
+            "answers": [r.question.id for r in lat.outline_only],
+            "sentences": sum(sum(r.outline_only or []) for r in lat.outline_only),
+            "regenerated": sum(1 for r in lat.outline_only if r.regenerated),
+        },
+        "promoted_citations": {"n": promoted, "correct": correct},
+    }
+
+
+def _num_cell(value: float | None, digits: int = 1) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.{digits}f}" if value != int(value) else f"{int(value)}"
+
+
+def render_latency(results: Sequence[QuestionResult]) -> list[str]:
+    """``#### Latency and judge calls`` (D-080): where the answer time went, per run."""
+    lat = latency_stats(results)
+    if not lat.generated and not lat.before_generation:
+        return []
+    n = len(lat.generated)
+    calls = lat.judge_calls
+    stats = _stats(calls)
+    dist = _distribution(calls)
+    judge_s = lat.judge_seconds
+    share = lat.judge_share
+    answer = _stats(lat.answer_calls)
+    m = compute_metrics(results)
+    before = (
+        f" ({len(lat.before_generation)} refused before generation: "
+        + ", ".join(f"`{q}`" for q in lat.before_generation)
+        + ")"
+        if lat.before_generation
+        else ""
+    )
+    timed = len(lat.timed)
+    over = lat.over
+    allowed = allowed_over(timed)
+    # The flag follows the computed p95: more than ``allowed`` answers over the bound is only
+    # where p95 <= bound stops being guaranteed, not a breach (the p95 interpolates).
+    p95 = percentile([r.latency_s for r in lat.timed if r.latency_s is not None], 95)
+    over_flag = f" **p95 over {P95_FLAG_S:g} s**" if p95 is not None and p95 > P95_FLAG_S else ""
+
+    def tokens(values: Sequence[int]) -> str:
+        return f"{_num_cell(percentile(values, 50), 0)} / {_num_cell(percentile(values, 95), 0)}"
+
+    only = lat.outline_only
+    only_sentences = sum(sum(r.outline_only or []) for r in only)
+    only_regen = sum(1 for r in only if r.regenerated)
+    promoted, correct = lat.promoted_citations
+    out = ["#### Latency and judge calls", ""]
+    out.append("| Measure | Value |")
+    out.append("|---|---|")
+    out.append(f"| Answers that reached generation (N) | {n}{before} |")
+    out.append(
+        f"| Judge calls per answer: mean / p50 / p95 / max | {_num_cell(stats['mean'], 2)} / "
+        f"{_num_cell(stats['p50'])} / {_num_cell(stats['p95'])} / {_num_cell(stats['max'])} |"
+    )
+    out.append(
+        f"| Answers with 0 / 1 / 2 / ≥3 judge calls | {dist['0']} / {dist['1']} / {dist['2']} "
+        f"/ {dist['3+']} |"
+    )
+    out.append(
+        f"| Judge seconds per answer: p50 / p95 | {_secs(percentile(judge_s, 50))} / "
+        f"{_secs(percentile(judge_s, 95))} |"
+    )
+    share_cell = "n/a" if share is None else f"{share * 100:.1f}%"
+    out.append(f"| Judge share of answer time | {share_cell} |")
+    out.append(
+        f"| Answer calls per answer: mean / max | {_num_cell(answer['mean'], 2)} / "
+        f"{_num_cell(answer['max'])} |"
+    )
+    out.append(f"| Regenerations | {len(lat.regenerated)}/{n} |")
+    out.append(
+        f"| Answers over {P95_FLAG_S:g} s | {len(over)}/{timed} (at most {allowed} guarantee "
+        f"p95 <= {P95_FLAG_S:g} s){over_flag} |"
+    )
+    out.append(f"| Latency p50 / p95 | {_secs(m.latency_p50)} / {_secs(m.latency_p95)} |")
+    out.append(
+        f"| Prompt tokens of the first answer call: p50 / p95 | {tokens(lat.first_prompt_tokens)} |"
+    )
+    out.append(f"| Promoted tokens: p50 / p95 | {tokens(lat.tokens('promoted_tokens'))} |")
+    out.append(f"| Outline tokens: p50 / p95 | {tokens(lat.tokens('outline_tokens'))} |")
+    out.append(
+        f"| Outline-only failures | {only_sentences} sentence(s) in {len(only)} answer(s), "
+        f"{only_regen} of them regenerated |"
+    )
+    out.append(
+        f"| Citations to promoted chunks | {promoted} ({correct} inside an expected locator) |"
+    )
+    if lat.unknown:
+        out.append(
+            f"| Answers without latency diagnostics | {len(lat.unknown)} (older API or error) |"
+        )
+    out.append("")
+    if over:
+        out.append(f"Answers over {P95_FLAG_S:g} s:")
+        out.append("")
+        for r in sorted(over, key=lambda r: -(r.latency_s or 0.0)):
+            t = r.timings or {}
+            gen = t.get("generation_s")
+            ver = t.get("verification_s")
+            gen_s = sum(gen) if isinstance(gen, list) else None
+            ver_s = sum(ver) if isinstance(ver, list) else None
+            regen = ", regenerated" if r.regenerated else ""
+            out.append(
+                f"- `{r.question.id}`: {_secs(r.latency_s)}; generation {_secs(gen_s)} in "
+                f"{r.answer_calls if r.answer_calls is not None else '?'} call(s), verification "
+                f"{_secs(ver_s)}, judge {_secs(r.judge_seconds)} in "
+                f"{r.judge_calls if r.judge_calls is not None else '?'} call(s){regen}"
+            )
+        out.append("")
+    return out
+
+
 def has_diagnostics(results: Sequence[QuestionResult]) -> bool:
     return any(r.top_rerank is not None or r.sentence_scores is not None for r in results)
 
@@ -832,7 +1104,8 @@ def _ratio_json(r: Ratio) -> dict[str, Any]:
     return {"num": r.num, "den": r.den, "value": r.value}
 
 
-SIDECAR_VERSION = 3
+# 4: wf-2's version 3 plus the D-080 latency fields and the D-077 parent context fields.
+SIDECAR_VERSION = 4
 FAILED_TEXT_CHARS = 300  # the app caps failed sentences at this; the runner does too
 
 
@@ -860,6 +1133,7 @@ def sidecar(
         if thresholds is None
         else {"refuse": thresholds.refuse, "verify": thresholds.verify},
         "generation_requested": info.generation,
+        "retrieval_settings": info.retrieval,
         "chat": None
         if chat is None
         else {
@@ -907,9 +1181,24 @@ def sidecar(
                 "retrieval_fingerprint": r.retrieval_fingerprint,
                 "generation": r.generation,
                 "failed_sentences": r.failed_sentences,
+                "judge_calls": r.judge_calls,
+                "judge_calls_per_pass": r.judge_calls_per_pass,
+                "judge_seconds": r.judge_seconds,
+                "answer_calls": r.answer_calls,
+                "timings": r.timings,
+                "prompt_tokens": r.prompt_tokens,
+                "completion_tokens": r.completion_tokens,
+                "expansions": r.expansions,
+                "promoted_tokens": r.promoted_tokens,
+                "outline_tokens": r.outline_tokens,
+                "outline_fingerprint": r.outline_fingerprint,
+                "outline_only": r.outline_only,
+                "promoted_cited": r.promoted_cited,
+                "promoted_citations": promoted_citations(r),
             }
             for r in results
         ],
+        "latency": latency_json(results),
         "false_refusals": {
             group: _ratio_json(ratio) for group, ratio in metrics.false_refusal_by_group.items()
         },
@@ -993,6 +1282,19 @@ class Api:
         if refuse is None or verify is None:
             return None
         return Thresholds(refuse=refuse, verify=verify)
+
+    def retrieval_settings(self) -> dict[str, bool] | None:
+        """The parent context switches in use (D-077), or None if the API does not report them."""
+        try:
+            data = self._request("GET", "/api/settings", "read settings")
+        except ApiUnreachableError:
+            raise
+        except EvalError:
+            return None
+        raw = data.get("retrieval") if isinstance(data, dict) else None
+        if not isinstance(raw, dict):
+            return None
+        return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, bool)}
 
     def health(self) -> dict[str, Any]:
         data = self._request("GET", "/api/health", "health check")
@@ -1250,6 +1552,57 @@ def read_message_extras(result: QuestionResult, message: dict[str, Any]) -> None
     generation = diagnostics.get("generation")
     result.generation = generation if isinstance(generation, dict) else None
     result.failed_sentences = read_failed_sentences(diagnostics.get("failed_sentences"))
+    read_latency(result, diagnostics)
+
+
+def _int_value(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _counts(value: Any) -> list[int] | None:
+    if not isinstance(value, list):
+        return None
+    return [n for n in (_int_value(v) for v in value) if n is not None]
+
+
+def read_latency(result: QuestionResult, diagnostics: dict[str, Any]) -> None:
+    """The D-080 latency fields and the D-077 parent context fields (numbers and ids only)."""
+    result.judge_calls = _int_value(diagnostics.get("judge_calls"))
+    result.judge_calls_per_pass = _counts(diagnostics.get("judge_calls_per_pass"))
+    result.judge_seconds = _score(diagnostics.get("judge_seconds"))
+    result.answer_calls = _int_value(diagnostics.get("answer_calls"))
+    timings = diagnostics.get("timings")
+    if isinstance(timings, dict):
+        result.timings = {
+            key: (
+                [x for x in (_score(v) for v in value) if x is not None]
+                if isinstance(value, list)
+                else _score(value)
+            )
+            for key, value in timings.items()
+            if isinstance(key, str)
+        }
+    result.prompt_tokens = _counts(diagnostics.get("prompt_tokens"))
+    completion = diagnostics.get("completion_tokens")
+    if isinstance(completion, list):
+        result.completion_tokens = [_int_value(v) for v in completion]
+    expansions = diagnostics.get("expansions")
+    if isinstance(expansions, list):
+        result.expansions = [
+            {
+                "chunk_id": e.get("chunk_id"),
+                "kind": e.get("kind"),
+                "referrer": e.get("referrer"),
+            }
+            for e in expansions
+            if isinstance(e, dict) and isinstance(e.get("chunk_id"), str)
+        ]
+    result.promoted_tokens = _int_value(diagnostics.get("promoted_tokens"))
+    result.outline_tokens = _int_value(diagnostics.get("outline_tokens"))
+    outline = diagnostics.get("outline_fingerprint")
+    result.outline_fingerprint = outline if isinstance(outline, str) and outline else None
+    result.outline_only = _counts(diagnostics.get("outline_only"))
+    result.promoted_cited = _counts(diagnostics.get("promoted_cited"))
 
 
 def _capped(value: str) -> str:
@@ -1974,6 +2327,8 @@ class RunInfo:
     # The per-request override sent with every question; None = the app's own default.
     generation: dict[str, Any] | None = None
     chat: ChatInfo | None = None  # None when the API did not report it
+    # The D-077 switches during the run (``GET /api/settings``); None when not reported.
+    retrieval: dict[str, bool] | None = None
 
 
 def describe_generation(generation: dict[str, Any]) -> str:
@@ -2150,6 +2505,7 @@ def render_report(
     out.append("")
 
     out.extend(render_false_refusals(results))
+    out.extend(render_latency(results))
 
     answered_unans = [r for r in results if not r.question.answerable and r.outcome == "answered"]
     if answered_unans:
@@ -2370,6 +2726,13 @@ def retrieval_same(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
     return None
 
 
+def outline_same(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
+    """Same code outline (D-077)? None when either sidecar predates ``outline_fingerprint``."""
+    if "outline_fingerprint" not in a or "outline_fingerprint" not in b:
+        return None
+    return bool(a.get("outline_fingerprint") == b.get("outline_fingerprint"))
+
+
 def _run_label(data: dict[str, Any]) -> str:
     chat = data.get("chat") if isinstance(data.get("chat"), dict) else None
     model = f"`{chat.get('model')}` at `{chat.get('endpoint_host')}`" if chat else "chat unknown"
@@ -2404,7 +2767,12 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
     common = [qid for qid in qa if qid in qb]
     changed = [qid for qid in common if outcome_cell(qa[qid]) != outcome_cell(qb[qid])]
     retrieval_moved = [qid for qid in common if retrieval_same(qa[qid], qb[qid]) is False]
-    causes = {"model": 0, "retrieval": 0, "unknown": 0}
+    outline_moved = [
+        qid
+        for qid in common
+        if retrieval_same(qa[qid], qb[qid]) is True and outline_same(qa[qid], qb[qid]) is False
+    ]
+    causes = {"model": 0, "outline": 0, "retrieval": 0, "unknown": 0}
     if changed:
         out.append("| ID | A | B | Retrieval | Likely cause |")
         out.append("|---|---|---|---|---|")
@@ -2413,7 +2781,9 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
             fingerprinted = all(
                 q.get("retrieval_fingerprint") is not None for q in (qa[qid], qb[qid])
             )
-            if same is True:
+            if same is True and outline_same(qa[qid], qb[qid]) is False:
+                where, cause = "same chunks, different outline", "outline"
+            elif same is True:
                 where = "same" if fingerprinted else "same top score"
                 cause = "model"
             elif same is False:
@@ -2423,6 +2793,7 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
             causes[cause] += 1
             label = {
                 "model": "model / sampling",
+                "outline": "outline only",
                 "retrieval": "pipeline / index",
                 "unknown": "unknown",
             }[cause]
@@ -2435,12 +2806,19 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
         out += ["No outcome differences.", ""]
     out.append(
         f"{len(changed)} of {len(common)} questions differ: {causes['model']} with the same "
-        f"retrieval (model / sampling), {causes['retrieval']} with different retrieval "
+        f"retrieval (model / sampling), {causes['outline']} with the same chunks and a "
+        f"different outline (outline only), {causes['retrieval']} with different retrieval "
         f"(pipeline / index), {causes['unknown']} unknown (no fingerprint or scores). "
         f"Retrieval differs on {len(retrieval_moved)} question(s) in all"
         + (": " + ", ".join(f"`{q}`" for q in retrieval_moved) if retrieval_moved else "")
         + "."
     )
+    if outline_moved:
+        out.append(
+            f"Only the outline differs on {len(outline_moved)} question(s): "
+            + ", ".join(f"`{q}`" for q in outline_moved)
+            + "."
+        )
     only_a = [qid for qid in qa if qid not in qb]
     only_b = [qid for qid in qb if qid not in qa]
     if only_a:
@@ -2680,6 +3058,7 @@ def main(
             sid = str(space["id"])
             sources = {s.id: s for s in api.sources(sid)}
             run_thresholds = api.thresholds()
+            run_retrieval = api.retrieval_settings()
             results: list[QuestionResult] = []
             for i, q in enumerate(questions, 1):
                 r = ask(client, sid, q, clock=clock, generation=generation)
@@ -2719,6 +3098,7 @@ def main(
         min_ranges_valid=args.min_ranges_valid,
         generation=generation,
         chat=chat,
+        retrieval=run_retrieval,
     )
     ranges = check_ranges(results, args.code_root) if args.code_root else None
     report = render_report(info, results, sources, setup, ranges)

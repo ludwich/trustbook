@@ -39,4 +39,27 @@ An MCP server wrapping the same client as the CLI (after Phase 3b).
 ### Summary tree for overview questions
 An LLM-built summary tree (section → file/source → space) to answer overview questions ("what is this repo
 about?"). Summaries only route retrieval to the right children; they are never citable and never verified
-text — answers still cite the child chunks' exact lines. Builds on the Phase 3 parent/child retrieval.
+text — answers still cite the child chunks' exact lines. Builds on the Phase 3 parent/child retrieval (D-077):
+the summaries hang off the stored parent keys, never appear in an answer prompt, the code outline or a
+premise, and are rebuilt on every `CHUNKER_VERSION` change.
+
+## From Gate 3 round 2b, parent/child retrieval (2026-10-11, D-077)
+
+### Transcript window
+A transcript chunk's parent is a query-time window of its ordinal neighbours (±1, then ±2), promoted as
+ordinary citable chunks with their own `start_s` / `end_s` / speaker, within the same 900-token promotion
+budget (no separate, larger cap). `store.chunks_at_ordinals` already serves it. Ships with the first
+transcript eval question.
+
+### Web section header
+Web, paste and upload chunks name their D-053 section only in the prompt's `Source:` line. A stored
+`Section:` header with the nested heading path (as D-068 gives document files) needs another chunker bump.
+
+### Definition slices
+Promote only the lines of a large definition that a child needs (ids like `owner~a-b`; measured 5,108 →
+~275 tokens). A new citation-id kind breaks `GET /chunks/{id}` and the viewer offsets, so it needs its own
+design.
+
+### Smaller document children
+About 250-token document children (today mean 328 after D-068), with the section as their parent. Not needed
+for the mechanism; the eval would have to be re-measured.

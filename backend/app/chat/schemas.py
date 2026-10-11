@@ -92,6 +92,33 @@ class FailedSentenceOut(BaseModel):
     reason: str
 
 
+class Timings(BaseModel):
+    """Where an answer's time went, in seconds (D-080).
+
+    ``generation_s``: each answer call (JSON retries and the regeneration included).
+    ``verification_s``: each verification pass (first reply, regenerated reply).
+    ``citation_s``: choosing the kept sentences' citations (None: not reached). ``gate_s``: the
+    gate router before the answer (None: no gate call). ``total_s``: the answer pipeline from
+    retrieval to the outcome (the gate not included).
+    """
+
+    retrieval_s: float | None = None
+    generation_s: list[float] = Field(default_factory=list)
+    verification_s: list[float] = Field(default_factory=list)
+    citation_s: float | None = None
+    gate_s: float | None = None
+    total_s: float | None = None
+
+
+class ExpansionOut(BaseModel):
+    """A chunk promoted as parent context (D-077): its id, ``section_previous`` or
+    ``class_head``, and the id of the context chunk it was promoted for (``referrer``)."""
+
+    chunk_id: str
+    kind: str
+    referrer: str | None
+
+
 class Diagnostics(BaseModel):
     """Scores behind an answer, for threshold tuning (the eval runner reads them; the UI doesn't).
 
@@ -107,6 +134,20 @@ class Diagnostics(BaseModel):
     ``generation``: what the answer call used (None: no answer call).
     ``failed_sentences``: the failed sentences of the reply the outcome rests on (the second one
     after a regeneration, unless it was unusable), with the reason each failed (D-075).
+
+    Latency (D-080): ``judge_calls``: every judge request for the answer (rescues, confirmations,
+    solo re-asks, both passes, citation choice). ``judge_calls_per_pass``: those made by each
+    verification pass (first reply, regenerated reply). ``answer_calls``: answer generation
+    requests (JSON retries and the regeneration included). ``timings``: see :class:`Timings`.
+    ``prompt_tokens`` (estimated, characters / 4) and ``completion_tokens`` (as the endpoint
+    reports them, None when it does not): per answer call.
+
+    Parent context (D-077): ``expansions``: the promoted chunks. ``promoted_tokens`` and
+    ``outline_tokens``: their sizes. ``outline_fingerprint``: a hash of the outline text (None:
+    no outline); ``retrieval_fingerprint`` still covers only the chunks. ``outline_only``: per
+    verification pass, how many failed sentences miss a name or literal that the outline shows
+    and no chunk holds. ``promoted_cited``: [kept sentences citing a promoted chunk, those of them
+    also citing another chunk].
     """
 
     top_rerank: float | None = None
@@ -119,6 +160,18 @@ class Diagnostics(BaseModel):
     retrieval_fingerprint: str | None = None
     generation: GenerationUsed | None = None
     failed_sentences: list[FailedSentenceOut] = Field(default_factory=list)
+    judge_calls: int = 0
+    judge_calls_per_pass: list[int] = Field(default_factory=list)
+    answer_calls: int = 0
+    timings: Timings | None = None
+    prompt_tokens: list[int] = Field(default_factory=list)
+    completion_tokens: list[int | None] = Field(default_factory=list)
+    expansions: list[ExpansionOut] = Field(default_factory=list)
+    promoted_tokens: int = 0
+    outline_tokens: int = 0
+    outline_fingerprint: str | None = None
+    outline_only: list[int] = Field(default_factory=list)
+    promoted_cited: list[int] = Field(default_factory=lambda: [0, 0])
 
 
 class MessageOut(BaseModel):
