@@ -453,6 +453,130 @@ def test_shorten_import_cuts_unused_names_and_never_invents() -> None:
     assert shorten_import(js, {"b"}) == 'import { …, b, … } from "./x"'
 
 
+def _with_imports(specs: list[Spec], imports: Sequence[Import], body: str) -> list[Spec]:
+    """``specs`` whose module head binds ``imports`` and whose ``send`` (ordinal 5) uses them."""
+    module = specs[0]
+    assert module.structure is not None
+    specs[0] = replace(module, structure=replace(module.structure, imports=tuple(imports)))
+    specs[5] = replace(specs[5], text=f"{specs[5].text}\n{body}")
+    return specs
+
+
+def test_an_oversized_imports_line_never_costs_the_class_line(
+    engine: Engine, index: InMemorySpaceIndex
+) -> None:
+    # Review finding (slice B): HTTPAdapter.send's imports line alone was 256 tokens, and the old
+    # fitting dropped whole lines from the end, so the block lost every line. Import statements
+    # now go one by one first, then the module line; the expanded class's line goes last.
+    source = add_source(engine, "requests")
+    names = [f"VeryLongImportedExceptionName{i:02d}" for i in range(14)]
+    imports = [
+        Import(i + 1, i + 1, f"from pkg.long_module_name_{i:02d} import {name}", (name,), None)
+        for i, name in enumerate(names)
+    ]
+    specs = _with_imports(adapters_specs(head_tokens=300), imports, " ".join(names))
+    add_rows(engine, index, source, specs)
+    (block,) = run(engine, chunks(engine, source, [5])).outline
+    assert block.tokens <= OUTLINE_BLOCK_TOKENS
+    assert block.lines[-1].startswith("class HTTPAdapter(BaseAdapter): ")
+    assert any(line.startswith("module: ") for line in block.lines)
+    imports_line = next(line for line in block.lines if line.startswith("imports: "))
+    kept = imports_line.removeprefix("imports: ").split("; ")
+    # The first statements are kept whole, in line order; the rest were dropped.
+    assert kept == [
+        f"from pkg.long_module_name_{i:02d} import {names[i]}" for i in range(len(kept))
+    ]
+    assert 0 < len(kept) < len(names)
+
+
+def test_the_class_line_outlasts_the_module_line(engine: Engine, index: InMemorySpaceIndex) -> None:
+    source = add_source(engine, "requests")
+    specs = adapters_specs(head_tokens=300)
+    module = specs[0]
+    assert module.structure is not None
+    defines = tuple(f"MODULE_LEVEL_CONSTANT_WITH_A_LONG_NAME_{i:02d}" for i in range(8))
+    specs[0] = replace(module, structure=replace(module.structure, imports=(), defines=defines))
+    specs += [
+        method(10 + i, "HTTPAdapter", f"member_with_a_long_name_{i:02d}", 300 + i, 300 + i, "x")
+        for i in range(8)
+    ]
+    add_rows(engine, index, source, specs)
+    (block,) = run(engine, chunks(engine, source, [5])).outline
+    assert block.tokens <= OUTLINE_BLOCK_TOKENS
+    assert not any(line.startswith("module: ") for line in block.lines)
+    assert block.lines == (block.lines[-1],)
+    assert block.lines[-1].startswith("class HTTPAdapter(BaseAdapter): ")
+    assert "send" in block.lines[-1]
+
+
+def test_a_class_line_too_long_alone_keeps_the_names_nearest_the_child(
+    engine: Engine, index: InMemorySpaceIndex
+) -> None:
+    source = add_source(engine, "requests")
+    specs = adapters_specs(head_tokens=300)[:3]
+    long = "test_a_very_long_test_method_name_that_describes_everything_it_checks"
+    specs += [
+        method(10 + i, "HTTPAdapter", f"{long}_{i:02d}", 300 + i, 300 + i, "x") for i in range(9)
+    ]
+    add_rows(engine, index, source, specs)
+    (block,) = run(engine, chunks(engine, source, [14])).outline
+    assert block.tokens <= OUTLINE_BLOCK_TOKENS
+    (line,) = block.lines
+    assert line.startswith("class HTTPAdapter(BaseAdapter): ")
+    assert f"{long}_04" in line and "…" in line
+
+
+def test_shorten_import_never_shows_a_clipped_statement() -> None:
+    # Review finding (slice B): slice A clips Import.text at 200 characters with "…"; the names
+    # the context used were past the cut, and the clipped text was shown as it was stored.
+    names = (*(f"name{i:02d}" for i in range(30)), "ReadTimeout", "SSL")
+    full = (
+        "from requests.exceptions import (\n"
+        + "".join(f"    {n},\n" for n in names[:-1])
+        + "    SSLError as SSL,  # the alias\n)"
+    )
+    stored = " ".join(full.split())[:199].rstrip() + "…"
+    assert len(stored) == 200 and "ReadTimeout" not in stored
+    imp = Import(1, len(full.splitlines()), stored, names, None)
+    used = {"ReadTimeout", "SSL"}
+    assert shorten_import(imp, used) is None  # no source text: left out, never shown clipped
+    assert (
+        shorten_import(imp, used, full)
+        == "from requests.exceptions import …, ReadTimeout, SSLError as SSL"
+    )
+    assert shorten_import(imp, {"name03"}, full) == "from requests.exceptions import …, name03, …"
+    assert shorten_import(imp, {"zzz"}, full) is None
+    js_full = "import {\n" + "".join(f"  {n},\n" for n in names) + '} from "./errors";'
+    js = Import(1, 2, " ".join(js_full.split())[:199] + "…", names, None)
+    assert shorten_import(js, {"SSL"}, js_full) == 'import { …, SSL } from "./errors"'
+    other = Import(1, 1, "import " + ", ".join(names)[:192] + "…", names, None)
+    assert shorten_import(other, {"SSL"}, "import " + ", ".join(names)) is None
+
+
+def test_a_clipped_import_is_rebuilt_from_the_module_chunk_lines(
+    engine: Engine, index: InMemorySpaceIndex
+) -> None:
+    source = add_source(engine, "requests")
+    names = (*(f"SomeLongExceptionName{i:02d}" for i in range(12)), "ReadTimeout")
+    lines = ["from .exceptions import (", *(f"    {n}," for n in names), ")"]
+    stored = " ".join(" ".join(lines).split())[:199] + "…"
+    imp = Import(2, 1 + len(lines), stored, names, None)
+    specs = adapters_specs(head_tokens=300)
+    module = specs[0]
+    assert module.structure is not None
+    body = "import os\n" + "\n".join(lines)
+    specs[0] = replace(
+        module,
+        text=f"File: {ADAPTERS} (lines 1-{1 + len(lines)})\n{body}",
+        structure=replace(module.structure, imports=(imp,)),
+    )
+    specs[5] = replace(specs[5], text=f"{specs[5].text}\n        raise ReadTimeout()")
+    add_rows(engine, index, source, specs)
+    (block,) = run(engine, chunks(engine, source, [5])).outline
+    assert block.lines[0] == "imports: from .exceptions import …, ReadTimeout"
+    assert "…," not in block.lines[0].rsplit("ReadTimeout", 1)[1]
+
+
 # --- determinism, switches, errors ----------------------------------------------------------
 
 

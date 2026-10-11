@@ -32,6 +32,7 @@ from typing import Literal, Protocol
 
 from sqlalchemy import Engine
 
+from app.chunking.header import split_header
 from app.chunking.structure import Import, Structure, key_file, module_key
 from app.retrieval.definitions import code_file
 from app.retrieval.fusion import CONTEXT_TOKENS
@@ -282,12 +283,67 @@ def _cut_list(items: list[str], used: set[str]) -> str | None:
     return ", ".join(out) if kept else None
 
 
-def shorten_import(imp: Import, used: set[str]) -> str | None:
+def clipped(text: str) -> bool:
+    """Whether a stored import text was cut at the structure text cap (it ends with ``…``)."""
+    return text.endswith("…")
+
+
+def _alias_item(name: str, full: str) -> str | None:
+    """The import list item that binds ``name`` in the statement ``full``: ``a as name`` or
+    ``name``; None when ``full`` does not show it."""
+    alias = re.search(rf"([\w$.]+)\s+as\s+{re.escape(name)}(?![\w$])", full)
+    if alias is not None:
+        return f"{alias.group(1)} as {name}"
+    if re.search(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", full):
+        return name
+    return None
+
+
+def _clipped_import(imp: Import, used: set[str], full: str | None) -> str | None:
+    """A clipped import statement shortened from its bound names and its full source text.
+
+    Only a ``from M import …`` or ``import { … } from …`` list is rebuilt: the head comes from the
+    stored text, each used name's item from ``full`` (the statement's own source lines), the
+    JavaScript ``from`` part from ``full``. Without ``full``, or when ``full`` does not show an
+    item, None: a clipped statement is never shown as stored.
+    """
+    if full is None:
+        return None
+    flat = _flat(full)
+    items: list[str] = []
+    for name in imp.names:
+        if name in used:
+            item = _alias_item(name, flat)
+            if item is None:
+                return None
+            items.append(item)
+        else:
+            items.append("…")  # cut by _cut_list below
+    cut = _cut_list(items, used)
+    if cut is None:
+        return None
+    py = re.match(r"^(from\s+\S+\s+import\s+)", imp.text)
+    if py and flat.startswith(py.group(1).rstrip()):
+        return f"{py.group(1)}{cut}"
+    js = re.match(r"^(.*?\{)", imp.text)
+    tail = re.search(r"(\}\s*from\s*(['\"])[^'\"]*\2\s*;?)\s*$", flat)
+    if js and tail and flat.startswith(js.group(1)):
+        return f"{js.group(1)} {cut} {tail.group(1).rstrip(';')}"
+    return None
+
+
+def shorten_import(imp: Import, used: set[str], full: str | None = None) -> str | None:
     """The import statement with the names the context does not use cut to ``…``; None when it
-    binds no used name. The text is the statement shortened, never anything it does not say."""
+    binds no used name. The text is the statement shortened, never anything it does not say.
+
+    A stored text clipped at the structure text cap (:func:`clipped`) is rebuilt from ``full``,
+    the statement's own source lines (see :func:`_clipped_import`), or left out.
+    """
     wanted = [name for name in imp.names if name in used]
     if not wanted:
         return None
+    if clipped(imp.text):
+        return _clipped_import(imp, used, full)
     text = _flat(imp.text)
     if len(wanted) == len(imp.names):
         return text
@@ -304,6 +360,21 @@ def shorten_import(imp: Import, used: set[str]) -> str | None:
         if cut is not None:
             return f"{js.group(1)} {cut} {js.group(3)}"
     return text
+
+
+def _source_lines(rows: Sequence[ChunkRow], imp: Import) -> str | None:
+    """Lines ``imp.line``..``imp.end_line`` of the module chunk that holds the import (its body
+    without the ``File:`` header); None when no row holds them."""
+    for row in rows:
+        s = row.structure
+        start = row.locator.get("start_line")
+        if s is None or imp not in s.imports or not isinstance(start, int):
+            continue
+        body = split_header(row.text)[1].split("\n")
+        first, last = imp.line - start, imp.end_line - start
+        if 0 <= first <= last < len(body):
+            return "\n".join(body[first : last + 1])
+    return None
 
 
 @dataclass(frozen=True)
@@ -416,6 +487,33 @@ def _class_line(
     return f"{decl}: {_with_gaps(ordered, set(shown))}"
 
 
+@dataclass(frozen=True)
+class _Parts:
+    """The candidate lines of one file's outline block, kept apart so the fitting can drop the
+    least needed first: import statements, the module line, the classes' lines."""
+
+    imports: tuple[str, ...]
+    module: str
+    classes: tuple[str, ...]
+
+    def lines(self) -> list[str]:
+        out = ["imports: " + "; ".join(self.imports)] if self.imports else []
+        if self.module:
+            out.append(self.module)
+        return [*out, *self.classes]
+
+    def smaller(self) -> _Parts | None:
+        """One part less: the last import statement, else the module line, else the last class
+        line (the expanded classes go last); None when nothing is left."""
+        if self.imports:
+            return _Parts(self.imports[:-1], self.module, self.classes)
+        if self.module:
+            return _Parts((), "", self.classes)
+        if self.classes:
+            return _Parts((), "", self.classes[:-1])
+        return None
+
+
 def _block_lines(
     rows: Sequence[ChunkRow],
     file: str,
@@ -424,7 +522,7 @@ def _block_lines(
     used: set[str],
     seen: _Seen,
     limit: int,
-) -> list[str]:
+) -> _Parts:
     module = module_key(file)
     imports: dict[tuple[int, str], Import] = {}
     for row in rows:
@@ -435,34 +533,45 @@ def _block_lines(
     for _, imp in sorted(imports.items()):
         if seen.covers(imp.line, imp.end_line) or seen.shows(imp.text):
             continue  # the import is in a context chunk already
-        short = shorten_import(imp, used)
+        full = _source_lines(rows, imp) if clipped(imp.text) else None
+        short = shorten_import(imp, used, full)
         if short and _no_value(short):
             statements.append(short)
-    lines: list[str] = []
-    if statements:
-        lines.append("imports: " + "; ".join(statements))
     module_line = _module_line(rows, file, near, limit)
-    if module_line and _no_value(module_line):
-        lines.append(module_line)
+    class_lines: list[str] = []
     for key in classes:
         line = _class_line(rows, key, near, limit, seen)
         if line and _no_value(line) and not seen.shows(line):
-            lines.append(line)
-    return lines
+            class_lines.append(line)
+    return _Parts(
+        tuple(statements),
+        module_line if module_line and _no_value(module_line) else "",
+        tuple(class_lines),
+    )
 
 
-def _fitted_block(
-    source_id: str, file: str, make: Callable[[int], list[str]]
-) -> OutlineBlock | None:
-    """The block within :data:`OUTLINE_BLOCK_TOKENS`: fewer names per line first, then lines
-    dropped from the end; None when not even one line fits."""
-    lines: list[str] = []
+def _fitted_block(source_id: str, file: str, make: Callable[[int], _Parts]) -> OutlineBlock | None:
+    """The block within :data:`OUTLINE_BLOCK_TOKENS`: fewer names per line first, then import
+    statements dropped from the last, then the module line, then class lines from the last (the
+    expanded children's classes are what the outline is for). When even the first class line
+    alone is over the cap (long member names), it alone with only the names nearest the children;
+    None when not even that fits."""
+    parts: _Parts | None = None
     for limit in (OUTLINE_NAMES, OUTLINE_NAMES // 2, OUTLINE_NAMES // 4):
-        lines = make(limit)
-        if _block_tokens(source_id, file, lines) <= OUTLINE_BLOCK_TOKENS:
+        parts = make(limit)
+        if _block_tokens(source_id, file, parts.lines()) <= OUTLINE_BLOCK_TOKENS:
             break
-    while lines and _block_tokens(source_id, file, lines) > OUTLINE_BLOCK_TOKENS:
-        lines = lines[:-1]
+    while (
+        parts is not None and _block_tokens(source_id, file, parts.lines()) > OUTLINE_BLOCK_TOKENS
+    ):
+        parts = parts.smaller()
+    lines = parts.lines() if parts is not None else []
+    for limit in (2, 1):
+        if lines:
+            break
+        first = _Parts((), "", make(limit).classes[:1]).lines()
+        if first and _block_tokens(source_id, file, first) <= OUTLINE_BLOCK_TOKENS:
+            lines = first
     if not lines:
         return None
     return OutlineBlock(source_id, file, tuple(lines), _block_tokens(source_id, file, lines))
@@ -515,7 +624,7 @@ def outline(
             near: Sequence[int] = near,
             used: set[str] = used,
             seen: _Seen = seen,
-        ) -> list[str]:
+        ) -> _Parts:
             return _block_lines(rows, file, classes, near, used, seen, limit)
 
         block = _fitted_block(source_id, file, make)
