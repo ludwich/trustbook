@@ -999,18 +999,28 @@ under test. Choices under §15:
 - Layer 5 and the checker are unchanged: the premise has always been the chunk text with its header, so "2.32.0" in
   the header passes the literal check exactly like a symbol in a code chunk's header did.
 - **Measured live** (trustbook-g3, Qwen3.6-35B-A3B on Ludwig's server, temperature 0, seed 42, real HHEM and judge;
-  the Smoke space only read, nothing re-indexed): the new HISTORY.md chunks for lines 159-213 (159-199, 193-202,
-  205-229) with the answer prompt → "Requests 2.32.0 officially added support for CPython 3.12." citing 159-199:
-  checker 0.947, judge confirmed with evidence line 188 (2.32 found in the section), verified. A second run of the
-  same call (llama-server is not deterministic, D-065) answered "Requests 2.32.0 was the first release to officially
-  add support for CPython 3.12.": checker 0.114, rescued by the judge (evidence 188, accepted in the batch and alone),
-  verified. The old chunks (134-176, 172-213, 206-251) for contrast: the model named 2.32.0 citing 172-213 and
-  layer 5 refused it in all three runs ("2.32 is not in the cited code").
-  Recorded claims citing the new 159-199 chunk: true "2.32.0, released on 2024-05-20, officially added support for
-  CPython 3.12" passes (0.915, confirmed); every false claim fails: 2.31.0 / 2.33.0 (layer 5), 2.32.1 (checker
-  0.05, judge no support), "2.32.0 dropped support for 3.12" (checker passed 0.556, judge vetoed), released
-  2024-05-22 (layer 5), "support for CPython 3.13" (layer 5). "2.32.0 was the first release …" alone failed (0.10;
-  the judge found no support for "first"), an inference either outcome of which is acceptable.
+  the Smoke space only read, nothing re-indexed; script `r2chunk/live_history.py` in the session scratchpad): the new
+  HISTORY.md chunks for lines 159-213 (159-199, 193-202, 205-229) with the answer prompt, 5 runs:
+  - 5/5 answered 2.32.0 and were verified. 4 replied "Requests 2.32.0 officially added support for CPython 3.12."
+    citing 159-199: checker 0.947, judge confirmed with evidence line 188 only (2.32 found in the section). 1 replied
+    "Requests 2.32.0 was the first release to officially add support for CPython 3.12." (llama-server is not
+    deterministic, D-065): checker 0.114, rescued by the judge (evidence 188, accepted in the batch and alone).
+  - The old chunks (134-176, 172-213, 206-251) for contrast: 5/5 named 2.32.0 citing 172-213 and were refused by
+    layer 5 ("2.32 is not in the cited code"), the gate's false refusal.
+  - Recorded claims citing the new 159-199 chunk (same outcome in all 5 runs): true "2.32.0, released on 2024-05-20,
+    officially added support for CPython 3.12" passes (0.915, confirmed); every false claim fails: 2.31.0 / 2.33.0
+    (layer 5), 2.32.1 (checker 0.05, judge no support), "2.32.0 dropped support for 3.12" (checker passed 0.556,
+    judge vetoed), released 2024-05-22 (layer 5), "support for CPython 3.13" (layer 5). "2.32.0 was the first
+    release …" asked on its own failed (0.10; the judge found no support for "first"): an inference, either
+    outcome acceptable.
+- **Measured, D-063 statement set** (`r2chunk/false_claims.py`: the 51 statements of the D-063 band measurement,
+  21 true and 30 false, for ref-near-07, code-02, docs-04, ref-near-05, code-05, code-03; live retrieval, then
+  every folder document chunk in the context replaced by all new chunks overlapping its lines; real checker and
+  judge on both versions): false claims passing 0/30 before and 0/30 after, including the role swaps citing
+  `advanced.rst` (F2, F5, F5b and F4 vetoed or failed). True claims passing 16/21 → 19/21: T3, T4 and T6 citing
+  advanced.rst (c3) now pass the checker on the SOCKS section's new chunks (the replay cites every new chunk
+  overlapping the old one, so some of that gain may be the extra lines). 15 of the 51 cite a document file.
+  Identical in two replays (the second on the final code).
 
 ### D-070 Every consumer of the `File:` header checked for the document header
 The document header now has the shape of a code header, so each reader of it was checked (tests added where the
