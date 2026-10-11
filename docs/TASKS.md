@@ -8,6 +8,20 @@ reported per category (docs/code/multi). p95 latency is tracked in GATES.md and 
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
+## Overnight plan (Ludwig, 2026-10-11 evening; authorised to work without waiting)
+1. Gate 3: 4 runs on `trustbook:p3h` (93b4419). Pass → GATES.md, push phase-3, confirm `phase-3-rc`, leave PR #4
+   OPEN (no merge, no tag, main untouched). Fail → keep fixing (no key widening; 3 passing Qwen3.6 runs incl.
+   real-use at 0.2 + Qwen3.8-27B comparison).
+2. Stacked branches, never merged until Ludwig passes each gate:
+   a. `phase-3b` from phase-3: CLI for agents + Claude Code skill (below) + transcripts in parent/child retrieval
+      (1–2k-token windows, speakers + timestamps, citations to the child only). PR phase-3b → phase-3,
+      `phase-3b-rc`, Gate 3b in GATES.md.
+   b. `phase-4` from phase-3b: Phase 4 (Ideation) per SPEC §14. PR phase-4 → phase-3b, `phase-4-rc`, Gate 4.
+   If phase-3 changes after Gate 3 review: rebase the stacked branches.
+3. CI green on every push; DECISIONS/TASKS current; never weaken grounding.
+4. Stop when Phase 4 is done or blocked on a decision only Ludwig can make. Summary at the top of docs/GATES.md:
+   what waits for him (Gate 3 → 3b → 4) and how to test each.
+
 ## 0. Ludwig's Gate 2 priorities (in order; each logged in DECISIONS.md)
 - [x] P1a Answer checking handles claims about code (code-03, code-05 refused "unsupported" on Strix Halo); never weaken grounding
 - [x] P1b Code retrieval finds ref-near-08 (Digest MD5 default) and ref-near-10 (`codes.too_many_requests`)
@@ -70,7 +84,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] GATES.md Gate 3 checklist incl. per-category false refusals and p95 latency
 - [ ] `docker image prune -f`; stop and summarise (Gate 3 attempt 1 failed; fixing)
 
-## Queued AFTER Gate 3 passes — Phase 3b: CLI for agents (do not mix into Gate 3 fixes)
+## Phase 3b (branch `phase-3b`, after the Gate 3 runs pass): CLI for agents + transcript windows
 - `trustbook` CLI (in the image: `docker compose exec app trustbook …`; pip-installable from the repo), talks to the HTTP API (default http://127.0.0.1:8484, `--base-url`), reuses the eval runner's client
 - Commands: spaces list|create|delete; sources add folder|url|file|paste|search; sources list|status|refresh|remove; ask "<q>" --space X; queue; gate-log; eval
 - `--json` everywhere with a stable documented schema (ask: answer, verdict, citations with source/file/lines/text, removed statements); exit codes 0 ok · 2 refused · 3 failed source · 1 error; `--wait` on adds (progress on stderr)
@@ -79,6 +93,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - Tests: integration per command (mock LLM); e2e add folder → ask → cited JSON
 - Gate 3b: Windows PowerShell CLI add folder + ask → cited JSON; Claude Code on Ludwig's laptop uses the skill
 - Backlog: MCP server wrapping the same client
+- Transcripts in parent/child retrieval: ~1–2k-token windows with speakers + timestamps as parent context; citations
+  only to the child's own timestamps (D-077 slice for transcripts)
 
 ## Notes for a restarted session
 - Quality bar script (stops on first failure): scratchpad `qbar.sh`; never chain checks through `| tail`.
