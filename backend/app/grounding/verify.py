@@ -15,8 +15,11 @@ fails it fails, whatever its score.
 With the judge on (:mod:`app.grounding.code_judge`, D-045 and D-056), one judge call per check
 covers two kinds of sentence:
 
-- **Rescue:** a sentence that fails the checker (and passes layer 5), whatever it cites, passes if
-  the judge accepts it.
+- **Rescue:** a sentence that fails the checker (and passes layer 5) and cites code passes if the
+  judge accepts it on its cited code chunks alone (D-045), in the batch **and** when asked again
+  with the sentence alone. Sentences citing only prose (web pages, documents, transcripts) are
+  never rescued: the deterministic rescue gates rest on code anchors, which prose rarely has, and
+  word overlap cannot tell a negated or role-swapped claim from a true one (D-060).
 - **Confirmation:** a sentence the checker passed (with a score below :data:`CONFIRM_BELOW`, by
   default every one) fails if the judge's verdict contradicts it (a veto). HHEM passes role-swapped
   false claims on technical prose at 0.58–0.98 (D-056).
@@ -43,7 +46,7 @@ from app.grounding.code_checks import (
     missing_identifiers,
     missing_literals,
 )
-from app.grounding.code_judge import JudgeItem, JudgeOutcome
+from app.grounding.code_judge import JudgeItem, JudgeOutcome, is_code_chunk
 from app.retrieval.service import RetrievedChunk
 
 logger = logging.getLogger("trustbook.grounding")
@@ -207,17 +210,19 @@ class Verifier:
     ) -> list[SentenceCheck]:
         """Rescue failed sentences and confirm checker passes in one judge call (D-045, D-056).
 
-        Rescue: failed only the checker (no layer 5 problems). Confirmation: passed on the checker
-        with a score below the confirmation bound. A veto from the batch is asked again with the
-        sentence alone and stands only if that verdict contradicts it too: in a batch of similar
-        statements the judge sometimes rejected true ones it accepts alone (D-056).
+        Rescue: failed only the checker (no layer 5 problems) and cites code; the judge sees only
+        the cited code chunks (D-045, D-060). Confirmation: passed on the checker with a score
+        below the confirmation bound; the judge sees every cited chunk. A batch verdict that would
+        change the checker's result, a rescue or a veto, is asked again with the sentence alone
+        and stands only if that verdict agrees: in a batch of similar statements the judge's
+        verdicts were noisy (D-056), and a judge-only decision gets the same second look both ways.
         """
         if self._code_judge is None or not self.enabled:
             return checks
         rescue = [
             i
             for i, (check, (_, cited)) in enumerate(zip(checks, sentences, strict=True))
-            if not check.passed and not check.problems and cited
+            if not check.passed and not check.problems and any(is_code_chunk(c) for c in cited)
         ]
         confirm = [
             i
@@ -230,7 +235,15 @@ class Verifier:
         pending = sorted(rescue + confirm)
         if not pending:
             return checks
-        items = [(sentences[i][0], list(sentences[i][1])) for i in pending]
+        items = [
+            (
+                sentences[i][0],
+                [c for c in sentences[i][1] if is_code_chunk(c)]
+                if i in rescue
+                else sentences[i][1],
+            )
+            for i in pending
+        ]
         outcomes = self._ask_judge(items)
         if outcomes is None or len(outcomes) != len(items):
             if outcomes is not None:
@@ -238,12 +251,16 @@ class Verifier:
             return checks
         result = list(checks)
         rescued = vetoed = 0
-        for i, outcome in zip(pending, outcomes, strict=True):
+        for n, (i, outcome) in enumerate(zip(pending, outcomes, strict=True)):
             if i in rescue and outcome.accepted:
+                again = self._ask_judge([items[n]])
+                if again is None or len(again) != 1 or not again[0].accepted:
+                    logger.info("Judge rescue of sentence %d not repeated alone; failed", i + 1)
+                    continue
                 result[i] = replace(result[i], passed=True, method="code_judge")
                 rescued += 1
             elif i not in rescue and outcome.vetoed:
-                again = self._ask_judge([items[pending.index(i)]])
+                again = self._ask_judge([items[n]])
                 if again is None or len(again) != 1 or not again[0].vetoed:
                     logger.info("Judge veto of sentence %d not repeated alone; kept", i + 1)
                     continue

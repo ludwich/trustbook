@@ -30,7 +30,6 @@ from tests.chat_helpers import (
 from tests.conftest import AppFactory
 from tests.fakes import FakeGrounding, Router
 
-NOT_SUPPORTED = json.dumps({"verdicts": [{"index": 1, "supported": False, "evidence": []}]})
 GUIDE = "Requests is an HTTP library for Python. Proxies are configured with the proxies argument."
 QUOTE = "Proxies are configured with the proxies argument."
 
@@ -139,11 +138,10 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     guide(env)
+    # The guide is prose: sentences the checker fails are not sent for a rescue (D-060), and
+    # nothing passed the checker, so the judge is never called.
     chat = ScriptedChat(
-        answer_json(("Made-up fact.", ["c1"])),
-        NOT_SUPPORTED,  # the judge's verdict on the failed sentence (D-056)
-        answer_json(("Another invention.", ["c1"])),
-        NOT_SUPPORTED,
+        answer_json(("Made-up fact.", ["c1"])), answer_json(("Another invention.", ["c1"]))
     )
     monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
     events = env.ask("How are proxies configured?")
@@ -159,7 +157,7 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
     assert message["badge"] == "refused"
     assert message["content"]["sentences"] == []
     diagnostics = message["diagnostics"]
-    assert isinstance(diagnostics.pop("judge_seconds"), float)
+    assert diagnostics.pop("judge_seconds") is None
     fingerprint = diagnostics.pop("retrieval_fingerprint")
     assert isinstance(fingerprint, str) and len(fingerprint) == 16
     assert diagnostics == {
@@ -171,15 +169,7 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
         "citation_changes": [],
         "generation": {"temperature": 0.2, "seed": None},
     }
-    assert len(chat.calls) == 4  # answer, judge, regeneration, judge
-    assert [
-        c["schema"] is not None and "verdicts" in c["schema"]["properties"] for c in chat.calls
-    ] == [
-        False,
-        True,
-        False,
-        True,
-    ]
+    assert len(chat.calls) == 2  # answer, regeneration
 
 
 def test_generation_override_reaches_the_answer_and_judge_calls(
@@ -188,7 +178,7 @@ def test_generation_override_reaches_the_answer_and_judge_calls(
     guide(env)
     chat = ScriptedChat(
         answer_json((QUOTE, ["c1"]), ("Proxies also need a licence key.", ["c1"])),
-        # One judge call: statement 1 confirms the checker pass, statement 2 is the rescue.
+        # One judge call confirms the checker pass; the failed prose sentence is not sent.
         json.dumps(
             {
                 "verdicts": [
@@ -196,8 +186,7 @@ def test_generation_override_reaches_the_answer_and_judge_calls(
                         "index": 1,
                         "supported": True,
                         "evidence": [{"chunk": "c1", "start_line": 1, "end_line": 1}],
-                    },
-                    {"index": 2, "supported": False, "evidence": []},
+                    }
                 ]
             }
         ),

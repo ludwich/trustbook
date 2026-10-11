@@ -6,12 +6,15 @@ scores near 0 (D-044), and on technical prose it fails correct paraphrases while
 role-swapped false claims ("with socks5h, DNS resolution happens on the client", D-056). The judge
 is used two ways, in one call per answer:
 
-**Rescue.** A sentence that fails the checker (and passes layer 5) gets a second chance, whatever
-its citations are (code, documents, web pages, transcripts), and passes only if **all** hold:
+**Rescue.** A sentence that fails the checker (and passes layer 5) and cites code gets a second
+chance on its cited code chunks (D-045). Sentences citing only prose are never rescued (D-060):
+the gates below rest on anchors, which prose rarely has, and word overlap cannot tell a negated or
+role-swapped claim from a true one. A rescue passes only if **all** hold:
 
-1. **Judge:** the chat model, shown only the cited excerpts with numbered lines and the sentences
-   (temperature 0, ``think=False``, JSON schema), says the lines support it and names them as
-   evidence. Code keeps its real line numbers; prose is numbered from 1, a line per sentence.
+1. **Judge:** the chat model, shown only the cited code excerpts with numbered lines and the
+   sentences (temperature 0, ``think=False``, JSON schema), says the lines support it and names
+   them as evidence, in the batch and again when asked with the sentence alone
+   (:mod:`app.grounding.verify`).
 2. **Evidence anchoring:** every evidence range lies inside a chunk the sentence cites.
 3. **Symbol/literal matching:** every anchor of the sentence occurs in the evidence lines
    (see :func:`code_anchors`). A sentence without anchors needs at least half of its content
@@ -19,9 +22,11 @@ its citations are (code, documents, web pages, transcripts), and passes only if 
 4. Layer 5 still passes (sentences with layer 5 problems are never sent to the judge).
 
 **Confirmation.** A sentence the checker passed with a score below the confirmation bound is sent
-too. It stays passed unless the judge's verdict contradicts it (:attr:`JudgeOutcome.vetoed`): the
-judge says it is not supported, names evidence outside the sentence's cited chunks, or names
-evidence lines that lack one of its anchors. A missing or malformed verdict is no veto.
+too, with every chunk it cites (code keeps its real line numbers; prose is numbered from 1, a line
+per sentence). It stays passed unless the judge's verdict contradicts it
+(:attr:`JudgeOutcome.vetoed`): the judge says it is not supported, names evidence outside the
+sentence's cited chunks, or names evidence lines that lack one of its anchors. A missing or
+malformed verdict is no veto.
 
 Anything that goes wrong with the call (not set up, endpoint error, unusable reply, over
 :data:`JUDGE_TIMEOUT_S`) leaves the checker's results in place.
@@ -349,7 +354,9 @@ _HYPHEN_TERM = re.compile(r"(?<![A-Za-z0-9_.\-])[A-Za-z]+(?:-\d+)+[A-Za-z]*(?![A
 _DIGIT_TERM = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]+(?:[-_]?\d+)+[A-Za-z]*(?![A-Za-z0-9])")
 _TERM_PARTS = re.compile(r"^([a-z]+)(\d+)([a-z]*)$")
 _DIGITS = re.compile(r"\d+")
-_MIN_LONG_FOR_INITIAL = 4  # b64 ↔ base64 and h2 ↔ http2, but not e2 ↔ ec2 or s3 ↔ sha3
+# An abbreviation is the long word's initial letter only: b64 ↔ base64 and h2 ↔ http2, but not
+# e2 ↔ ec2, s3 ↔ sha3, sha256 ↔ shake_256 or py3 ↔ pypy3 (different terms, D-060).
+_MIN_LONG_FOR_INITIAL = 4
 
 
 def term_key(term: str) -> str:
@@ -359,9 +366,10 @@ def term_key(term: str) -> str:
 
 def terms_match(a: str, b: str) -> bool:
     """Whether two digit-bearing names are the same term: equal keys (``SHA-256`` ↔ ``sha256``,
-    ``UTF-8`` ↔ ``utf8``) or a letter abbreviation with the same digits and suffix (``b64`` ↔
-    ``base64``, ``b64encode`` ↔ ``base64encode``). The digits must be equal (``sha1`` is not
-    ``sha256``), and a one-letter abbreviation needs a word of at least four letters."""
+    ``UTF-8`` ↔ ``utf8``) or a one-letter initial for a word of at least four letters, with the
+    same digits and suffix (``b64`` ↔ ``base64``, ``b64encode`` ↔ ``base64encode``). The digits
+    must be equal (``sha1`` is not ``sha256``); a longer prefix is a different term (``sha256``
+    is not ``shake_256``, ``py3`` is not ``pypy3``)."""
     ka, kb = term_key(a), term_key(b)
     if not _DIGITS.search(ka) or not _DIGITS.search(kb):
         return False
@@ -374,9 +382,7 @@ def terms_match(a: str, b: str) -> bool:
     if da != db or ra != rb:
         return False
     short, long = sorted((la, lb), key=len)
-    if len(short) == 1 and len(long) < _MIN_LONG_FOR_INITIAL:
-        return False
-    return long.startswith(short)
+    return len(short) == 1 and len(long) >= _MIN_LONG_FOR_INITIAL and long.startswith(short)
 
 
 def digit_terms(text: str) -> set[str]:
