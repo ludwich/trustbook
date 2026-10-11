@@ -34,6 +34,21 @@ chunk, the calling chunks and the constants are never displaced). One level only
 callees are not followed. They are ordinary numbered chunks with their rerank score: the model
 may cite them and every grounding layer treats them like any other chunk; the refusal threshold
 still reads only the ranked list.
+
+With the retrieval's per-file row cache (D-077, D-078) the lookup also reads the stored structure:
+
+- ``Q.name(`` also names a module-level ``name`` in the file the caller's module-level import of
+  ``Q`` resolves to (``from . import utils as u`` → ``u.f(``), and that file comes first among
+  the matches; D-062's file-or-folder rule for ``Q`` still applies (C# ``using`` and Java
+  packages name namespaces, not files);
+- receiver calls prefer the caller's class family (its parent key), the same class
+  ``enclosing_class`` names, nested classes included;
+- a candidate without a symbol is matched by its stored ``defines`` instead of the definition
+  regex.
+
+Rows without structure (indexed before chunker p3-treesitter-6, fallback-chunked languages) and
+calls without the cache take the path above unchanged. The candidate pool, test-file exclusion,
+:data:`MAX_CALLEES` and the ordering by callers stay the policy.
 """
 
 from __future__ import annotations
@@ -45,7 +60,7 @@ from collections.abc import Collection, Sequence
 from typing import NamedTuple
 
 from app.chunking.syntax import language_for_path
-from app.retrieval.definitions import ContextChunk, code_body, code_file
+from app.retrieval.definitions import ContextChunk, code_body, code_file, structured_rows
 from app.retrieval.store import FileRows
 
 MAX_CALLEES = 2
@@ -228,7 +243,12 @@ def in_module(path: str, qualifier: str) -> bool:
     return name.partition(".")[0] == qualifier or folder.rpartition("/")[2] == qualifier
 
 
-def defines(chunk: ContextChunk, call: Call, defined: Collection[str] | None = None) -> bool:
+def defines(
+    chunk: ContextChunk,
+    call: Call,
+    defined: Collection[str] | None = None,
+    target: str | None = None,
+) -> bool:
     """Whether code chunk ``chunk`` is the definition of the function or method ``call`` names.
 
     With a ``locator.kind`` it must be a function or method; with a ``locator.symbol`` that must be
@@ -238,15 +258,21 @@ def defines(chunk: ContextChunk, call: Call, defined: Collection[str] | None = N
     module-level code (imports, conditional stubs); for a qualified call its file must be the
     module. The text must define the name unless the chunker recorded the kind. ``defined``: the
     function names the chunk's text defines, when already known (computed here otherwise).
+    ``target``: the file the caller's import of ``call.qualifier`` resolves to (D-078), which is
+    that module too.
     """
     symbol = _symbol(chunk.locator)
     kind = _kind(chunk.locator)
     file = code_file(chunk.locator) or ""
+
+    def is_module(qualifier: str) -> bool:
+        return in_module(file, qualifier) or (target is not None and file == target)
+
     if kind is not None and kind not in FUNCTION_KINDS:
         return False
     if symbol:
         in_its_module = (
-            call.qualifier is not None and symbol == call.name and in_module(file, call.qualifier)
+            call.qualifier is not None and symbol == call.name and is_module(call.qualifier)
         )
         if symbol not in call.symbols and not in_its_module:
             return False
@@ -254,11 +280,32 @@ def defines(chunk: ContextChunk, call: Call, defined: Collection[str] | None = N
             return True
     elif kind is None and language_for_path(file) is not None:
         return False
-    elif call.qualifier is not None and not in_module(file, call.qualifier):
+    elif call.qualifier is not None and not is_module(call.qualifier):
         return False
     if defined is None:
         defined = defined_functions(code_body(chunk.text))
     return call.name in defined
+
+
+def _in_class(chunk: ContextChunk) -> bool:
+    """Whether the chunk belongs to a class family by its stored structure (D-077)."""
+    return chunk.parent_key is not None and (
+        chunk.structure is not None and chunk.structure.kind == "class"
+    )
+
+
+def imported_modules(file_rows: FileRows, source_id: str, file: str) -> dict[str, str]:
+    """``{bound name: file}`` of the module-level imports of ``file`` that resolve to a file of the
+    same source (D-077), from the file's stored structure; ``{}`` without one."""
+    found: dict[str, str] = {}
+    for row in structured_rows(file_rows, source_id, file):
+        if row.structure is None or row.structure.kind != "module":
+            continue
+        for item in row.structure.imports:
+            if item.target is not None:
+                for name in item.names:
+                    found.setdefault(name, item.target)
+    return found
 
 
 def callee_extras[C: ContextChunk](
@@ -276,10 +323,10 @@ def callee_extras[C: ContextChunk](
     definitions once, and calls are looked up by name, so the cost grows with the context and the
     candidates, not with their product.
 
-    ``file_rows``: the retrieval's per-file row cache for lookups through parent keys (D-077);
-    ``None`` keeps the lookup without parent keys. Not used yet: the lookups through it follow.
+    ``file_rows``: the retrieval's per-file row cache for lookups through parent keys (D-077,
+    D-078: import targets, class families, stored ``defines``); ``None`` keeps the lookup
+    without parent keys.
     """
-    del file_rows  # interface first (D-077); the family lookup lands with the structure pass
     taken = {c.chunk_id for c in selected}
     position = {c.chunk_id: i for i, c in enumerate(ranked)}
     # Candidates by (source, function name): a chunk with a symbol under its last part, a
@@ -293,6 +340,8 @@ def callee_extras[C: ContextChunk](
         symbol = _symbol(c.locator)
         if symbol:
             names = {symbol.rpartition(".")[2]}
+        elif file_rows is not None and c.structure is not None:
+            names = defined[c.chunk_id] = set(c.structure.defines)  # D-078: no regex scan
         else:
             names = defined[c.chunk_id] = defined_functions(code_body(c.text))
         for name in names:
@@ -304,17 +353,32 @@ def callee_extras[C: ContextChunk](
         if code_path(chunk) is None:
             continue
         own_file = code_file(chunk.locator)
+        targets = (
+            imported_modules(file_rows, chunk.source_id, own_file)
+            if file_rows is not None and own_file is not None
+            else {}
+        )
+        family = chunk.parent_key if file_rows is not None and _in_class(chunk) else None
         for call in called_names(chunk):
+            target = targets.get(call.qualifier) if call.qualifier is not None else None
             matches = [
                 c
                 for c in by_name.get((chunk.source_id, call.name), ())
-                if defines(c, call, defined.get(c.chunk_id))
+                if defines(c, call, defined.get(c.chunk_id), target)
             ]
             if not matches:
                 continue
+            # ``self.f(`` names only ``Class.f`` (a bare ``f(`` names ``f`` too).
+            receiver = family is not None and call.qualifier is None and len(call.symbols) == 1
+            receiver = receiver and "." in call.symbols[0]
             best = min(
                 matches,
-                key=lambda c: (code_file(c.locator) != own_file, position[c.chunk_id]),
+                key=lambda c: (
+                    receiver and c.parent_key != family,
+                    code_file(c.locator) != own_file,
+                    target is not None and code_file(c.locator) != target,
+                    position[c.chunk_id],
+                ),
             )
             entry = by_callee.setdefault(best.chunk_id, (best, call.symbols[0], {}))
             entry[2].setdefault(chunk.chunk_id, None)
