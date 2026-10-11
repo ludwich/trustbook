@@ -1086,4 +1086,7 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Measured:** the 30 text document files of `requests` chunk exactly as before (174 chunks with the character
   estimate, every header identical; `r3fix/cmp.py` in the session scratchpad), so D-068's corpus measurements
   stand. Unit tests hold every reviewer reproducer (false claims fail, the HISTORY.md true claim passes).
+  The D-069 replay of the D-063 statement set (`r2chunk/false_claims.py`, trustbook-g3, real checker and judge)
+  on the final code: false claims passing 0/30 old and new, true claims 16/21 → 19/21, every row's outcome
+  identical to the D-069 replay (`r3fix/false_claims.log`).
 - `CHUNKER_VERSION` stays `p3-treesitter-5` (never released; `requests` chunks are unchanged).
