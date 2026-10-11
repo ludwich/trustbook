@@ -1295,6 +1295,39 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     - smaller document children.
   - **Known limit:** a document child whose body crosses into a later section is named by its first-line section.
     D-069's `section_at` scopes the judge per line.
+  - **Integration check** (slices A and B merged; live in `trustbook-g3`, real embedder, reranker, HHEM and judge,
+    Qwen3.6 on llama-server; one check, not a gate run). The Smoke space was copied to a scratch data folder and
+    every source re-chunked from its stored snapshot with `p3-treesitter-6` and re-embedded (1,095 chunks, 996 with
+    structure); `/data` was only read. Scripts: `scratchpad/integ/` (`build.py`, `retr45.py`, `claims_pc.py`,
+    `pipe_pc.py`, `detcheck.py`).
+    - **Retrieval, 45 questions, ON vs OFF:** `ranked` identical 45/45; the OFF context is a prefix of the ON
+      context 45/45. 8 questions get a promotion (9 in all: 8 `class_head`, 1 `section_previous` on ref-unans-10),
+      21 get an outline; 22 change. Added tokens per changed question p50 115.5, max 597.
+    - **Claim replay** (the 62 `r2c/claims3.py` claims, which hold the D-045/D-063/D-069 set and the D-072/D-073
+      review claims, found by content because the re-chunk moved line starts; 41 false, 21 true):
+      - false passes 0/41 in all four runs (OFF and ON, real checker and forced confirmation). The D-073 miss
+        "added in the release preceding 2.31.0" now fails: the HISTORY.md chunk is 159-199 with its `2.32.0`
+        heading in the D-068 header ("2.31 is not in the cited code");
+      - true passes: real checker 18/21 OFF and 18/21 ON; forced 19/21 OFF and 19/21 ON, the same claims each
+        time. The misses are unchanged by the expansion: the prose paraphrase at 0.36, and both "mounts one
+        HTTPAdapter" sentences, now vetoed "not in the evidence lines: HTTPAdapter" (the re-chunked
+        `advanced.rst` 968-1003 holds the word, but on a different line from the one the judge quoted). That is a
+        false-refusal risk from the re-chunk, not a false pass, and identical with the expansion off.
+    - **Outline-only and promoted-sibling claims** (ON, 37 counted, 2 more left out because the key name is in a
+      cited chunk): 17 outline-only claims citing every context chunk of the file (imports, module names,
+      class members); for 4 promoted class heads, the head's fact cited by the referrer alone, a value-swapped
+      fact cited by the promoted chunk, and by both. Real checker and forced confirmation: 0/33 false passes, and
+      4/4 true head facts pass when the promoted chunk is cited. With the real checker, HHEM passed 4 of these false
+      claims and the judge vetoed all 4.
+    - **Seeded answers** (temperature 0, seed 42; 10 questions, each OFF and ON, run twice in opposite order): the
+      ON prompts carry the expansion only on code-01/02/04/05 (promotion + outline), code-03 and ref-near-10
+      (outline). Per arm, 20 answers: OFF p50 29.9 s, max 52.2 s, 0 over 60 s, judge calls mean 1.95 (max 5);
+      ON p50 35.4 s, max 82.6 s, 2 over 60 s, judge calls mean 2.0 (max 4); 3 regenerations each. Citations were
+      always child lines; no answer cited a promoted chunk; `outline_only` was 0 everywhere. Both answers over
+      60 s are docs-04, which gets no expansion: its OFF and ON prompts are byte-identical (same SHA-256), and
+      four direct calls with that prompt gave four different completions (1,516-2,428 tokens). llama-server at
+      temperature 0 with a seed does not repeat itself here, so a single on/off pair cannot attribute latency.
+      The p95 gate needs the full runs.
 
 ### D-078 What the parent mechanism replaces in D-032 and D-060
 - **Context:** Ludwig asked to replace the D-032 constant lookup and the D-060 called-function lookup with the

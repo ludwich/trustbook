@@ -308,6 +308,37 @@ listed apart. "Over 60 s" is flagged in the report only when the computed p95 is
 outline-only failures caused regenerations; `EXPANSION_TOKENS` 900 → 500 and `EXPAND_TOP` 3 → 2; parent context
 off (recorded in D-077).
 
+**Pre-gate integration check (merged slices A and B; one check, not a gate run, see D-077 "Integration check").**
+This was run live in `trustbook-g3` on a scratch copy of the Smoke space, re-chunked with `p3-treesitter-6`. It
+used Qwen3.6 at temperature 0 with seed 42. Each question ran twice, in opposite order: run 1 was OFF then ON, run
+2 was ON then OFF. "Promoted / outline" is the ON context. "prompt" is the estimated first-call prompt tokens
+(characters / 4). Citations are the union over all four answers; every one is a child's own lines.
+
+| Question | Promoted / outline tokens | Run 1 OFF | Run 1 ON | Run 2 ON | Run 2 OFF | Citations |
+|---|---|---|---|---|---|---|
+| ref-near-03 | 0 / 0 | verified, 22.4 s, judge 2, prompt 2901 | verified, 17.5 s, judge 2, prompt 2901 | verified, 34.0 s, judge 1, prompt 2901 | verified, 13.4 s, judge 2, prompt 2901 | HISTORY.md:159-199 |
+| ref-near-10 | 0 / 20 | refused (regen), 20.6 s, judge 1, prompt 2005 | verified, 17.5 s, judge 1, prompt 2077 | refused (regen), 32.5 s, judge 1, prompt 2077 | verified (regen), 31.7 s, judge 2, prompt 2005 | status_codes.py:77-85 |
+| code-02 | 1 / 113 | verified, 34.8 s, judge 3, prompt 1468 | verified, 41.0 s, judge 2, prompt 1821 | verified, 27.3 s, judge 2, prompt 1821 | verified, 41.8 s, judge 2, prompt 1468 | models.py:859-872 |
+| code-05 | 1 / 119 | verified, 37.5 s, judge 5, prompt 2854 | verified, 41.5 s, judge 4, prompt 3048 | verified, 37.1 s, judge 4, prompt 3048 | verified, 37.3 s, judge 3, prompt 2854 | auth.py:34-75, auth.py:111-113 |
+| docs-04 | 0 / 0 | verified, 22.1 s, judge 1, prompt 3540 | verified (regen), 74.0 s, judge 3, prompt 3540 | refused (regen), 82.6 s, judge 4, prompt 3540 | verified, 14.9 s, judge 1, prompt 3540 | authentication.rst:36-67, web "netrc Authentication" |
+| ref-near-07 | 0 / 0 | verified, 16.9 s, judge 2, prompt 4348 | verified, 21.8 s, judge 1, prompt 4348 | verified, 22.9 s, judge 1, prompt 4348 | refused (regen), 39.5 s, judge 2, prompt 4348 | web "SOCKS", advanced.rst:661-703 |
+| multi-02 | 0 / 0 | verified, 52.2 s, judge 2, prompt 2651 | partial, 43.2 s, judge 1, prompt 2651 | partial, 48.5 s, judge 3, prompt 2651 | partial, 41.5 s, judge 3, prompt 2651 | web "Transport Adapters", advanced.rst:968-1003, sessions.py:870-881 |
+| code-01 | 2 / 209 | verified, 24.2 s, judge 1, prompt 3087 | verified, 23.8 s, judge 1, prompt 3638 | verified, 13.0 s, judge 1, prompt 3638 | verified, 24.3 s, judge 1, prompt 3087 | sessions.py:442-503 |
+| code-03 | 0 / 113 | verified, 28.0 s, judge 1, prompt 2872 | verified, 36.7 s, judge 2, prompt 3013 | verified, 28.3 s, judge 2, prompt 3013 | verified, 25.4 s, judge 1, prompt 2872 | adapters.py:201-221, adapters.py:70-82 |
+| code-04 | 1 / 116 | verified, 40.3 s, judge 2, prompt 3628 | verified, 42.9 s, judge 2, prompt 3832 | verified, 46.2 s, judge 2, prompt 3832 | verified, 36.6 s, judge 2, prompt 3628 | sessions.py:154-184, sessions.py:309-332, web "Custom Headers" |
+
+Totals over the 20 answers per arm:
+- **OFF:** p50 29.9 s, max 52.2 s, 0 answers over 60 s, 1.95 judge calls per answer (max 5).
+- **ON:** p50 35.4 s, max 82.6 s, 2 answers over 60 s, 2.0 judge calls per answer (max 4).
+- Each arm regenerated 3 times. No answer cited a promoted chunk, and `outline_only` was 0 for every answer.
+
+Both answers over 60 s are docs-04, which gets no expansion. Its OFF and ON prompts are byte-identical, and four
+direct calls with that prompt gave four different completions. The same holds for ref-near-03, ref-near-07 and
+multi-02, so their OFF/ON differences are noise from llama-server, not effects of the expansion.
+
+Claim replay (D-077): there were 0 false passes out of 41 base false claims, OFF and ON, with the real checker and
+with forced confirmation. There were also 0 out of 33 outline-only and promoted-sibling false claims.
+
 ### Known limits
 - Big data tables (e.g. `status_codes.py`) are single chunks, and answers about one entry can be missed
   (ref-near-10).
