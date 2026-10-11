@@ -581,11 +581,18 @@ grounding correctness > data safety > simplicity > performance > features.
   badge (Done/Failed), the reason for a failure, and never under "In progress and waiting".
 - **Per type:** paste through the UI (Done), text-file upload through the UI (Done), PDF upload (the existing
   OCR spec now also checks its job), folder (Done; needs `E2E_BROWSE_ROOT`), LAN URL (Failed, local-network
-  reason), `https://example.com/` (Done; skipped only when a HEAD probe from the test runner fails, so an
-  offline runner is not a false failure), YouTube "Me at the zoo" (Done **or** Failed with a reason, since
-  captions may be blocked from CI; the outcome is recorded as a test annotation), web search with the mock
-  provider (its specific results are `*.example.com` sub-domains that do not resolve → Failed, "Trustbook could
-  not reach this site.").
+  reason), web search with the mock provider (Failed, local-network reason: the search runs in the backend, but
+  the test rewrites the two specific results to literal private IPs `10.255.0.1` / `172.31.255.1` with
+  Playwright `page.route` before the page sees them, so adding them needs no DNS lookup and no connection).
+- **No network by default** (CLAUDE.md "no network calls in tests", SPEC §13 "no real endpoints in CI"): the
+  public web page (`https://example.com/`, Done) and YouTube ("Me at the zoo", Done **or** Failed with a reason,
+  since captions may be blocked; the outcome is a test annotation) need the real internet, so they run only with
+  `E2E_INTERNET=1`. `release.yml` does not set it, so the release gate never depends on outside sites; there is
+  no runner-side probe either. The whole suite passes against a mock container started with `--dns 127.0.0.2`
+  (no working resolver), which shows nothing else needs the network.
+- **Open for Ludwig:** item B asks for URL and YouTube job coverage; doing that offline in CI would need a seam
+  that lets the backend fetch a local fixture server, i.e. relaxing the SSRF address guard under the mock flag.
+  That was not done (security layer). Until he decides, run `E2E_INTERNET=1 pnpm e2e` by hand for those two.
 - **The bug class itself:** after a successful paste the header processing indicator returns to empty, the
   Queue shows exactly one job for the space, Done, no Failed row and no unfinished list, and the API lists the
   space's jobs as `["done"]`.
