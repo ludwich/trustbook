@@ -465,7 +465,7 @@ def test_search_text_drops_line_numbers_and_part_numbers() -> None:
 def test_part_number_is_read_from_the_header_only() -> None:
     text = "File: src/codes.py · _codes (part 3) (lines 81-88)\n    429: ('too_many',),"
     assert header_part(text) == 3
-    assert without_part(text) == "File: src/codes.py · _codes (lines 81-88)\n    429: ('too_many',),"
+    assert without_part(text) == text.replace(" (part 3)", "")
     # Only a split literal's header has a part; "(part 2)" in code or a symbol-less header is not.
     for other in (
         "File: src/a.py · f (lines 1-2)\nx = '(part 2) (lines 1-2)'",

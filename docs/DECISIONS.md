@@ -629,3 +629,26 @@ grounding correctness > data safety > simplicity > performance > features.
   (code 0.320 in the constants vs 0.348 measured, documents 0.318 vs 0.322), so code estimates run about 9%
   low. Left for the estimate owner; the per-chunk embedding overhead of twice as many code chunks is not
   modelled either way.
+
+### D-058 A split literal's part number is not code; its definition is its parts (review of D-056)
+- **Finding (layer 5):** the deterministic checks searched the whole chunk text, header included. Each split
+  data literal's header says `(part N)` with N from 1 to about 12, so "`_codes` … retries 6 times" citing part 6
+  passed the literal check (`missing_literals` returned only the other wrong number) and could then be rescued
+  by the code judge. A layer-5 failure is never rescued, so the part number weakened layer 5.
+- **Decision:** `missing_literals` and `missing_identifiers` drop the header's `(part N)` before searching
+  (`app/chunking/header.py`, which also owns `header_line`). Nothing else changes; the checks are only
+  stricter. The header's `(lines a-b)` is still searched, as before D-056: the prompt shows every chunk as
+  "file, lines a–b", so a sentence restating where code is ("lines 23–104") must keep passing in any language,
+  and removing them would reject true location statements. Their hole (a value equal to a range end) predates
+  this phase and is unchanged.
+- **Finding (Gate 1 G3):** constant definitions are found by a `NAME = ` line at column 0, which only part 1 of a
+  split literal has. For `ERROR_MESSAGES = {…}` (30 entries, 513 tokens) used as `ERROR_MESSAGES[code]`, the
+  extra was part 1 (lines 1-8) while 'E025' is in part 4. Before D-056 the table was one chunk. `requests` has
+  no UPPER_CASE literal over 250 tokens, so the D-056 measurement could not show it.
+- **Decision:** a definition that is part 1 of a split literal brings the literal's parts (same source, file and
+  `locator.symbol`, consecutive part numbers), counted as **one** of the 3 extras, up to 800 tokens (the
+  chunker's module chunk maximum, so a literal of that size comes in whole as before). A bigger literal brings
+  the parts the reranker scored highest for the question first, then the parts in order; they are added in
+  line order and go through the same budget fit as other extras. Part 1 alone in the context no longer counts
+  as the name's definition, so the rest still comes. Lower-case literals (`_codes`) are not constants and are
+  unaffected. General: syntax-driven for every grammar the chunker splits.

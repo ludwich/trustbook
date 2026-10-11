@@ -124,14 +124,14 @@ def with_definitions(
     See :mod:`app.retrieval.definitions`. A chunk that was also reranked keeps its score;
     otherwise its score is 0.0 (it was not ranked; the refusal check only uses ``ranked``).
     """
+    scores = {c.chunk_id: c.score for c in ranked}
     try:
-        extras = definition_extras(engine, selected)
+        extras = definition_extras(engine, selected, scores=scores)
     except Exception:
         logger.warning("Looking up constant definitions failed; context unchanged", exc_info=True)
         return list(selected)
     if not extras:
         return list(selected)
-    scores = {c.chunk_id: c.score for c in ranked}
     chunks = [
         (
             RetrievedChunk.from_row(e.row, scores.get(e.row.chunk_id, 0.0), definition_of=e.name),

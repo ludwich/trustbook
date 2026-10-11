@@ -7,20 +7,31 @@ names that it does not define itself are looked up: a chunk of the same source w
 ``NAME = …`` at column 0, in the same file first, then anywhere in the source. At most
 :data:`MAX_EXTRA` such chunks are added, within the token budget. They are ordinary numbered
 chunks: the model may cite them and every grounding layer treats them like any other chunk.
+
+A big data literal is split into parts (D-056) and only part 1 has the ``NAME = …`` line, while
+the entry a referrer looks up (``ERROR_MESSAGES[code]``) is usually in another part. Such a
+definition is the literal's parts, counted as one extra: all of them up to
+:data:`LITERAL_MAX_TOKENS` (what one chunk held before the split), preferring the parts the
+reranker scored highest for the question, then the parts in order (D-058).
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy import Engine
 
-from app.retrieval.store import ChunkRow, chunks_assigning
+from app.chunking.header import header_part
+from app.chunking.syntax import MODULE_MAX_TOKENS
+from app.retrieval.store import ChunkRow, chunks_assigning, chunks_of_symbol
 
 MAX_EXTRA = 3
+# The parts of a split data literal added for one name: the largest module-level chunk the code
+# chunker makes, so a literal up to this size comes in whole, as it did before it was split.
+LITERAL_MAX_TOKENS = MODULE_MAX_TOKENS
 # Upper bound on names looked up per answer (each costs about 1 ms per 3,600 chunks).
 MAX_NAMES = 24
 _NAME = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
@@ -96,7 +107,8 @@ def wanted_names(chunks: Sequence[ContextChunk]) -> list[Wanted]:
     """Constants the code chunks refer to that no chunk in ``chunks`` defines, best chunk first."""
     already: set[str] = set()
     for chunk in chunks:
-        if code_file(chunk.locator):
+        # Part 1 of a split literal defines the name but holds only the first entries.
+        if code_file(chunk.locator) and header_part(chunk.text) is None:
             already |= defined_names(code_body(chunk.text))
     wanted: list[Wanted] = []
     seen: set[tuple[str, str]] = set()
@@ -132,23 +144,69 @@ def find_definitions(engine: Engine, wanted: Sequence[Wanted]) -> dict[Wanted, C
     return found
 
 
+def literal_parts(
+    engine: Engine, definer: ChunkRow, scores: Mapping[str, float] | None = None
+) -> list[ChunkRow]:
+    """The chunks that make up ``definer``'s definition, in line order.
+
+    ``[definer]`` unless it is part 1 of a split data literal; then its parts up to
+    :data:`LITERAL_MAX_TOKENS`, the ones with the highest ``scores`` (rerank scores by chunk id)
+    first, then the rest in order.
+    """
+    file, symbol = code_file(definer.locator), definer.locator.get("symbol")
+    if header_part(definer.text) != 1 or file is None or not isinstance(symbol, str):
+        return [definer]
+    rows = chunks_of_symbol(engine, definer.source_id, file, symbol)
+    ids = [row.chunk_id for row in rows]
+    if definer.chunk_id not in ids:
+        return [definer]
+    parts: list[ChunkRow] = []
+    for row in rows[ids.index(definer.chunk_id) :]:
+        if header_part(row.text) != len(parts) + 1:
+            break  # the next chunk is not the next part of this literal
+        parts.append(row)
+    scored = scores or {}
+    order = sorted(
+        range(len(parts)),
+        key=lambda i: (parts[i].chunk_id not in scored, -scored.get(parts[i].chunk_id, 0.0), i),
+    )
+    chosen: set[int] = set()
+    used = 0
+    for i in order:
+        if chosen and used + parts[i].token_count > LITERAL_MAX_TOKENS:
+            continue
+        chosen.add(i)
+        used += parts[i].token_count
+    return [parts[i] for i in sorted(chosen)]
+
+
 def definition_extras(
-    engine: Engine, chunks: Sequence[ContextChunk], *, max_extra: int = MAX_EXTRA
+    engine: Engine,
+    chunks: Sequence[ContextChunk],
+    *,
+    max_extra: int = MAX_EXTRA,
+    scores: Mapping[str, float] | None = None,
 ) -> list[Extra]:
-    """Up to ``max_extra`` chunks (not already in ``chunks``) defining constants they use."""
+    """Chunks (not already in ``chunks``) defining constants they use, for up to ``max_extra``
+    names. A split data literal brings several of its parts (:func:`literal_parts`)."""
     wanted = wanted_names(chunks)
     if not wanted:
         return []
     definitions = find_definitions(engine, wanted)
     taken = {c.chunk_id for c in chunks}
     extras: list[Extra] = []
+    names = 0
     for item in wanted:
         row = definitions.get(item)
-        if row is None or row.chunk_id in taken:
+        if row is None:
             continue
-        taken.add(row.chunk_id)
-        extras.append(Extra(row, item.name, item.referrer))
-        if len(extras) >= max_extra:
+        rows = [r for r in literal_parts(engine, row, scores) if r.chunk_id not in taken]
+        if not rows:
+            continue
+        taken |= {r.chunk_id for r in rows}
+        extras.extend(Extra(r, item.name, item.referrer) for r in rows)
+        names += 1
+        if names >= max_extra:
             break
     return extras
 

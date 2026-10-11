@@ -504,7 +504,13 @@ token budget. The refusal threshold still uses rerank scores.
   comment lines above an element go with it. Every group's `locator.symbol` is the qualified assignment name
   (`_codes`, `FlaskyStyle.styles`, `Codes.Names`), `kind` is `data`, and its header names the part:
   `File: src/requests/status_codes.py · _codes (part 6) (lines 77-85)`. Full-text search indexes the header
-  without line or part numbers.
+  without line or part numbers. The part number is where the chunk sits, not code: layer 5 (identifier and
+  literal checks) does not search it (D-058).
+- **Constant definitions of a split literal** (D-058): when context code uses an UPPER_CASE name defined by a
+  split data literal, the definition extra is the literal's parts, not only part 1 (the one with `NAME =`). The
+  parts count as one of the 3 extras and are added up to 800 tokens (a literal that size comes in whole); a
+  bigger literal brings the parts with the highest rerank scores first, then the parts in order, in line order.
+  Part 1 alone in the context does not count as the definition.
 - **Document files in folders** (D-056): chunks of a text document located by line (not by page) end on whole
   lines, so `start_line`–`end_line` hold exactly the chunk's text. When the 500-token target falls inside a line,
   the chunk ends at an earlier line end (a sentence end when there is one) and the rest of the line starts the
