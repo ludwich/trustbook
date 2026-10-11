@@ -1,4 +1,7 @@
-"""In-memory index for tests: cosine similarity and a simple term-overlap text score."""
+"""In-memory index for tests: cosine similarity and a simple term-overlap text score.
+
+Ties are ordered like the LanceDB index: by a key derived from the text (D-059).
+"""
 
 from __future__ import annotations
 
@@ -7,7 +10,7 @@ import re
 import threading
 from collections.abc import Sequence
 
-from app.index.base import Hit, IndexedChunk
+from app.index.base import Hit, IndexedChunk, hit_order, tie_key
 
 _WORD = re.compile(r"\w+")
 
@@ -56,8 +59,8 @@ class InMemorySpaceIndex:
                     continue
                 row_norm = math.sqrt(sum(v * v for v in row)) or 1.0
                 score = sum(a * b for a, b in zip(vector, row, strict=True)) / (norm * row_norm)
-                hits.append(Hit(chunk.chunk_id, chunk.source_id, score))
-        return sorted(hits, key=lambda h: (-h.score, h.chunk_id))[:limit]
+                hits.append(Hit(chunk.chunk_id, chunk.source_id, score, tie_key(chunk.text)))
+        return sorted(hits, key=hit_order)[:limit]
 
     def text_search(self, query: str, *, limit: int, source_ids: Sequence[str]) -> list[Hit]:
         allowed = set(source_ids)
@@ -70,8 +73,8 @@ class InMemorySpaceIndex:
                 terms = _terms(chunk.text)
                 score = float(sum(1 for t in terms if t in wanted))
                 if score > 0:
-                    hits.append(Hit(chunk.chunk_id, chunk.source_id, score))
-        return sorted(hits, key=lambda h: (-h.score, h.chunk_id))[:limit]
+                    hits.append(Hit(chunk.chunk_id, chunk.source_id, score, tie_key(chunk.text)))
+        return sorted(hits, key=hit_order)[:limit]
 
     def count(self) -> int:
         with self._lock:

@@ -18,7 +18,7 @@ reranker scored highest for the question, then the parts in order (D-058).
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -212,19 +212,23 @@ def definition_extras(
 
 
 def fit_extras[C: ContextChunk](
-    selected: Sequence[C], extras: Sequence[tuple[C, str]], *, max_tokens: int
+    selected: Sequence[C],
+    extras: Sequence[tuple[C, str]],
+    *,
+    max_tokens: int,
+    protect: Collection[str] = (),
 ) -> list[C]:
     """Append ``(chunk, referrer id)`` extras to ``selected`` within ``max_tokens``.
 
     When the budget is full an extra may displace the lowest-ranked selected chunks, but never
-    the top chunk, a chunk an added extra was found for, or another extra. An extra that cannot
-    fit that way is left out.
+    the top chunk, a chunk an added extra was found for, another extra, or a chunk in ``protect``
+    (extras added by an earlier step). An extra that cannot fit that way is left out.
     """
     result = list(selected)
     if not result:
         return result
     used = sum(c.token_count for c in result)
-    keep = {result[0].chunk_id}
+    keep = {result[0].chunk_id, *protect}
     for extra, referrer in extras:
         over = used + extra.token_count - max_tokens
         if over > 0:

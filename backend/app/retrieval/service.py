@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy import Engine
 from sqlmodel import Session
 
 from app.capabilities.bundled import Embedder, Reranker
 from app.index.base import Hit, SpaceIndex
+from app.retrieval.callees import callee_extras
 from app.retrieval.definitions import definition_extras, fit_extras
 from app.retrieval.fusion import (
     CONTEXT_CHUNKS,
@@ -47,12 +48,20 @@ class RetrievedChunk:
     locator: dict[str, object]
     token_count: int
     score: float
-    # Set when the chunk was added because it defines this constant (not ranked in).
+    # Set when the chunk was added because it defines this constant (D-032) or this function the
+    # context's code calls (D-060), not because it was ranked into the context.
     definition_of: str | None = None
+    # The id of the context chunk such an added chunk was found for (it refers to or calls it).
+    referrer: str | None = None
 
     @classmethod
     def from_row(
-        cls, row: ChunkRow, score: float, *, definition_of: str | None = None
+        cls,
+        row: ChunkRow,
+        score: float,
+        *,
+        definition_of: str | None = None,
+        referrer: str | None = None,
     ) -> RetrievedChunk:
         return cls(
             chunk_id=row.chunk_id,
@@ -63,6 +72,7 @@ class RetrievedChunk:
             token_count=row.token_count,
             score=score,
             definition_of=definition_of,
+            referrer=referrer,
         )
 
 
@@ -90,7 +100,12 @@ def usable_source_ids(engine: Engine) -> list[str]:
 
 
 def rerank(query: str, rows: Sequence[ChunkRow], reranker: Reranker) -> list[RetrievedChunk]:
-    """Score ``rows`` against ``query``; best first, ties keep the input order."""
+    """Score ``rows`` against ``query``; best first, ties keep the input order.
+
+    The input is the fused list, whose order is itself fixed by scores and content keys (D-059),
+    so equal rerank scores (common with a BF16 reranker) are ordered the same on every run,
+    re-index and machine. The fused rank is a better tie-breaker than a hash: it is evidence.
+    """
     if not rows:
         return []
     scores = reranker.score(query, [row.text for row in rows])
@@ -134,12 +149,52 @@ def with_definitions(
         return list(selected)
     chunks = [
         (
-            RetrievedChunk.from_row(e.row, scores.get(e.row.chunk_id, 0.0), definition_of=e.name),
+            RetrievedChunk.from_row(
+                e.row, scores.get(e.row.chunk_id, 0.0), definition_of=e.name, referrer=e.referrer
+            ),
             e.referrer,
         )
         for e in extras
     ]
     return fit_extras(selected, chunks, max_tokens=max_tokens)
+
+
+def with_callees(
+    selected: Sequence[RetrievedChunk],
+    ranked: Sequence[RetrievedChunk],
+    *,
+    max_tokens: int = CONTEXT_TOKENS,
+) -> list[RetrievedChunk]:
+    """``selected`` plus the reranked chunks defining functions its code calls (D-060).
+
+    See :mod:`app.retrieval.callees`. At most two, within ``max_tokens``; the top chunk, the
+    calling chunks, the constants added before and the chunks those constants were added for are
+    never displaced. Each keeps its rerank score.
+    """
+    try:
+        extras = callee_extras(selected, ranked)
+    except Exception:
+        logger.warning("Looking up called functions failed; context unchanged", exc_info=True)
+        return list(selected)
+    if not extras:
+        return list(selected)
+    for chunk, name, callers in extras:
+        logger.info(
+            "Callee: added %s (chunk %s) for %d context chunk(s)",
+            name,
+            chunk.chunk_id,
+            len(callers),
+        )
+    chunks = [
+        (replace(chunk, definition_of=name, referrer=callers[0]), callers[0])
+        for chunk, name, callers in extras
+    ]
+    # Constants added before, the chunks they were added for (D-032: an extra is never left
+    # without its referrer) and every calling chunk stay: a body is read through its call site.
+    added = [c for c in selected if c.definition_of is not None]
+    keep = [c.chunk_id for c in added] + [c.referrer for c in added if c.referrer is not None]
+    keep += [cid for _, _, callers in extras for cid in callers]
+    return fit_extras(selected, chunks, max_tokens=max_tokens, protect=keep)
 
 
 def _top_ids(hits: Sequence[Hit], n: int) -> list[str]:
@@ -275,5 +330,5 @@ def retrieve(
     found = search(engine, index, embedder, query, allowed)
     ranked = rerank(query, found.rows, reranker)
     chosen = keep_agreed(select_context(ranked), ranked, found.agreed)
-    chunks = with_definitions(engine, chosen, ranked)
+    chunks = with_callees(with_definitions(engine, chosen, ranked), ranked)
     return Retrieval(chunks=chunks, ranked=ranked, source_ids=allowed)
