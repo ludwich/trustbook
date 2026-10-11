@@ -3,7 +3,10 @@
 Retrieval ranks and cites small child chunks. A child's parent (its document section, its class
 or its module) is named by a **parent key** stored next to the chunk, and described by a small
 :class:`Structure` record stored as JSON. Both are file-relative, so a file reused unchanged by an
-incremental refresh keeps them as they are.
+incremental refresh keeps them as they are, except the import targets: they depend on the other
+files of the snapshot, so a refresh resolves the stored imports of a reused file again
+(:func:`app.chunking.imports.resolve_imports`), and a refreshed source holds the same targets as a
+full re-index.
 
 Parent keys never contain chunk ids or snapshot offsets:
 

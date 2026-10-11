@@ -25,7 +25,8 @@ from typing import Any, Literal
 
 from app.chunking.dispatch import CHUNKER_VERSION, chunk_file, chunk_snapshot, snapshot_files
 from app.chunking.document import ChunkDraft
-from app.chunking.structure import structure_json
+from app.chunking.imports import SourceFiles, resolve_imports
+from app.chunking.structure import parse_structure, structure_json
 from app.chunking.tokens import TokenCounter
 from app.db.models import Chunk, SourceFile
 from app.ingest.folder import FolderSnapshot, PreviousFile, PreviousSnapshot
@@ -141,8 +142,21 @@ def _new_rows(source_id: str, drafts: Iterable[ChunkDraft]) -> list[Chunk]:
     ]
 
 
-def _moved(chunk: Chunk, delta: int) -> Chunk:
-    # Parent keys and structure are file-relative (D-077): they move with the file unchanged.
+def _resolved_again(raw: str | None, path: str, files: SourceFiles) -> str | None:
+    """A reused chunk's stored structure with its imports resolved against the new snapshot's
+    files: another file may have been added, removed or renamed since (D-077)."""
+    if raw is None or '"imports"' not in raw:
+        return raw
+    structure = parse_structure(raw)
+    if structure is None or not structure.imports:
+        return raw
+    again = resolve_imports(structure, path, files)
+    return raw if again == structure else structure_json(again)
+
+
+def _moved(chunk: Chunk, delta: int, path: str, files: SourceFiles) -> Chunk:
+    # Parent keys and structure are file-relative (D-077): they move with the file unchanged,
+    # except import targets, which depend on the snapshot's other files.
     return Chunk(
         id=chunk.id,
         source_id=chunk.source_id,
@@ -153,7 +167,7 @@ def _moved(chunk: Chunk, delta: int) -> Chunk:
         locator=chunk.locator,
         token_count=chunk.token_count,
         parent_key=chunk.parent_key,
-        structure=chunk.structure,
+        structure=_resolved_again(chunk.structure, path, files),
     )
 
 
@@ -176,7 +190,8 @@ def plan_chunks(
             old_start = snapshot.reused.get(entry.path)
             kept = kept_by_path.get(entry.path)
             if old_start is not None and kept is not None:
-                file_rows = [_moved(c, entry.start - old_start) for c in kept]
+                delta = entry.start - old_start
+                file_rows = [_moved(c, delta, entry.path, paths) for c in kept]
             else:
                 file_rows = _new_rows(source_id, chunk_file(snapshot, entry, counter, paths))
                 new_rows.extend(file_rows)

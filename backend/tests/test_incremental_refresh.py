@@ -155,6 +155,37 @@ def test_refresh_keeps_each_kept_chunks_parent(client: TestClient, paths: Paths)
     assert "parent" not in json.dumps(shown["locator"])
 
 
+def test_refresh_resolves_a_kept_files_imports_against_the_new_files(
+    client: TestClient, paths: Paths
+) -> None:
+    """D-077: import targets depend on the snapshot's other files. A reused file's imports are
+    resolved again on refresh, so they match a full re-index when an imported file is added or
+    removed (and never name a file the source no longer has)."""
+    services = services_of(client)
+    root, sid, source_id = _setup(client, paths)
+    (root / "src" / "e.py").write_text("from .d import LIMIT\n\n\ndef use():\n    return LIMIT\n")
+    _refresh(client, sid, source_id)
+
+    def e_import() -> tuple[str, list[dict[str, Any]]]:
+        chunk = _by_symbol(_chunks(services, sid, source_id), "src/e.py", None)
+        imports: list[dict[str, Any]] = json.loads(chunk.structure or "{}")["imports"]
+        return chunk.id, imports
+
+    first_id, imports = e_import()
+    assert [(i["text"], i["target"]) for i in imports] == [("from .d import LIMIT", None)]
+    (root / "src" / "d.py").write_text("LIMIT = 3\n")
+    source = _refresh(client, sid, source_id)
+    assert source["stats"]["changed_files"] == 1  # only d.py is new: e.py is reused
+    kept_id, imports = e_import()
+    assert kept_id == first_id
+    assert [(i["target"], i.get("module", False)) for i in imports] == [("src/d.py", False)]
+    (root / "src" / "d.py").unlink()
+    _refresh(client, sid, source_id)
+    kept_id, imports = e_import()
+    assert kept_id == first_id
+    assert [i["target"] for i in imports] == [None]
+
+
 def test_failed_refresh_forgets_file_records(
     client: TestClient, paths: Paths, monkeypatch: pytest.MonkeyPatch
 ) -> None:

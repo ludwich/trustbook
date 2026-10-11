@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,11 +13,14 @@ from sqlalchemy import Engine, event, text
 
 from app.chunking.dispatch import CHUNKER_VERSION
 from app.chunking.document import ChunkDraft
+from app.chunking.imports import SourceFiles
 from app.chunking.structure import (
+    Import,
     Structure,
     class_key,
     line_section_key,
     module_key,
+    parse_structure,
     structure_json,
 )
 from app.db.engine import get_engine
@@ -260,10 +264,33 @@ def test_new_rows_store_the_structure_and_moved_rows_keep_it() -> None:
     plain = ChunkDraft("transcript turn", 0, 5, {"start_s": 0.0}, 3)
     (none,) = incremental._new_rows("s", [plain])
     assert (none.parent_key, none.structure) == (None, None)
-    moved = incremental._moved(row, 100)
+    moved = incremental._moved(row, 100, "x.py", SourceFiles(["x.py"]))
     assert (moved.start_offset, moved.end_offset) == (110, 120)
     assert (moved.parent_key, moved.structure) == (row.parent_key, row.structure)
     assert moved.id == row.id and moved.text == row.text
+
+
+def test_moved_rows_resolve_their_imports_against_the_new_files() -> None:
+    """D-077: an import's target depends on the snapshot's other files; a reused row's imports
+    are resolved again, and the record is otherwise unchanged."""
+    item = Import(1, 1, "from .b import LIMIT", ("LIMIT",), None, form="from", spec=".b")
+    item = replace(item, member="LIMIT")
+    structure = Structure("module", "pkg/a.py", None, True, defines=("X",), imports=(item,))
+    (row,) = incremental._new_rows(
+        "s", [ChunkDraft("File: pkg/a.py", 0, 5, {"file": "pkg/a.py"}, 3, "pkg/a.py::", structure)]
+    )
+    alone = incremental._moved(row, 0, "pkg/a.py", SourceFiles(["pkg/a.py"]))
+    assert alone.structure == row.structure  # nothing changed: the stored text is kept
+    added = incremental._moved(row, 0, "pkg/a.py", SourceFiles(["pkg/a.py", "pkg/b.py"]))
+    again = parse_structure(added.structure)
+    assert again == replace(structure, imports=(replace(item, target="pkg/b.py"),))
+    gone = incremental._moved(added, 0, "pkg/a.py", SourceFiles(["pkg/a.py"]))
+    assert gone.structure == row.structure
+    # A submodule appearing turns the name into that module.
+    sub = incremental._moved(row, 0, "pkg/a.py", SourceFiles(["pkg/a.py", "pkg/b/LIMIT.py"]))
+    resolved = parse_structure(sub.structure)
+    assert resolved is not None
+    assert [(i.target, i.module) for i in resolved.imports] == [("pkg/b/LIMIT.py", True)]
 
 
 def test_chunker_version_six_changes_the_calibration_pipeline() -> None:
