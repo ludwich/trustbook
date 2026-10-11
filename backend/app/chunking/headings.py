@@ -5,21 +5,30 @@ CPython 3.12`` belongs to whatever release heading is above it, often in the pre
 (ref-near-03). Document files of folder sources therefore carry their heading path in the
 chunk header (:func:`app.chunking.header.document_header`).
 
-Three heading forms are recognised, outside fenced code blocks (`````` ``` `````` / ``~~~``):
+The heading syntax follows the file's format (:func:`heading_syntax`, D-071):
 
-- **ATX**: ``# Title`` … ``###### Title`` at column 0; the level is the number of ``#``.
-- **Underlined (setext / reStructuredText)**: a title line at column 0, after a blank line (or at
-  the start of the file), followed by a line of one repeated adornment character, at least 3 long.
-- **Over- and underlined (reStructuredText)**: the same adornment line above and below the title
-  (the title may be indented), after a blank line or at the start.
+- **Markdown** (``.md``, ``.markdown`` and documents parsed from PDF, Word, …): ATX
+  (``# Title`` … ``###### Title`` at column 0) and setext titles (a title line after a blank line,
+  underlined with ``=`` for level 1 or ``-`` for level 2, as CommonMark defines); YAML front
+  matter at the top is skipped; ``` and ``~~~`` fence code blocks.
+- **reStructuredText and plain text** (``.rst``, ``.txt``): ATX lines, underlined titles (a title
+  line at column 0 after a blank line, then a line of one repeated adornment character, at least
+  3 long) and over- and underlined titles (the title may be indented). Every reStructuredText
+  adornment character counts; levels follow the order in which each style first appears
+  (docutils' rule). An adornment other than ``=`` / ``-`` must be at least as long as its title,
+  so a ``***`` rule after a line of text is not a heading. Only ``` fences code:
+  reStructuredText has no fences, and a ``~~~~`` line is a transition or an adornment.
+- **AsciiDoc** (``.adoc``, ``.asciidoc``): ``= Title`` … ``====== Title`` (and Markdown ``#``)
+  at column 0, the level is the number of markers. Delimited blocks (``----``, ``....``,
+  ``====``, ``****``, ``____``, ``++++``, ``////`` and ```) hold no headings; block attributes
+  (``[source,yaml]``, ``[NOTE]``) are never titles. Two-line (underlined) titles, deprecated in
+  AsciiDoc, are not recognised: a missed heading only leaves out context, a wrong one would give
+  lines a section they are not in.
+- **Org** (``.org``): ``* Heading``, ``** Sub`` … at column 0 (trailing ``:tags:`` dropped);
+  ``#+BEGIN_…`` / ``#+END_…`` blocks hold no headings, and ``# …`` is a comment.
 
-Markdown files (and documents converted to Markdown) only underline with ``=`` (level 1) and
-``-`` (level 2), as CommonMark defines; YAML front matter at the top is skipped. Other text files
-(``.rst``, ``.txt``, …) accept every reStructuredText adornment character, and their levels follow
-the order in which each style first appears in the file (docutils' rule). An adornment other than
-``=`` / ``-`` must be at least as long as its title, as reStructuredText requires, so a ``***``
-rule after a line of text is not a heading. A title line that is a list item, table row, quote,
-directive or code is never a heading.
+A title line that is a list item, table row, quote, directive or code is never an underlined
+title.
 """
 
 from __future__ import annotations
@@ -27,26 +36,47 @@ from __future__ import annotations
 import re
 from bisect import bisect_right
 from dataclasses import dataclass
+from typing import Literal
 
 # reStructuredText adornment characters (any printable 7-bit ASCII punctuation).
 _RST_ADORNMENT = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 _MARKDOWN_ADORNMENT = "=-"
 _ATX = re.compile(r"(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*")
+_ASCIIDOC_TITLE = re.compile(r"(={1,6}|#{1,6})[ \t]+(\S.*?)(?:[ \t]+\1)?[ \t]*")
+_ORG_HEADLINE = re.compile(r"(\*+)[ \t]+(.*?)(?:[ \t]+:[\w@#%:]+:)?[ \t]*")
 FENCE = re.compile(r" {0,3}(```|~~~)")
+Syntax = Literal["markdown", "rst", "asciidoc", "org"]
+# Lines that open or close a block holding no headings, per syntax.
+FENCES: dict[Syntax, re.Pattern[str]] = {
+    "markdown": FENCE,
+    "rst": re.compile(r" {0,3}```"),
+    "asciidoc": re.compile(r"(?:-{4,}|\.{4,}|={4,}|\*{4,}|_{4,}|\+{4,}|/{4,})[ \t]*$|```"),
+    "org": re.compile(r"[ \t]*#\+(?:begin|end)_", re.IGNORECASE),
+}
+_ORG_BLOCK_START = re.compile(r"[ \t]*#\+begin_", re.IGNORECASE)
+_ORG_BLOCK_END = re.compile(r"[ \t]*#\+end_", re.IGNORECASE)
+_SYNTAX_BY_EXTENSION: dict[str, Syntax] = {
+    "md": "markdown",
+    "markdown": "markdown",
+    "rst": "rst",
+    "txt": "rst",
+    "adoc": "asciidoc",
+    "asciidoc": "asciidoc",
+    "org": "org",
+}
 # A line that is something else than a title: bullet item, table row, quote, directive, field.
 _NOT_TITLE = re.compile(r"[-*+][ \t]|[|>]|\.\.[ \t]|:[A-Za-z]|```|~~~")
 MIN_ADORNMENT = 3
-# Text documents written in Markdown; other text files (.rst, .txt, …) get reStructuredText
-# heading rules. Documents parsed from other formats (PDF, Word, …) are Markdown too.
-MARKDOWN_EXTENSIONS = frozenset({"md", "markdown"})
 SEPARATOR = " › "
 MAX_PATH_CHARS = 200
 
 
-def markdown_file(path: str) -> bool:
-    """Whether a text file's headings follow Markdown rules (by its extension)."""
+def heading_syntax(path: str) -> Syntax:
+    """The heading syntax of a document file, by its extension. A document of another format
+    (PDF, Word, …) is parsed into Markdown."""
     name = path.replace("\\", "/").rsplit("/", 1)[-1]
-    return "." in name and name.rsplit(".", 1)[-1].lower() in MARKDOWN_EXTENSIONS
+    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    return _SYNTAX_BY_EXTENSION.get(extension, "markdown")
 
 
 @dataclass(frozen=True)
@@ -96,13 +126,28 @@ def _front_matter_end(text: str, lines: list[tuple[int, int]]) -> int:
     return 0
 
 
-def find_headings(text: str, start: int, end: int, *, markdown: bool) -> list[Heading]:
+def _closes(syntax: Syntax, opened: str, current: str) -> bool:
+    """Whether ``current`` closes the block that the line ``opened`` opened."""
+    if syntax == "asciidoc":  # the same delimiter closes it (``` with or without a language)
+        return (
+            current.strip().startswith("```")
+            if opened.startswith("```")
+            else (current.strip() == opened)
+        )
+    if syntax == "org":
+        return _ORG_BLOCK_END.match(current) is not None
+    return FENCES[syntax].match(current) is not None
+
+
+def find_headings(text: str, start: int, end: int, *, syntax: Syntax) -> list[Heading]:
     """The headings of the document at ``text[start:end]`` in order (see the module docstring)."""
     lines = _lines(text, start, end)
+    markdown = syntax == "markdown"
+    underlined = syntax in ("markdown", "rst")
     chars = _MARKDOWN_ADORNMENT if markdown else _RST_ADORNMENT
-    styles: dict[tuple[str, bool], int] = {}  # underline styles of a non-Markdown file → level
+    styles: dict[tuple[str, bool], int] = {}  # underline styles of a reStructuredText file → level
     found: list[Heading] = []
-    in_fence = False
+    opened: str | None = None  # the line that opened the code block we are in
 
     def line(i: int) -> str:
         return text[lines[i][0] : lines[i][1]]
@@ -117,14 +162,28 @@ def find_headings(text: str, start: int, end: int, *, markdown: bool) -> list[He
             return 1 if char == "=" else 2
         return styles.setdefault((char, overlined), len(styles) + 1)
 
+    def one_line(i: int) -> Heading | None:
+        current = line(i)
+        if syntax == "org":
+            match = _ORG_HEADLINE.fullmatch(current)
+            return (
+                Heading(lines[i][0], lines[i][1], match.group(2).strip(), len(match.group(1)))
+                if match and match.group(2).strip()
+                else None
+            )
+        match = (_ASCIIDOC_TITLE if syntax == "asciidoc" else _ATX).fullmatch(current)
+        if match is None:
+            return None
+        return Heading(lines[i][0], lines[i][1], match.group(2).strip(), len(match.group(1)))
+
     def heading_at(i: int) -> tuple[Heading, int] | None:
         """The heading starting at line ``i`` and the number of lines it takes."""
-        current = line(i)
-        atx = _ATX.fullmatch(current)
-        if atx:
-            return Heading(lines[i][0], lines[i][1], atx.group(2).strip(), len(atx.group(1))), 1
-        if not blank_before(i):
+        single = one_line(i)
+        if single is not None:
+            return single, 1
+        if not underlined or not blank_before(i):
             return None
+        current = line(i)
         over = None if markdown else _adornment(current, chars)
         if over is not None and i + 2 < len(lines):
             title = line(i + 1).strip()
@@ -142,10 +201,12 @@ def find_headings(text: str, start: int, end: int, *, markdown: bool) -> list[He
                 return Heading(lines[i][0], lines[i + 1][1], title, level(under, False)), 2
         return None
 
+    fence = _ORG_BLOCK_START if syntax == "org" else FENCES[syntax]
     i = first
     while i < len(lines):
-        if in_fence:  # only the closing fence matters inside a code block
-            in_fence = FENCE.match(line(i)) is None
+        if opened is not None:  # only the line closing the code block matters inside it
+            if _closes(syntax, opened, line(i)):
+                opened = None
             i += 1
             continue
         found_here = heading_at(i)
@@ -153,7 +214,8 @@ def find_headings(text: str, start: int, end: int, *, markdown: bool) -> list[He
             found.append(found_here[0])
             i += found_here[1]
             continue
-        in_fence = FENCE.match(line(i)) is not None  # an adornment of ``~`` is tried first
+        if fence.match(line(i)):  # an adornment line is tried as a heading first
+            opened = line(i).strip()
         i += 1
     return found
 

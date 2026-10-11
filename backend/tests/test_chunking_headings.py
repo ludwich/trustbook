@@ -4,16 +4,30 @@ from __future__ import annotations
 
 from app.chunking.dispatch import chunk_file, chunk_snapshot
 from app.chunking.document import pack_units
-from app.chunking.header import document_header, header_context, section_at
-from app.chunking.headings import Heading, HeadingPaths, find_headings, path_text
+from app.chunking.header import (
+    document_header,
+    header_content,
+    header_context,
+    section_at,
+    section_of,
+    without_numbering,
+)
+from app.chunking.headings import (
+    Heading,
+    HeadingPaths,
+    Syntax,
+    find_headings,
+    heading_syntax,
+    path_text,
+)
 from app.chunking.units import Unit, split_units
 from app.index.base import search_text
 from app.parse.snapshot import FileEntry, Snapshot, SnapshotBuilder
 from tests.test_chunking import WordCounter
 
 
-def titles(text: str, *, markdown: bool) -> list[tuple[str, int]]:
-    return [(h.title, h.level) for h in find_headings(text, 0, len(text), markdown=markdown)]
+def titles(text: str, *, syntax: Syntax) -> list[tuple[str, int]]:
+    return [(h.title, h.level) for h in find_headings(text, 0, len(text), syntax=syntax)]
 
 
 # --- finding headings -------------------------------------------------------------------------
@@ -24,7 +38,7 @@ def test_markdown_atx_and_setext_headings() -> None:
         "---\ntitle: front matter\n---\n\nRelease History\n===============\n\n"
         "dev\n---\n\n- a change\n\n## 2.32.0 (2024-05-20)\n\nText.\n\n### Bugfixes ###\n"
     )
-    assert titles(text, markdown=True) == [
+    assert titles(text, syntax="markdown") == [
         ("Release History", 1),
         ("dev", 2),
         ("2.32.0 (2024-05-20)", 2),
@@ -41,7 +55,7 @@ def test_markdown_lines_that_are_not_headings() -> None:
         "```\n# not a heading\nCode\n===\n```\n\n"  # fenced code
         "Real\n====\n"
     )
-    assert titles(text, markdown=True) == [("Real", 1)]
+    assert titles(text, syntax="markdown") == [("Real", 1)]
 
 
 def test_restructuredtext_levels_follow_first_appearance() -> None:
@@ -53,18 +67,70 @@ def test_restructuredtext_levels_follow_first_appearance() -> None:
         "Short\n***\n\n"  # an adornment other than = / - must be as long as its title
         "   Centred\n=============\n   Centred\n=============\n"  # indented title, overlined
     )
-    found = titles(text, markdown=False)
+    found = titles(text, syntax="rst")
     assert found == [("Requests", 1), ("Install", 2), ("From source", 3), ("Usage", 2)]
 
 
 def test_restructuredtext_overline_of_tildes_is_not_a_fence() -> None:
     text = "~~~~~~~\nPart A\n~~~~~~~\n\nText.\n\nSection\n=======\n\nMore.\n"
-    assert titles(text, markdown=False) == [("Part A", 1), ("Section", 2)]
+    assert titles(text, syntax="rst") == [("Part A", 1), ("Section", 2)]
+
+
+def test_restructuredtext_has_no_tilde_fences() -> None:
+    # A "~~~~" transition, or a tilde underline shorter than its title, opens no code block:
+    # reStructuredText has no fences, so the headings after it are still found (D-071).
+    transition = (
+        "Intro\n=====\n\nSome text.\n\n~~~~~~~~\n\nMore text.\n\nUsage\n=====\n\nAPI\n---\n\nx\n"
+    )
+    assert titles(transition, syntax="rst") == [("Intro", 1), ("Usage", 1), ("API", 2)]
+    short = "Intro\n=====\n\nLong title here\n~~~~\n\nUsage\n=====\n"
+    assert titles(short, syntax="rst") == [("Intro", 1), ("Usage", 1)]
+    # A ``` block still hides what is in it.
+    fenced = "Intro\n=====\n\n```\nNot\n===\n```\n\nUsage\n=====\n"
+    assert titles(fenced, syntax="rst") == [("Intro", 1), ("Usage", 1)]
+
+
+def test_asciidoc_headings_and_blocks() -> None:
+    text = (
+        "= User Guide\n\n== Installation\n\nRun the installer with these settings:\n\n"
+        "[source,yaml]\n----\nretries: 5\n== not a heading\n----\n\n"
+        "== Limits ==\n\nThe connect timeout is 10 seconds.\n\n[NOTE]\n====\n"
+        "Timeouts above 300 seconds are ignored.\n====\n\n=== Pools\n\n"
+        "////\n== commented out\n////\n\n## Markdown style\n"
+    )
+    assert titles(text, syntax="asciidoc") == [
+        ("User Guide", 1),
+        ("Installation", 2),
+        ("Limits", 2),
+        ("Pools", 3),
+        ("Markdown style", 2),
+    ]
+
+
+def test_org_headlines_and_blocks() -> None:
+    text = (
+        "#+TITLE: Ops notes\n\n* Setup\nInstall it.\n\n** Ports   :network:\n"
+        "The default port is 8080.\n# * a comment\n  * an indented list item\n\n"
+        "#+BEGIN_SRC sh\n* not a heading\n#+END_SRC\n\n*** TODO Firewall\n"
+    )
+    assert titles(text, syntax="org") == [("Setup", 1), ("Ports", 2), ("TODO Firewall", 3)]
+
+
+def test_heading_syntax_by_extension() -> None:
+    assert heading_syntax("docs/a.md") == "markdown"
+    assert heading_syntax("README.MARKDOWN") == "markdown"
+    assert heading_syntax("docs/api.rst") == "rst"
+    assert heading_syntax("notes.txt") == "rst"
+    assert heading_syntax("guide.adoc") == "asciidoc"
+    assert heading_syntax("guide.asciidoc") == "asciidoc"
+    assert heading_syntax("ops.org") == "org"
+    assert heading_syntax("report.pdf") == "markdown"  # parsed into Markdown
+    assert heading_syntax("manual.docx") == "markdown"
 
 
 def test_heading_paths_sections_and_long_paths() -> None:
     text = "# A\n\nx\n\n## B\n\ny\n\n# C\n\nz\n"
-    headings = find_headings(text, 0, len(text), markdown=True)
+    headings = find_headings(text, 0, len(text), syntax="markdown")
     paths = HeadingPaths(headings)
     assert path_text(paths.at(0)) == "A"
     assert path_text(paths.at(text.index("y"))) == "A › B"
@@ -91,6 +157,11 @@ def test_document_header_and_its_context() -> None:
     assert section_at(chunk, "HISTORY.md", 159, 161) == "Release History › 2.32.0 (2024-05-20)"
     assert section_at(chunk, "HISTORY.md", 159, 163) == "2.31.0 (2023-05-22)"
     assert section_at(chunk, "HISTORY.md", 159, 165) == "2.31.0 (2023-05-22)"
+    # A range across the later heading is in two sections: none speaks for all of it (D-071).
+    assert section_of(chunk, "HISTORY.md", 159, 159, 163) == ""
+    assert section_of(chunk, "HISTORY.md", 159, 162, 165) == ""
+    assert section_of(chunk, "HISTORY.md", 159, 163, 165) == "2.31.0 (2023-05-22)"
+    assert section_of(chunk, "HISTORY.md", 159, 159, 162) == "Release History › 2.32.0 (2024-05-20)"
     # Full-text search keeps the heading path and drops only the line numbers (D-051).
     assert search_text(header + "\nbody") == (
         "File: HISTORY.md · Release History › 2.32.0 (2024-05-20)\nbody"
@@ -102,7 +173,7 @@ def test_document_header_and_its_context() -> None:
 
 def test_an_underlined_heading_is_one_unit_and_does_not_open_a_fence() -> None:
     text = "Intro line.\n\nTitle\n~~~~~\n\nBody one.\nBody two.\n"
-    headings = find_headings(text, 0, len(text), markdown=False)
+    headings = find_headings(text, 0, len(text), syntax="rst")
     units = split_units(
         text, 0, len(text), WordCounter(), max_tokens=800, lines=True, headings=headings
     )
@@ -117,7 +188,7 @@ def test_an_underlined_heading_is_one_unit_and_does_not_open_a_fence() -> None:
 
 def test_a_heading_inside_a_paragraph_starts_its_own_unit() -> None:
     text = "Some text.\n# Heading\nMore text."
-    headings = find_headings(text, 0, len(text), markdown=True)
+    headings = find_headings(text, 0, len(text), syntax="markdown")
     units = split_units(text, 0, len(text), WordCounter(), max_tokens=800, headings=headings)
     assert [(text[u.start : u.end], u.heading) for u in units] == [
         ("Some text.", None),
@@ -243,3 +314,55 @@ def test_web_and_pasted_documents_are_unchanged() -> None:
     (draft,) = chunk_snapshot(snap, WordCounter())
     assert draft.text == text
     assert draft.locator["heading"] == "Install"
+
+
+def test_what_a_header_states() -> None:
+    header = "File: manual.md · 4 Limits › 4.2. Timeouts (lines 10-38)"
+    assert header_content(header) == "File: manual.md · Limits › Timeouts"
+    release = "File: HISTORY.md · Release History › 2.32.0 (2024-05-20) (lines 159-199)"
+    assert header_content(release) == "File: HISTORY.md · Release History › 2.32.0 (2024-05-20)"
+    part = "File: a.py · _codes (part 3) (lines 1-9)"
+    assert header_content(part) == "File: a.py · _codes"
+    assert header_content("File: a.pdf · 2 Results") == "File: a.pdf · Results"
+    assert header_content("not a header") == ""
+    assert without_numbering("2024 Annual report › Version 2.0") == "Annual report › Version 2.0"
+
+
+def test_asciidoc_and_org_files_get_their_sections() -> None:
+    adoc = (
+        "= User Guide\n\n== Installation\n\nRun the installer with these settings:\n\n"
+        "[source,yaml]\n----\nretries: 5\n----\n\n== Limits\n\n"
+        "The connect timeout is 10 seconds.\n\n[NOTE]\n====\n"
+        "Timeouts above 300 seconds are ignored.\n====\n"
+    )
+    snap = _files_snapshot("guide.adoc", adoc, start_line=1, end_line=adoc.count("\n") + 1)
+    drafts = chunk_file(snap, snap.files[0], WordCounter())
+    headers = [d.text.split("\n", 1)[0] for d in drafts]
+    assert headers[0].startswith("File: guide.adoc · User Guide")
+    assert all("[source" not in h and "[NOTE]" not in h for h in headers)
+    assert {t for d in drafts for t in d.locator.get("headings", [d.locator["heading"]])} <= {
+        "User Guide",
+        "Installation",
+        "Limits",
+    }
+    org = "#+TITLE: Ops notes\n\n* Setup\nInstall it.\n\n** Ports\nThe default port is 8080.\n"
+    snap = _files_snapshot("ops.org", org, start_line=1, end_line=org.count("\n") + 1)
+    (draft,) = chunk_file(snap, snap.files[0], WordCounter())
+    assert draft.locator["headings"] == ["Setup", "Ports"]
+
+
+def test_a_tilde_transition_keeps_later_sections_in_restructuredtext() -> None:
+    entries = "\n".join(f"- Change {i} in this release." for i in range(30))
+    body = (
+        f"Changelog\n=========\n\n2.0.0\n-----\n\n{entries}\n\n~~~~~~~~\n\n"
+        f"1.9.0\n-----\n\n{entries}\n\n1.8.0\n-----\n\n{entries}\n"
+    )
+    snap = _files_snapshot("CHANGES.rst", body, start_line=1, end_line=body.count("\n") + 1)
+    drafts = chunk_file(snap, snap.files[0], WordCounter())
+    lines = body.split("\n")
+    for release in ("1.9.0", "1.8.0"):
+        at = lines.index(release) + 1
+        holding = [d for d in drafts if d.locator["start_line"] <= at + 3 <= d.locator["end_line"]]
+        assert holding
+        for draft in holding:
+            assert f"Changelog › {release} (lines" in draft.text.split("\n", 1)[0]

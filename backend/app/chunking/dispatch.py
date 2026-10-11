@@ -7,7 +7,14 @@ from typing import Any
 
 from app.chunking.document import ChunkDraft, Header, Locate, chunk_document
 from app.chunking.header import document_header
-from app.chunking.headings import HeadingPaths, find_headings, markdown_file, path_text
+from app.chunking.headings import (
+    FENCES,
+    HeadingPaths,
+    Syntax,
+    find_headings,
+    heading_syntax,
+    path_text,
+)
 from app.chunking.syntax import chunk_source_code
 from app.chunking.tokens import TokenCounter
 from app.chunking.transcript import chunk_transcript
@@ -121,9 +128,8 @@ def chunk_file(snapshot: Snapshot, entry: FileEntry, counter: TokenCounter) -> l
     # cited lines hold nothing the chunk does not (ref-near-07).
     paged = any(s.file == entry.path and s.page is not None for s in snapshot.segments)
     parsed = any(s.file == entry.path and s.start_line is None for s in snapshot.segments)
-    headings = find_headings(
-        text, entry.start, entry.end, markdown=parsed or markdown_file(entry.path)
-    )
+    syntax: Syntax = "markdown" if parsed else heading_syntax(entry.path)
+    headings = find_headings(text, entry.start, entry.end, syntax=syntax)
     sections = HeadingPaths(headings)
     return chunk_document(
         text,
@@ -133,6 +139,7 @@ def chunk_file(snapshot: Snapshot, entry: FileEntry, counter: TokenCounter) -> l
         _file_document_locator(text, entry, snapshot.segments, sections),
         header=_file_document_header(text, entry, sections, paged),
         headings=headings,
+        fence=FENCES[syntax],
         align_lines=not paged,
     )
 

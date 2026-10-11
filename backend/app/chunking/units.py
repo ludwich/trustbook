@@ -117,10 +117,16 @@ def _markdown_heading(text: str, start: int, end: int) -> tuple[str, int] | None
 
 
 def _fence_lines(
-    text: str, start: int, end: int, headings: Sequence[Heading], starts: Sequence[int]
+    text: str,
+    start: int,
+    end: int,
+    headings: Sequence[Heading],
+    starts: Sequence[int],
+    fence: re.Pattern[str],
 ) -> int:
-    """How many lines of ``text[start:end]`` open or close a fenced code block (not counting a
-    heading's adornment lines; ``headings`` in order, ``starts`` their offsets)."""
+    """How many lines of ``text[start:end]`` open or close a fenced code block (``fence``: the
+    file's syntax, :data:`app.chunking.headings.FENCES`), not counting a heading's adornment
+    lines (``headings`` in order, ``starts`` their offsets)."""
     count = 0
     cursor = start
     while cursor < end:
@@ -128,7 +134,7 @@ def _fence_lines(
         stop = end if newline == -1 else newline
         k = bisect.bisect_right(starts, cursor) - 1
         inside = k >= 0 and cursor < headings[k].end
-        if not inside and FENCE.match(text, cursor, stop):
+        if not inside and fence.match(text, cursor, stop):
             count += 1
         cursor = stop + 1
     return count
@@ -201,6 +207,7 @@ def split_units(
     max_tokens: int,
     lines: bool = False,
     headings: Sequence[Heading] | None = None,
+    fence: re.Pattern[str] = FENCE,
 ) -> list[Unit]:
     """Units covering the non-blank text of ``text[start:end]`` in order.
 
@@ -209,7 +216,8 @@ def split_units(
     in full, D-056).
 
     ``headings`` (a document file's, D-068): each heading block (an underlined title is two or
-    three lines) is one heading unit, in place of the Markdown ``#`` lines found here otherwise.
+    three lines) is one heading unit, in place of the Markdown ``#`` lines found here otherwise;
+    ``fence``: the lines that open or close a code block in the file's syntax.
     """
     units: list[Unit] = []
     rows: set[int] = set()
@@ -224,7 +232,7 @@ def split_units(
         if ordered is None:
             fence_marks = paragraph.count("```") + paragraph.count("~~~")
         else:  # fence lines, not a ``~~~~~`` heading adornment (D-068)
-            fence_marks = _fence_lines(text, p_start, p_end, ordered, starts)
+            fence_marks = _fence_lines(text, p_start, p_end, ordered, starts, fence)
         fenced = in_fence or fence_marks > 0
         if fence_marks % 2 == 1:
             in_fence = not in_fence

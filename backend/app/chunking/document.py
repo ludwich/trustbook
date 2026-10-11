@@ -7,11 +7,12 @@ longer than the maximum. A heading starts a new chunk unless the current one is 
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from app.chunking.headings import Heading
+from app.chunking.headings import FENCE, Heading
 from app.chunking.tokens import TokenCounter
 from app.chunking.units import Unit, split_units
 
@@ -170,6 +171,7 @@ def chunk_document(
     prefix: str = "",
     header: Header | None = None,
     headings: Sequence[Heading] | None = None,
+    fence: re.Pattern[str] = FENCE,
     align_lines: bool = False,
 ) -> list[ChunkDraft]:
     """Chunk ``text[start:end]``; ``locate(start, end)`` builds each chunk's locator.
@@ -177,10 +179,18 @@ def chunk_document(
     ``align_lines``: chunks hold whole lines (for files, whose locators name lines), indentation
     of the first line included. ``header(start, end)``: a first line naming where the body is
     (instead of the fixed ``prefix``). ``headings``: the document's headings
-    (:func:`app.chunking.headings.find_headings`) instead of the Markdown ``#`` lines.
+    (:func:`app.chunking.headings.find_headings`) instead of the Markdown ``#`` lines, with
+    ``fence`` the lines that open or close a code block in their syntax.
     """
     units = split_units(
-        text, start, end, counter, max_tokens=max_tokens, lines=align_lines, headings=headings
+        text,
+        start,
+        end,
+        counter,
+        max_tokens=max_tokens,
+        lines=align_lines,
+        headings=headings,
+        fence=fence,
     )
     drafts: list[ChunkDraft] = []
     groups = pack_units(
