@@ -17,6 +17,7 @@ from sqlalchemy import Engine
 from sqlmodel import Session
 
 from app.capabilities.bundled import Embedder, Reranker
+from app.chunking.structure import Structure
 from app.index.base import Hit, SpaceIndex
 from app.retrieval.callees import callee_extras
 from app.retrieval.definitions import definition_extras, fit_extras
@@ -53,6 +54,9 @@ class RetrievedChunk:
     definition_of: str | None = None
     # The id of the context chunk such an added chunk was found for (it refers to or calls it).
     referrer: str | None = None
+    # The chunk's parent (D-077), from its row; navigation only, never part of ``text``.
+    parent_key: str | None = None
+    structure: Structure | None = None
 
     @classmethod
     def from_row(
@@ -73,6 +77,8 @@ class RetrievedChunk:
             score=score,
             definition_of=definition_of,
             referrer=referrer,
+            parent_key=row.parent_key,
+            structure=row.structure,
         )
 
 

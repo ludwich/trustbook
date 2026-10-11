@@ -25,8 +25,9 @@ from typing import Protocol
 from sqlalchemy import Engine
 
 from app.chunking.header import header_part
+from app.chunking.structure import Structure
 from app.chunking.syntax import MODULE_MAX_TOKENS
-from app.retrieval.store import ChunkRow, chunks_assigning, chunks_of_symbol
+from app.retrieval.store import ChunkRow, FileRows, chunks_assigning, chunks_of_symbol
 
 MAX_EXTRA = 3
 # The parts of a split data literal added for one name: the largest module-level chunk the code
@@ -52,6 +53,11 @@ class ContextChunk(Protocol):
     def locator(self) -> dict[str, object]: ...
     @property
     def token_count(self) -> int: ...
+    # The chunk's parent (D-077); navigation only, never citable or read by grounding.
+    @property
+    def parent_key(self) -> str | None: ...
+    @property
+    def structure(self) -> Structure | None: ...
 
 
 @dataclass(frozen=True)
@@ -186,9 +192,15 @@ def definition_extras(
     *,
     max_extra: int = MAX_EXTRA,
     scores: Mapping[str, float] | None = None,
+    file_rows: FileRows | None = None,
 ) -> list[Extra]:
     """Chunks (not already in ``chunks``) defining constants they use, for up to ``max_extra``
-    names. A split data literal brings several of its parts (:func:`literal_parts`)."""
+    names. A split data literal brings several of its parts (:func:`literal_parts`).
+
+    ``file_rows``: the retrieval's per-file row cache for lookups through parent keys (D-077);
+    ``None`` keeps the lookup without parent keys. Not used yet: the lookups through it follow.
+    """
+    del file_rows  # interface first (D-077); the family lookup lands with the structure pass
     wanted = wanted_names(chunks)
     if not wanted:
         return []

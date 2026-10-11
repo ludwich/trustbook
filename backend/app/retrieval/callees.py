@@ -46,6 +46,7 @@ from typing import NamedTuple
 
 from app.chunking.syntax import language_for_path
 from app.retrieval.definitions import ContextChunk, code_body, code_file
+from app.retrieval.store import FileRows
 
 MAX_CALLEES = 2
 FUNCTION_KINDS = frozenset({"function", "method"})
@@ -261,7 +262,11 @@ def defines(chunk: ContextChunk, call: Call, defined: Collection[str] | None = N
 
 
 def callee_extras[C: ContextChunk](
-    selected: Sequence[C], ranked: Sequence[C], *, max_callees: int = MAX_CALLEES
+    selected: Sequence[C],
+    ranked: Sequence[C],
+    *,
+    max_callees: int = MAX_CALLEES,
+    file_rows: FileRows | None = None,
 ) -> list[tuple[C, str, tuple[str, ...]]]:
     """Up to ``max_callees`` ``(chunk, name, caller ids)`` of functions the context's code calls.
 
@@ -270,7 +275,11 @@ def callee_extras[C: ContextChunk](
     defined in several files prefers the caller's file. Each candidate's text is scanned for
     definitions once, and calls are looked up by name, so the cost grows with the context and the
     candidates, not with their product.
+
+    ``file_rows``: the retrieval's per-file row cache for lookups through parent keys (D-077);
+    ``None`` keeps the lookup without parent keys. Not used yet: the lookups through it follow.
     """
+    del file_rows  # interface first (D-077); the family lookup lands with the structure pass
     taken = {c.chunk_id for c in selected}
     position = {c.chunk_id: i for i, c in enumerate(ranked)}
     # Candidates by (source, function name): a chunk with a symbol under its last part, a
