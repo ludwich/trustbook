@@ -2,7 +2,8 @@
 
 - Every backticked identifier in a sentence must occur verbatim in at least one cited chunk.
   A trailing ``()`` is dropped (prose writes ``get()`` for a function ``get``), and inline markup
-  and whitespace runs may differ (``200 OK`` written as RST ````200 OK```` matches, D-072).
+  and whitespace runs of the source may differ (``200 OK`` written as RST ````200 OK```` matches,
+  D-072; underscores are never treated as markup).
 - Every cited chunk whose locator names a ``file`` must point at a file, and line range, that
   exist in the source's indexed snapshot (the ``files`` segments of ``map.json``).
 
@@ -52,28 +53,30 @@ def unescape_markdown(text: str) -> str:
 
 
 # Inline markup (D-072): reStructuredText literals (``200 OK``), Markdown code spans (`x`) and
-# emphasis (*x*, **x**, _x_). A sentence quoting a docstring's "is **not** a check to see if the
-# response code is ``200 OK``" writes the words without the markup. Emphasis needs a non-word
-# character outside its markers and no space inside them, so ``2*x*y``, ``*args, **kwargs`` and
-# ``__init__`` are left alone.
+# asterisk emphasis (*x*, **x**). A sentence quoting a docstring's "is **not** a check to see if
+# the response code is ``200 OK``" writes the words without the markup. Emphasis needs a non-word
+# character outside its markers and no space inside them, so ``2*x*y`` and ``*args, **kwargs``
+# are left alone. Underscore emphasis (_x_) is never removed: it cannot be told apart from Python
+# names such as ``_value_``, ``_missing_`` or ``self._value_``.
 _RST_LITERAL = re.compile(r"``([^`\n]+?)``")
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
 _STRONG = re.compile(r"(?<![\w*])\*\*(?![\s*])([^*\n]+?)(?<![\s*])\*\*(?![\w*])")
 _EMPHASIS = re.compile(r"(?<![\w*])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![\w*])")
-_UNDERSCORE_EMPHASIS = re.compile(r"(?<![\w])_(?![\s_])([^_\n]+?)(?<![\s_])_(?!\w)")
 
 
-def normalize_inline(text: str) -> str:
+def normalize_inline(text: str, *, emphasis: bool = True) -> str:
     """``text`` without inline markup and with runs of whitespace collapsed to one space.
 
     Only for comparing a sentence with a source: ``This is **not** a check … ``200 OK``.`` →
-    ``This is not a check … 200 OK.`` Both sides are normalised the same way (D-072).
+    ``This is not a check … 200 OK.`` (D-072). The source side drops literals, code spans and
+    asterisk emphasis; the sentence side (``emphasis=False``) drops literals and code spans only,
+    because a sentence's ``*x*`` inside a name or quote is what it claims, not markup.
     """
     out = _RST_LITERAL.sub(r"\1", text)
     out = _CODE_SPAN.sub(r"\1", out)
-    out = _STRONG.sub(r"\1", out)
-    out = _EMPHASIS.sub(r"\1", out)
-    out = _UNDERSCORE_EMPHASIS.sub(r"\1", out)
+    if emphasis:
+        out = _STRONG.sub(r"\1", out)
+        out = _EMPHASIS.sub(r"\1", out)
     return " ".join(out.split())
 
 
@@ -87,25 +90,52 @@ def verbatim(span: str, text: str) -> bool:
     """``span`` occurs in ``text`` and is not part of a longer name: an edge of the span that is
     a name character may not continue into one (`socks5` is not in ``socks5h``, D-063).
 
-    The span also matches when both sides are equal after :func:`normalize_inline` (inline markup
-    removed, whitespace collapsed; D-072); every word must still be there, in order.
+    The span also matches after :func:`normalize_inline` (the source's inline markup removed,
+    whitespace collapsed on both sides; D-072); every word must still be there, in order.
     """
     if _verbatim_exact(span, text):
         return True
-    wanted = normalize_inline(span)
+    wanted = normalize_inline(span, emphasis=False)
     return bool(wanted) and _verbatim_exact(wanted, normalize_inline(text))
+
+
+# A quoted phrase that starts right after one of these words in the source drops a negation
+# ("is **not** a check to see …" quoted as "a check to see …").
+_NEGATIONS = frozenset({"not", "no", "never", "nor", "cannot", "neither"})
+_PROSE_TOKEN = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+
+
+def _after_negation(prefix: str) -> bool:
+    words = _PROSE_TOKEN.findall(normalize_inline(prefix[-200:]))
+    if not words:
+        return False
+    last = words[-1].lower()
+    return last in _NEGATIONS or last.endswith("n't")
+
+
+def _quote_at(wanted: str, text: str) -> bool:
+    """``wanted`` occurs in ``text`` at word boundaries and not right after a negation."""
+    left = r"(?<![A-Za-z0-9_])" if wanted[:1].isalnum() or wanted[:1] == "_" else ""
+    right = r"(?![A-Za-z0-9_])" if wanted[-1:].isalnum() or wanted[-1:] == "_" else ""
+    pattern = re.compile(left + re.escape(wanted) + right)
+    return any(not _after_negation(text[: m.start()]) for m in pattern.finditer(text))
 
 
 def quoted_in(quoted: str, text: str) -> bool:
     """A quoted phrase of a sentence occurs in ``text``, as is or after :func:`normalize_inline`
-    on both sides (D-072). English puts a sentence's own full stop or comma inside the quotes, so
-    one trailing ``.,;:`` of the phrase is not required in the normalised comparison."""
-    if quoted in text:
+    (D-072). English puts a sentence's own full stop or comma inside the quotes, so one trailing
+    ``.,;:`` of the phrase is not required in the normalised comparison.
+
+    Either way the phrase must start and end at word boundaries and may not start right after a
+    negation (not, no, never, nor, cannot, neither, …n't): quoting "a check to see if the
+    response code is 200 OK" from "This is **not** a check to see …" inverts the source.
+    """
+    if quoted and _quote_at(quoted, text):
         return True
-    wanted = normalize_inline(quoted)
+    wanted = normalize_inline(quoted, emphasis=False)
     if len(wanted) > 1 and wanted[-1] in ".,;:":
         wanted = wanted[:-1].rstrip()
-    return bool(wanted) and wanted in normalize_inline(text)
+    return bool(wanted) and _quote_at(wanted, normalize_inline(text))
 
 
 def _occurs(token: str, texts: list[str]) -> bool:

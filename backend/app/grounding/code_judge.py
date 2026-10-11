@@ -25,13 +25,17 @@ role-swapped claim from a true one. A rescue passes only if **all** hold:
 too, with every chunk it cites (code keeps its real line numbers; prose is numbered from 1, a line
 per sentence). It stays passed unless the judge's verdict contradicts it
 (:attr:`JudgeOutcome.vetoed`): the judge says it is not supported, names evidence outside the
-sentence's cited chunks, or names evidence lines that lack one of its anchors **and** that anchor
-occurs nowhere in the chunks the sentence cites (header lines and symbols included, D-073; the
-judge often names too few lines). A missing or malformed verdict is no veto.
+sentence's cited chunks, or names evidence lines that lack one of its anchors. For that last test
+an evidence line inside a docstring field (``:param max_retries:`` and its indented continuation
+lines, or a Google-style ``Args:`` entry) counts as the whole field, whose name is the subject of
+every line of it (D-073: the judge often names only the line that states the value). The rest of
+the cited chunks never counts: a value elsewhere in the chunk is usually another name's.
+A missing or malformed verdict is no veto.
 
-Anchors and evidence are compared after removing inline markup on both sides (``200 OK``,
-`x`, *x*, **x**, _x_) and collapsing whitespace; plural acronyms (URLs, IDs) are prose words; a
-dotted chunk symbol also names each of its parts (D-072).
+Anchors and evidence are compared after removing the source's inline markup (``200 OK``, `x`,
+*x*, **x**; never underscores) and collapsing whitespace; a quoted phrase must sit at word
+boundaries and not right after a negation; plural acronyms (URLs, IDs) are prose words; a dotted
+chunk symbol also names each of its parts (D-072).
 
 Anything that goes wrong with the call (not set up, endpoint error, unusable reply, over
 :data:`JUDGE_TIMEOUT_S`) leaves the checker's results in place.
@@ -638,22 +642,93 @@ class JudgeOutcome:
     """The judge's decision on one sentence.
 
     ``accepted``: it passes rules 1–3 of the module docstring (a rescue). ``vetoed``: the verdict
-    contradicts it (not supported, evidence outside the cited chunks, or an anchor that is in
-    neither the evidence lines nor anywhere in the cited chunks), which ends a confirmation. A
+    contradicts it (not supported, evidence outside the cited chunks, or evidence lines, widened
+    to their docstring fields, that lack one of its anchors), which ends a confirmation. A
     missing or malformed verdict, support without evidence lines, or anchors missing only from
-    the evidence lines (D-073) is neither. ``reason`` says why it was not accepted.
+    the named lines but present in their docstring field (D-073) is neither. ``reason`` says why
+    it was not accepted.
     """
 
     accepted: bool
     vetoed: bool = False
     reason: str = ""
     absent: tuple[str, ...] = ()
-    """Anchors the sentence names that occur nowhere in its cited chunks (a veto's names)."""
+    """Anchors of a veto that occur nowhere in the cited chunks (for the regeneration feedback,
+    D-074); anchors that are somewhere in them still veto but are not listed here."""
+
+
+# Docstring fields (D-073): a reStructuredText field (``:param name:``, ``:returns:``,
+# ``:raises Error:``) or a Google-style entry (``name (type): text``) under a section line such as
+# ``Args:``. The field's continuation lines are indented deeper than its first line.
+_RST_FIELD = re.compile(r"^\s*:[A-Za-z][^:`\n]*:(?:\s|$)")
+_GOOGLE_SECTION = re.compile(
+    r"^\s*(?:Args|Arguments|Parameters|Params|Keyword Args|Keyword Arguments|Other Parameters"
+    r"|Returns|Yields|Raises|Attributes):\s*$"
+)
+_GOOGLE_ENTRY = re.compile(r"^\s*\*{0,2}[A-Za-z_][A-Za-z0-9_.]*(?:\s*\([^()\n]*\))?:(?:\s|$)")
+_FIELD_SEARCH_LINES = 40
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _google_entry(lines: Sequence[str], i: int) -> bool:
+    """``lines[i]`` is an entry of a Google-style section: the nearest shallower line above it
+    (entries of one section are contiguous) is a section line such as ``Args:``."""
+    if not _GOOGLE_ENTRY.match(lines[i]):
+        return False
+    depth = _indent(lines[i])
+    for j in range(i - 1, max(-1, i - _FIELD_SEARCH_LINES), -1):
+        if not lines[j].strip():
+            return False
+        if _indent(lines[j]) < depth:
+            return _GOOGLE_SECTION.match(lines[j]) is not None
+    return False
+
+
+def docstring_field(lines: Sequence[str], i: int) -> tuple[int, int] | None:
+    """The docstring field ``lines[i]`` belongs to, as ``(first, last)`` indexes, or None.
+
+    The field starts at a field line (:data:`_RST_FIELD`, or a Google-style entry under a section
+    line) at or above ``i`` with every line down to ``i`` indented deeper than it and none blank;
+    it ends before the next blank, or no deeper, line. Ordinary code, prose and list items are in
+    no field.
+    """
+    first = None
+    for j in range(i, max(-1, i - _FIELD_SEARCH_LINES), -1):
+        line = lines[j]
+        if not line.strip():
+            return None
+        if _RST_FIELD.match(line) or _google_entry(lines, j):
+            if all(_indent(lines[k]) > _indent(line) for k in range(j + 1, i + 1)):
+                first = j
+            break
+    if first is None:
+        return None
+    depth = _indent(lines[first])
+    last = first
+    while last + 1 < len(lines) and lines[last + 1].strip() and _indent(lines[last + 1]) > depth:
+        last += 1
+    return (first, last) if last >= i else None
+
+
+def field_widened(chunk: NumberedChunk, start: int, end: int) -> str:
+    """The lines ``start``–``end`` of a code chunk, widened to the docstring fields they are in
+    (D-073). Prose chunks (numbered a sentence per line) are never widened."""
+    if not is_code_chunk(chunk.chunk):
+        return chunk.text(start, end)
+    lo, hi = start - chunk.first, end - chunk.first
+    for i in range(start - chunk.first, end - chunk.first + 1):
+        field = docstring_field(chunk.lines, i)
+        if field is not None:
+            lo, hi = min(lo, field[0]), max(hi, field[1])
+    return chunk.text(lo + chunk.first, hi + chunk.first)
 
 
 def _longer_name_in(anchor: Anchor, evidence: str) -> bool:
     """The evidence holds a longer name or number that starts with ``anchor`` (``socks5h`` for
-    `socks5`, ``2000`` for 200): the judge's lines are about something else (D-073)."""
+    `socks5`, ``2000`` for 200): the judge conflated two names (the veto's reason says so)."""
     if anchor.kind not in ("code", "identifier", "number", "constant", "term"):
         return False
     text = anchor.text
@@ -667,8 +742,9 @@ def absent_from_cited(
     anchors: Sequence[Anchor], sentence: Statement, chunks: Mapping[str, NumberedChunk]
 ) -> list[str]:
     """The ``anchors`` that occur nowhere in the chunks ``sentence`` cites: their whole text,
-    header line included, their files and their symbols (D-073). The ``(part N)`` of a split
-    literal's header is not searched (D-058)."""
+    header line included, their files and their symbols. The ``(part N)`` of a split literal's
+    header is not searched (D-058). Only for the regeneration feedback (D-074); a veto never
+    depends on it."""
     cited = [chunks[label] for label in sentence.labels if label in chunks]
     texts = [unescape_markdown(without_part(c.chunk.text)) for c in cited]
     whole = "\n".join(texts)
@@ -692,6 +768,7 @@ def assess(
         why = "no evidence lines" if verdict.evidence is not None else "bad evidence"
         return JudgeOutcome(False, False, why)
     pieces: list[str] = []
+    fields: list[str] = []
     files: list[str] = []
     names: list[str] = []
     for ev in verdict.evidence:
@@ -703,6 +780,7 @@ def assess(
             why = f"evidence lines {ev.start_line}-{ev.end_line} are not in {ev.chunk}"
             return JudgeOutcome(False, True, why)
         pieces.append(chunk.text(ev.start_line, ev.end_line))
+        fields.append(field_widened(chunk, ev.start_line, ev.end_line))
         files.append(str(chunk.chunk.locator.get("file") or ""))
         names.extend(chunk_names(chunk.chunk))
     evidence = unescape_markdown("\n".join(pieces))
@@ -721,14 +799,19 @@ def assess(
             # The lines the judge relied on hold a longer name (`socks5h` for `socks5`): it
             # conflated two names, so its support says nothing about this one.
             return JudgeOutcome(False, True, why + " (a longer name is there)")
-        absent = absent_from_cited(missing, sentence, chunks)
-        if not absent:
-            # The judge named too few lines; the names are in the chunks the sentence cites. Not
-            # a rescue (evidence lines are strict), but no veto of a checker pass either (D-073).
-            return JudgeOutcome(False, False, why + " (all in the cited chunks)")
-        return JudgeOutcome(
-            False, True, "not in the cited chunks: " + ", ".join(absent), tuple(absent)
-        )
+        field = unescape_markdown("\n".join(fields))
+        if field != evidence and all(
+            anchor_found(a, field, files, names, cited, prose=prose) for a in missing
+        ):
+            # The judge named a line of a docstring field whose name is on its first line
+            # (`:param max_retries:` … "By default, Requests does not retry"). Not a rescue
+            # (evidence lines are strict there, D-045), but no veto of a checker pass (D-073).
+            return JudgeOutcome(False, False, why + " (in their docstring field)")
+        absent = tuple(absent_from_cited(missing, sentence, chunks))
+        if absent:
+            absent_why = "not in the cited chunks: " + ", ".join(absent)
+            return JudgeOutcome(False, True, absent_why, absent)
+        return JudgeOutcome(False, True, why)
     if anchors:
         return JudgeOutcome(True)
     words = content_words(sentence.text, anchors)

@@ -23,7 +23,7 @@ covers two kinds of sentence:
 - **Confirmation:** a sentence the checker passed (with a score below :data:`CONFIRM_BELOW`, by
   default every one) fails if the judge's verdict contradicts it (a veto). HHEM passes role-swapped
   false claims on technical prose at 0.58–0.98 (D-063). Anchors missing from the judge's evidence
-  lines veto only when they are in none of the cited chunks either (D-073).
+  lines veto unless the docstring field those lines belong to holds them (D-073).
 
 A failed sentence keeps why it failed (:meth:`SentenceCheck.failure`) and the names no cited chunk
 holds (``missing``), for diagnostics and the regeneration feedback (D-074, D-075).

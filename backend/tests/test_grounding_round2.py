@@ -1,4 +1,4 @@
-"""Gate 3 round 2: anchor matching (D-072), the confirmation veto on the cited chunks (D-073),
+"""Gate 3 round 2: anchor matching (D-072), confirmation vetoes widened to docstring fields (D-073),
 targeted regeneration feedback (D-074) and failed sentences in diagnostics (D-075)."""
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from app.grounding.code_judge import (
     assess,
     chunk_names,
     code_anchors,
+    docstring_field,
     parse_verdicts,
     prepare,
 )
@@ -66,7 +67,7 @@ class Snapshot(SnapshotFiles):
 
     def files(self, source_id: str) -> dict[str, list[LineRange | None]]:
         names = ("adapters.py", "sessions.py", "status_codes.py", "models.py")
-        return {f"src/requests/{name}": [(1, 2000)] for name in names}
+        return {f"src/requests/{name}": [(1, 2000)] for name in names} | {"HISTORY.md": [(1, 999)]}
 
 
 SNAPSHOT = Snapshot()
@@ -109,10 +110,34 @@ def test_inline_markup_is_removed_and_whitespace_collapsed() -> None:
     assert (
         normalize_inline("is **not** a\n   check for ``200 OK``.") == "is not a check for 200 OK."
     )
-    assert normalize_inline("use `socks5h`, *really* or _maybe_") == "use socks5h, really or maybe"
-    # Code is left alone: dunders, star arguments, products, private names.
-    for text in ("def __init__(self, *args, **kwargs):", "y = 2*x*y", "_codes = {}", "a_b_c"):
+    assert (
+        normalize_inline("use `socks5h`, *really* or _maybe_") == "use socks5h, really or _maybe_"
+    )
+    # The sentence side keeps emphasis markers: `*test*` is a glob, not emphasis.
+    assert normalize_inline("``*test*`` and `**x**`", emphasis=False) == "*test* and **x**"
+    # Code is left alone: dunders, sunders, star arguments, products, private names.
+    for text in (
+        "def __init__(self, *args, **kwargs):",
+        "y = 2*x*y",
+        "_codes = {}",
+        "a_b_c",
+        "return self._value_",
+        "def _missing_(cls, value):",
+    ):
         assert normalize_inline(text) == text
+
+
+def test_python_sunder_names_are_not_markdown_emphasis() -> None:
+    # Review of D-072: `_value_` became `value` on both sides, and layer 5 passed names the
+    # chunk lacks.
+    assert missing_identifiers("It returns `self.value`.", ["return self._value_"]) == [
+        "self.value"
+    ]
+    assert missing_identifiers("It sets `_value_`.", ["def f(value): return value"]) == ["_value_"]
+    assert missing_identifiers("Override `_missing_`.", ["# handle a missing value"]) == [
+        "_missing_"
+    ]
+    assert missing_identifiers("It returns `self._value_`.", ["return self._value_"]) == []
 
 
 def test_quoted_phrases_match_through_markup_but_not_with_another_word() -> None:
@@ -122,6 +147,30 @@ def test_quoted_phrases_match_through_markup_but_not_with_another_word() -> None
     assert not quoted_in("not a check to see if the status code is 200 OK.", OK)
     assert not quoted_in("a check to see if the response code is 200 OK.", "is **not**")
     assert not quoted_in("not a check to see if the response code is 201 OK.", OK)
+
+
+def test_a_quote_may_not_drop_a_negation_or_start_inside_a_word() -> None:
+    # Review of D-072: "is **not** a check …" normalised contains "a check …".
+    assert not quoted_in("a check to see if the response code is 200 OK.", OK)
+    assert not quoted_in("a check to see if the response code is 200 OK", OK)
+    assert not quoted_in("retry failed", "Requests doesn't retry failed connections.")
+    assert not quoted_in("retry failed", "Requests will never retry failed connections.")
+    assert quoted_in("retry failed", "Requests can retry failed connections.")
+    assert quoted_in("does not retry", "Requests does not retry failed connections.")
+    # Word boundaries: no match that starts or ends inside a word.
+    assert not quoted_in("heck to see", OK)
+    assert not quoted_in("the response co", OK)
+
+
+def test_a_quote_that_drops_the_source_negation_is_vetoed() -> None:
+    chunks, _ = prepare([("x", [ok_chunk()])])
+    supported = parse_verdicts(verdicts((1, True, [("c1", 865, 866)])))[1]
+    for text in (
+        'Response.ok is "a check to see if the response code is 200 OK."',
+        '`Response.ok` is "a check to see if the response code is 200 OK".',
+    ):
+        outcome = assess(Statement(text, ("c1",)), supported, chunks)
+        assert not outcome.accepted and outcome.vetoed, text
 
 
 def test_verbatim_spans_match_through_markup_and_keep_the_name_boundary() -> None:
@@ -175,11 +224,11 @@ def test_a_quoted_docstring_phrase_is_accepted_and_a_changed_word_is_vetoed() ->
     assert outcome.absent == ("not a check to see if the status code is 200 OK.",)
 
 
-# --- D-073: the confirmation veto looks at the whole cited chunks -----------------------------
+# --- D-073: a confirmation widens the evidence lines to their docstring field ------------------
 
 # src/requests/adapters.py, HTTPAdapter's class lines (excerpt).
 ADAPTER = """\
-File: src/requests/adapters.py · HTTPAdapter (lines 158-166)
+File: src/requests/adapters.py · HTTPAdapter (lines 158-167)
 class HTTPAdapter(BaseAdapter):
     \"\"\"The built-in HTTP Adapter for urllib3.
 
@@ -188,13 +237,14 @@ class HTTPAdapter(BaseAdapter):
         connections and connection timeouts, never to requests where data has
         made it to the server. By default, Requests does not retry failed
         connections.
+    :param pool_block: Whether the connection pool should block for connections.
 \"\"\"
 """
 MAX_RETRIES = "When max_retries is left at its default, Requests does not retry failed connections."
 
 
 def adapter_chunk() -> RetrievedChunk:
-    return code("a", ADAPTER, 158, 166, "src/requests/adapters.py", "HTTPAdapter")
+    return code("a", ADAPTER, 158, 167, "src/requests/adapters.py", "HTTPAdapter")
 
 
 def confirm(
@@ -211,15 +261,53 @@ def confirm(
     return verifier.check([(sentence, chunks)]).checks[0], len(chat.calls)
 
 
-def test_a_pass_whose_evidence_lines_are_too_narrow_is_kept_when_the_cited_chunk_has_the_name() -> (
-    None
-):
+def test_docstring_fields_span_their_indented_continuation_lines() -> None:
+    lines = ADAPTER.split("\n")[1:]
+    assert docstring_field(lines, 3) == (3, 7)  # the :param max_retries: line itself
+    assert docstring_field(lines, 6) == (3, 7)  # a continuation line
+    assert docstring_field(lines, 8) == (8, 8)  # :param pool_block:
+    assert docstring_field(lines, 0) is None  # class line
+    assert docstring_field(lines, 1) is None  # docstring summary
+    google = [
+        "    Args:",
+        "        retries (int): How many times to retry. By default",
+        "            nothing is retried.",
+        "        block: Whether to block.",
+        "    Returns:",
+        "        The adapter.",
+    ]
+    assert docstring_field(google, 2) == (1, 2)
+    assert docstring_field(google, 3) == (3, 3)
+    # Code and changelog list items are no fields: an annotated parameter, a bullet.
+    code_lines = [
+        "    def __init__(",
+        "        self,",
+        "        pool_connections: int = DEFAULT_POOLSIZE,",
+        "        pool_block: bool = DEFAULT_POOLBLOCK,",
+        "    ):",
+    ]
+    assert all(docstring_field(code_lines, i) is None for i in range(len(code_lines)))
+    bullets = ["- Requests now supports optional use of character detection", "  (`chardet`)."]
+    assert docstring_field(bullets, 1) is None
+
+
+def test_a_pass_whose_evidence_is_a_continuation_line_of_the_named_field_is_kept() -> None:
     # The judge names lines 164-165 ("By default, Requests does not retry failed connections"),
-    # which lack max_retries; the cited chunk has it on line 161 (measured, multi-01).
+    # which lack max_retries; their field starts with ":param max_retries:" (measured, multi-01).
     narrow = verdicts((1, True, [("c1", 164, 165)]))
     check, calls = confirm(MAX_RETRIES, [adapter_chunk()], narrow)
     assert check.passed and not check.vetoed and check.method == "checker"
     assert calls == 1  # no veto, so nothing to ask again
+
+
+def test_a_name_elsewhere_in_the_cited_chunk_does_not_save_a_confirmation() -> None:
+    # pool_block is in the chunk, but not in the field of the lines the judge named.
+    sentence = "When pool_block is left at its default, Requests does not retry failed connections."
+    narrow = verdicts((1, True, [("c1", 164, 165)]))
+    check, calls = confirm(sentence, [adapter_chunk()], narrow, alone=narrow)
+    assert not check.passed and check.vetoed and calls == 2
+    assert check.judge_reason == "not in the evidence lines: pool_block"
+    assert check.missing == ()  # pool_block IS in the cited chunk: no feedback names it
 
 
 def test_a_pass_naming_something_absent_from_every_cited_chunk_is_vetoed() -> None:
@@ -229,6 +317,102 @@ def test_a_pass_naming_something_absent_from_every_cited_chunk_is_vetoed() -> No
     assert not check.passed and check.vetoed and calls == 2
     assert check.missing == ("DEFAULT_RETRIES",)
     assert check.judge_reason == "not in the cited chunks: DEFAULT_RETRIES"
+
+
+# HISTORY.md lines 186-206 (psf/requests v2.34.2, Apache-2.0): the 2.32.0 heading is in the
+# previous chunk, the next release's heading below the entry (gate run ref-near-03).
+HISTORY = """\
+File: HISTORY.md (lines 186-206)
+**Deprecations**
+
+- Requests has officially added support for CPython 3.12 (#6503)
+- Requests has officially added support for PyPy 3.9 and 3.10 (#6641)
+
+**Packaging**
+- Requests has started adopting some modern packaging practices.
+  The source files for the projects (formerly `requests`) is now located
+  in `src/requests` in the Requests sdist. (#6506)
+- Starting in Requests 2.33.0, Requests will migrate to a PEP 517 build system
+  using `hatchling`. This should not impact the average user, but extremely old
+  versions of packaging utilities may have issues with the new packaging format.
+- Placeholder line one.
+- Placeholder line two.
+- Placeholder line three.
+- Placeholder line four.
+- Placeholder line five.
+
+
+2.31.0 (2023-05-22)
+-------------------
+"""
+
+
+def test_a_value_from_another_line_of_the_chunk_does_not_save_a_confirmation() -> None:
+    # Review of D-073: the measured CORRECT veto of ref-near-03 ("not in the evidence lines: 2.31").
+    history = code("h", HISTORY, 186, 206, "HISTORY.md")
+    one_line = verdicts((1, True, [("c1", 188, 188)]))
+    for sentence in (
+        "Requests officially added support for CPython 3.12 in version 2.31.",
+        "Requests officially added support for CPython 3.12 in the release preceding 2.31.0.",
+    ):
+        check, calls = confirm(sentence, [history], one_line, alone=one_line)
+        assert not check.passed and check.vetoed and calls == 2, sentence
+        assert check.judge_reason.startswith("not in the evidence lines: 2.31")
+
+
+CONSTANTS = """\
+File: src/requests/adapters.py · module (lines 60-64)
+DEFAULT_POOLBLOCK = False
+DEFAULT_POOLSIZE = 10
+DEFAULT_RETRIES = 0
+DEFAULT_POOL_TIMEOUT = None
+"""
+
+
+@pytest.mark.parametrize(
+    ("sentence", "line"),
+    [
+        ("`DEFAULT_RETRIES` is 10 by default.", 61),  # the value of a sibling constant
+        ("`DEFAULT_POOLSIZE` is 64.", 61),  # 64 is only in the header's line range
+        ("`DEFAULT_POOLSIZE` is 0.", 61),
+    ],
+)
+def test_a_swapped_value_in_the_same_chunk_is_vetoed(sentence: str, line: int) -> None:
+    constants = code("k", CONSTANTS, 60, 63, "src/requests/adapters.py")
+    reply = verdicts((1, True, [("c1", line, line)]))
+    check, _ = confirm(sentence, [constants], reply, alone=reply)
+    assert not check.passed and check.vetoed, sentence
+
+
+def test_a_swapped_name_or_number_on_a_prose_page_is_vetoed() -> None:
+    page = RetrievedChunk(
+        "w",
+        "w",
+        "Warranty",
+        "The warranty lasts 12 months from delivery.\nReturns are accepted within 30 days.",
+        {"heading": "Terms"},
+        30,
+        0.9,
+    )
+    reply = verdicts((1, True, [("c1", 1, 1)]))
+    check, _ = confirm("The warranty lasts 30 days from delivery.", [page], reply, reply)
+    assert not check.passed and check.vetoed
+    init = code(
+        "i",
+        "File: src/requests/adapters.py · HTTPAdapter.__init__ (lines 200-204)\n"
+        "    def __init__(\n"
+        "        self,\n"
+        "        pool_connections: int = DEFAULT_POOLSIZE,\n"
+        "        pool_block: bool = DEFAULT_POOLBLOCK,\n"
+        "    ):\n",
+        200,
+        204,
+        "src/requests/adapters.py",
+        "HTTPAdapter.__init__",
+    )
+    reply = verdicts((1, True, [("c1", 203, 203)]))
+    check, _ = confirm("By default `pool_block` is set to DEFAULT_POOLSIZE.", [init], reply, reply)
+    assert not check.passed and check.vetoed
 
 
 def test_the_class_named_only_by_the_chunk_symbol_counts_for_a_confirmation() -> None:
@@ -244,9 +428,12 @@ def test_the_class_named_only_by_the_chunk_symbol_counts_for_a_confirmation() ->
         "Session.__init__",
     )
     sentence = "A new Session mounts one HTTPAdapter for HTTP and one for HTTPS."
-    narrow = verdicts((1, True, [("c1", 500, 500)]))  # the judge names the wrong line
-    check, _ = confirm(sentence, [session], narrow)
+    right = verdicts((1, True, [("c1", 501, 502)]))
+    check, _ = confirm(sentence, [session], right)
     assert check.passed and not check.vetoed
+    wrong = verdicts((1, True, [("c1", 500, 500)]))  # the judge names a line without it
+    check, _ = confirm(sentence, [session], wrong, wrong)
+    assert not check.passed and check.vetoed
 
 
 def test_a_judge_that_says_unsupported_still_vetoes() -> None:
@@ -274,7 +461,7 @@ def test_evidence_lines_holding_a_longer_name_still_veto() -> None:
 
 
 def test_a_rescue_still_needs_every_anchor_in_the_evidence_lines() -> None:
-    # Checker FAILED: the strict D-045 anchoring applies, the rest of the chunk does not count.
+    # Checker FAILED: the strict D-045 anchoring applies, the docstring field does not count.
     narrow = verdicts((1, True, [("c1", 164, 165)]))
     chat = ScriptedChat(narrow, narrow)
     verifier = Verifier(
@@ -285,7 +472,7 @@ def test_a_rescue_still_needs_every_anchor_in_the_evidence_lines() -> None:
     )
     check = verifier.check([(MAX_RETRIES, [adapter_chunk()])]).checks[0]
     assert not check.passed and check.method is None and not check.vetoed
-    assert check.judge_reason == "not in the evidence lines: max_retries (all in the cited chunks)"
+    assert check.judge_reason == "not in the evidence lines: max_retries (in their docstring field)"
     assert len(chat.calls) == 1  # not accepted in the batch: no second call
 
 
