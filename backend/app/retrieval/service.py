@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy import Engine
 from sqlmodel import Session
 
 from app.capabilities.bundled import Embedder, Reranker
 from app.index.base import Hit, SpaceIndex
+from app.retrieval.callees import callee_extras
 from app.retrieval.definitions import definition_extras, fit_extras
 from app.retrieval.fusion import (
     CONTEXT_CHUNKS,
@@ -47,7 +48,8 @@ class RetrievedChunk:
     locator: dict[str, object]
     token_count: int
     score: float
-    # Set when the chunk was added because it defines this constant (not ranked in).
+    # Set when the chunk was added because it defines this constant (D-032) or this function the
+    # context's code calls (D-057), not because it was ranked into the context.
     definition_of: str | None = None
 
     @classmethod
@@ -145,6 +147,39 @@ def with_definitions(
         for e in extras
     ]
     return fit_extras(selected, chunks, max_tokens=max_tokens)
+
+
+def with_callees(
+    selected: Sequence[RetrievedChunk],
+    ranked: Sequence[RetrievedChunk],
+    *,
+    max_tokens: int = CONTEXT_TOKENS,
+) -> list[RetrievedChunk]:
+    """``selected`` plus the reranked chunks defining functions its code calls (D-057).
+
+    See :mod:`app.retrieval.callees`. At most two, within ``max_tokens``; the top chunk, the
+    calling chunks and the constants added before are never displaced. Each keeps its rerank
+    score.
+    """
+    try:
+        extras = callee_extras(selected, ranked)
+    except Exception:
+        logger.warning("Looking up called functions failed; context unchanged", exc_info=True)
+        return list(selected)
+    if not extras:
+        return list(selected)
+    for chunk, name, callers in extras:
+        logger.info(
+            "Callee: added %s (chunk %s) for %d context chunk(s)",
+            name,
+            chunk.chunk_id,
+            len(callers),
+        )
+    chunks = [(replace(chunk, definition_of=name), callers[0]) for chunk, name, callers in extras]
+    # Constants added before and every calling chunk stay: a body is read through its call site.
+    keep = [c.chunk_id for c in selected if c.definition_of is not None]
+    keep += [cid for _, _, callers in extras for cid in callers]
+    return fit_extras(selected, chunks, max_tokens=max_tokens, protect=keep)
 
 
 def _top_ids(hits: Sequence[Hit], n: int) -> list[str]:
@@ -280,5 +315,5 @@ def retrieve(
     found = search(engine, index, embedder, query, allowed)
     ranked = rerank(query, found.rows, reranker)
     chosen = keep_agreed(select_context(ranked), ranked, found.agreed)
-    chunks = with_definitions(engine, chosen, ranked)
+    chunks = with_callees(with_definitions(engine, chosen, ranked), ranked)
     return Retrieval(chunks=chunks, ranked=ranked, source_ids=allowed)
