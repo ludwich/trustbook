@@ -114,7 +114,7 @@ listed separately, and answers from an API without these diagnostics are counted
 | Judge share of answer time | Judge seconds / answer latency, summed over N. |
 | Answer calls per answer: mean / max | Answer generation requests (JSON retries and the regeneration included). |
 | Regenerations | Answers regenerated / N. |
-| Answers over 60 s | Answers (`answered` and `refused`, with a latency) over 60 s / those answers. With `n` of them, p95 ≤ 60 s holds whenever at most `n − 1 − ceil(0.95·(n − 1))` are over 60 s (2 of 45); more are flagged. Each one is listed below the table with its generation, verification and judge seconds and call counts. |
+| Answers over 60 s | Answers (`answered` and `refused`, with a latency) over 60 s / those answers. With `n` of them, at most `n − 1 − ceil(0.95·(n − 1))` over 60 s (2 of 45) guarantee p95 ≤ 60 s; more do not by themselves mean a breach (the p95 interpolates: 3 of 45 can still give 59.6 s), so the row is flagged only when the computed p95 is over 60 s. Each one is listed below the table with its generation, verification and judge seconds and call counts. |
 | Latency p50 / p95 | As in the main table. |
 | Prompt tokens of the first answer call: p50 / p95 | Estimated by the app (characters / 4). |
 | Promoted tokens, Outline tokens: p50 / p95 | The parent context (D-077): citable chunks promoted for the top children, and the non-citable code outline. |

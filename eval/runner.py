@@ -1019,7 +1019,10 @@ def render_latency(results: Sequence[QuestionResult]) -> list[str]:
     timed = len(lat.timed)
     over = lat.over
     allowed = allowed_over(timed)
-    over_flag = " **too many for p95 <= 60 s**" if len(over) > allowed else ""
+    # The flag follows the computed p95: more than ``allowed`` answers over the bound is only
+    # where p95 <= bound stops being guaranteed, not a breach (the p95 interpolates).
+    p95 = percentile([r.latency_s for r in lat.timed if r.latency_s is not None], 95)
+    over_flag = f" **p95 over {P95_FLAG_S:g} s**" if p95 is not None and p95 > P95_FLAG_S else ""
 
     def tokens(values: Sequence[int]) -> str:
         return f"{_num_cell(percentile(values, 50), 0)} / {_num_cell(percentile(values, 95), 0)}"
@@ -1052,8 +1055,8 @@ def render_latency(results: Sequence[QuestionResult]) -> list[str]:
     )
     out.append(f"| Regenerations | {len(lat.regenerated)}/{n} |")
     out.append(
-        f"| Answers over {P95_FLAG_S:g} s | {len(over)}/{timed} (p95 <= {P95_FLAG_S:g} s holds "
-        f"with at most {allowed}){over_flag} |"
+        f"| Answers over {P95_FLAG_S:g} s | {len(over)}/{timed} (at most {allowed} guarantee "
+        f"p95 <= {P95_FLAG_S:g} s){over_flag} |"
     )
     out.append(f"| Latency p50 / p95 | {_secs(m.latency_p50)} / {_secs(m.latency_p95)} |")
     out.append(

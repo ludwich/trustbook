@@ -92,13 +92,35 @@ def test_the_report_shows_judge_calls_per_answer_and_answers_over_60_s() -> None
     assert "| Judge share of answer time | 12.3% |" in text  # 16 s of 130 s
     assert "| Answer calls per answer: mean / max | 1.75 / 3 |" in text
     assert "| Regenerations | 2/4 |" in text
-    assert "| Answers over 60 s | 1/5 (p95 <= 60 s holds with at most 0) **too many" in text
+    assert "| Answers over 60 s | 1/5 (at most 0 guarantee p95 <= 60 s) **p95 over 60 s**" in text
     assert "| Prompt tokens of the first answer call: p50 / p95 | 3000 / 3000 |" in text
     assert "| Outline-only failures | 1 sentence(s) in 1 answer(s), 1 of them regenerated |" in text
     assert (
         "- `d`: 70.0 s; generation 60.0 s in 3 call(s), verification 8.0 s, judge 10.0 s in 5 "
         "call(s), regenerated" in text
     )
+
+
+@pytest.mark.parametrize(
+    ("tail", "flagged"),
+    [
+        # Review finding (slice B): 3 of 45 over 60 s, yet p95 = 50 + 0.8 * (62 - 50) = 59.6 s.
+        ([50.0, 62.0, 70.0, 80.0], False),
+        ([61.0, 62.0, 70.0, 80.0], True),  # p95 = 61.8 s
+    ],
+)
+def test_answers_over_60_s_are_flagged_only_when_p95_is_over(
+    tail: list[float], flagged: bool
+) -> None:
+    latencies = [30.0] * 41 + tail
+    results = [res(f"q{i:02d}", v) for i, v in enumerate(latencies)]
+    text = runner.render_report(info(), results, {})
+    over = sum(1 for v in latencies if v > 60)
+    row = next(line for line in text.splitlines() if line.startswith("| Answers over 60 s |"))
+    assert row.startswith(f"| Answers over 60 s | {over}/45 (at most 2 guarantee p95 <= 60 s)")
+    assert ("**p95 over 60 s**" in row) is flagged
+    p95 = runner.percentile(latencies, 95)
+    assert p95 is not None and (p95 > 60) is flagged
 
 
 def test_promoted_citations_count_correct_ones() -> None:
