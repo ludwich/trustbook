@@ -269,3 +269,30 @@ def test_others_unfinished_counts_only_other_jobs_of_that_kind(
     jobs.enqueue("ingest", "b")
     jobs.enqueue("overview", "c")
     assert jobs.others_unfinished("ingest", first.id) == 1
+
+
+def test_a_successful_ingest_ends_with_the_job_done(stream_client: TestClient) -> None:
+    """Regression (Gate 3): a bare `raise` in `finally` failed every successful ingest job."""
+    services = services_of(stream_client)
+    sid, created = _paste(stream_client)
+    assert run_jobs(services) == 1
+    source = stream_client.get(f"/api/spaces/{sid}/sources").json()[0]
+    assert source["status"] == "ready"
+    job = services.jobs.get(created["job_id"])
+    assert job is not None and job.status == "done", job
+    assert job.error is None
+    listed = {j["id"]: j for j in stream_client.get("/api/jobs").json()["jobs"]}
+    assert listed[created["job_id"]]["status"] == "done"
+
+
+def test_a_failing_ingest_ends_with_the_job_failed(
+    stream_client: TestClient, replicas: list[Replica]
+) -> None:
+    services = services_of(stream_client)
+    sid, created = _paste(stream_client)
+    services.providers.ingest_embedder(1).fail_after = 0  # type: ignore[attr-defined]
+    run_jobs(services)
+    source = stream_client.get(f"/api/spaces/{sid}/sources").json()[0]
+    assert source["status"] == "failed"
+    job = services.jobs.get(created["job_id"])
+    assert job is not None and job.status == "failed"
