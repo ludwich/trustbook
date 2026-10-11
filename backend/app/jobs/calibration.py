@@ -22,6 +22,7 @@ from app.capabilities.bundled import (
 )
 from app.capabilities.cpu import CpuInfo, cpu_info
 from app.capabilities.streams import EMBED_BATCH, embed_in_streams, synthetic_code_chunks
+from app.chunking.dispatch import CHUNKER_VERSION
 from app.config import Paths
 from app.db.models import Job
 from app.fsutil import atomic_write_json
@@ -32,8 +33,9 @@ from app.timeutil import utc_now_iso
 
 logger = logging.getLogger("trustbook.calibration")
 
-# 2: real speech STT, usable CPUs; 3: tuned threads + BF16; 4: parsing; 5: indexing streams, code
-CALIBRATION_VERSION = 5
+# 2: real speech STT, usable CPUs; 3: tuned threads + BF16; 4: parsing; 5: indexing streams, code;
+# 6: Phase 3 chunks, and the saved results name the pipeline they were measured with (D-057)
+CALIBRATION_VERSION = 6
 CALIBRATE_KIND = "calibrate"
 CALIBRATE_TITLE = "Measure this computer's speed"
 EMBED_CHUNKS = 64
@@ -55,6 +57,9 @@ CalibrationStatus = Literal["pending", "running", "done", "failed"]
 
 class Calibration(BaseModel):
     version: int
+    # What the rates depend on besides this computer: calibration, chunker and embedding model
+    # (``pipeline_key``). Any change re-runs calibration on the next start. Absent before v6.
+    pipeline: str | None = None
     measured_at: str
     cpu_count: int
     embedding_chunks_per_s: float | None  # ~350-token prose, one model call at a time
@@ -81,6 +86,19 @@ def synthetic_chunks(count: int, words_per_chunk: int = 350) -> list[str]:
         words = [_WORDS[(i * 7 + j * 3 + j // n) % n] for j in range(words_per_chunk)]
         chunks.append(" ".join(words).capitalize() + ".")
     return chunks
+
+
+def pipeline_key(embedding_model: str, embedding_revision: str) -> str:
+    """The calibration version, ``CHUNKER_VERSION`` and the embedding model at its revision.
+
+    Indexing speed is chunks per second through the embedding model, so a new chunker (other
+    chunk sizes) or another embedding model makes saved rates stale, whether or not anyone
+    remembered to bump :data:`CALIBRATION_VERSION`.
+    """
+    return (
+        f"calibration-{CALIBRATION_VERSION}|chunker-{CHUNKER_VERSION}"
+        f"|embeddings-{embedding_model}@{embedding_revision}"
+    )
 
 
 def _reason(exc: BaseException) -> str:
@@ -136,10 +154,19 @@ class CalibrationService:
             return existing
         return self._jobs.enqueue(CALIBRATE_KIND, CALIBRATE_TITLE)
 
+    def pipeline(self) -> str:
+        """The :func:`pipeline_key` of this installation."""
+        info = self._providers.info("embeddings")
+        return pipeline_key(info.model_id, info.revision)
+
+    def outdated(self, saved: Calibration) -> bool:
+        """Measured by older calibration code, or for another chunker or embedding model."""
+        return saved.version < CALIBRATION_VERSION or saved.pipeline != self.pipeline()
+
     def ensure_first_run(self) -> Job | None:
         """Queue a calibration run on first start or when the saved one is outdated."""
         saved = self.read()
-        if saved is not None and saved.version >= CALIBRATION_VERSION:
+        if saved is not None and not self.outdated(saved):
             return None
         return self.enqueue()
 
@@ -170,6 +197,7 @@ class CalibrationService:
         parse = self._guard("Document reading speed", lambda: self._measure_parse(notes), notes)
         result = Calibration(
             version=CALIBRATION_VERSION,
+            pipeline=self.pipeline(),
             measured_at=utc_now_iso(),
             cpu_count=cpu.usable,
             embedding_chunks_per_s=embed,

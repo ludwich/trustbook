@@ -13,12 +13,15 @@ from app.capabilities.audio import wav_bytes
 from app.capabilities.bundled import ModelInfo, ProviderRegistry, RuntimeOptions, TuneResult
 from app.capabilities.cpu import CpuInfo
 from app.capabilities.streams import StreamLayout, choose_streams, stream_candidates
+from app.chunking.dispatch import CHUNKER_VERSION
 from app.config import Paths, ensure_layout
+from app.jobs import calibration
 from app.jobs.calibration import (
     CALIBRATE_KIND,
     CALIBRATION_VERSION,
     SPEECH_SAMPLE,
     CalibrationService,
+    pipeline_key,
     synthetic_chunks,
 )
 from app.jobs.handlers import JobCancelledError, JobContext
@@ -112,6 +115,45 @@ def test_old_calibration_is_redone(
     assert service.ensure_first_run() is None
     paths.calibration_file.write_text(json.dumps({**current.model_dump(), "version": 1}))
     assert service.ensure_first_run() is not None
+
+
+def test_chunker_or_embedding_change_redoes_calibration(
+    paths: Paths,
+    fake_providers: ProviderRegistry,
+    repo: JobRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Item C (D-057): the saved rates name the chunker and embedding model they were measured
+    with; changing either re-runs calibration without anyone bumping CALIBRATION_VERSION."""
+    ensure_layout(paths)
+    write_models_lock(paths.models_dir)  # embeddings at revision "rev-embeddings"
+    service = CalibrationService(paths, fake_providers, repo, clock=Clock())
+    current = service.run(_ctx()[0])
+    assert current.pipeline == pipeline_key("google/embeddinggemma-2", "rev-embeddings")
+    assert f"chunker-{CHUNKER_VERSION}" in current.pipeline
+    assert f"calibration-{CALIBRATION_VERSION}" in current.pipeline
+    assert not service.outdated(current)
+    assert service.ensure_first_run() is None
+
+    monkeypatch.setattr(calibration, "CHUNKER_VERSION", "next-chunker")
+    assert service.outdated(current)
+    monkeypatch.undo()
+    assert not service.outdated(current)
+
+    lock = paths.models_dir / "models.lock.json"
+    original = lock.read_text("utf-8")
+    lock.write_text(original.replace("rev-embeddings", "rev-embeddings-2"))
+    assert service.outdated(current)
+    lock.write_text(original)
+
+    # Saved before v6: no pipeline recorded, so it is outdated even at the current version.
+    legacy = current.model_dump()
+    legacy.pop("pipeline")
+    paths.calibration_file.write_text(json.dumps(legacy))
+    saved = service.read()
+    assert saved is not None and saved.pipeline is None and service.outdated(saved)
+    job = service.ensure_first_run()
+    assert job is not None and job.kind == CALIBRATE_KIND
 
 
 def test_run_without_models(paths: Paths, repo: JobRepository) -> None:

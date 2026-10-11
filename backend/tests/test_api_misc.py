@@ -5,9 +5,10 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from app.capabilities.bundled import read_models_lock
 from app.capabilities.http import space_context
 from app.config import Paths
-from app.jobs.calibration import CALIBRATION_VERSION
+from app.jobs.calibration import CALIBRATION_VERSION, pipeline_key
 from tests.conftest import AppFactory, wait_for
 from tests.fakes import Router
 
@@ -59,6 +60,7 @@ def test_calibration_routes(make_client: AppFactory, paths: Paths) -> None:
     results = client.get("/api/calibration").json()["results"]
     assert set(results) == {
         "version",
+        "pipeline",
         "measured_at",
         "cpu_count",
         "embedding_chunks_per_s",
@@ -74,6 +76,7 @@ def test_calibration_routes(make_client: AppFactory, paths: Paths) -> None:
     assert results["runtime"]["torch_threads"] >= 1
     assert results["runtime"]["embedding_streams"] >= 1
     assert results["embedding_chunks_per_s_code"] > 0
+    assert results["pipeline"].startswith(f"calibration-{CALIBRATION_VERSION}|chunker-")
     # No Docling models in tests: the basic PDF reader is measured, and the note says so.
     assert results["parse_pages_per_s"] > 0
     assert "Document reading speed measured with the basic PDF reader." in results["notes"]
@@ -82,10 +85,12 @@ def test_calibration_routes(make_client: AppFactory, paths: Paths) -> None:
 
 def test_calibration_not_requeued_when_done(make_client: AppFactory, paths: Paths) -> None:
     paths.config_dir.mkdir(parents=True)
+    embeddings = read_models_lock(paths.models_dir)["embeddings"]
     paths.calibration_file.write_text(
         json.dumps(
             {
                 "version": CALIBRATION_VERSION,
+                "pipeline": pipeline_key(embeddings.model_id, embeddings.revision),
                 "measured_at": "2026-10-10T10:00:00.000Z",
                 "cpu_count": 4,
                 "embedding_chunks_per_s": 3.0,
