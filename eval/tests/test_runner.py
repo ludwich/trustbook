@@ -82,6 +82,23 @@ class FakeApi:
         self.calls: list[tuple[str, str]] = []
         self.fail_origins: set[str] = set()
         self.conversations = 0
+        # Ingest jobs: one per source added through the API; a job ends like its source unless
+        # ``job_outcome[origin]`` says otherwise (Gate 3 F1: source ready, job failed).
+        self.jobs: list[dict[str, Any]] = []
+        self.job_outcome: dict[str, str] = {}
+        self.jobs_status = 200
+        self.message_bodies: list[dict[str, Any]] = []
+        self.chat_config: dict[str, Any] = {
+            "enabled": True,
+            "preset": "llama_server",
+            "base_url": "http://host.docker.internal:8080/v1",
+            "model": "small-model",
+            "api_version": None,
+            "api_key_set": False,
+            "api_key_hint": None,
+        }
+        self.chat_puts: list[dict[str, Any]] = []
+        self.chat_test_ok = True
 
     def add_space(self, name: str, sid: str = "sp1") -> str:
         self.spaces.append({"id": sid, "slug": name.lower().replace(" ", "-"), "name": name})
@@ -117,6 +134,17 @@ class FakeApi:
         if path == "/api/spaces" and method == "POST":
             sid = self.add_space(body["name"], sid=f"sp{len(self.spaces) + 1}")
             return httpx.Response(201, json=self.spaces[-1] | {"id": sid})
+        if path == "/api/jobs" and method == "GET":
+            if self.jobs_status != 200:
+                return httpx.Response(self.jobs_status, json={"detail": "nope"})
+            self._advance_jobs()
+            return httpx.Response(200, json={"jobs": self.jobs, "summary": {}})
+        if path == "/api/capabilities/chat":
+            return self._chat(method, body)
+        if path == "/api/capabilities/chat/test" and method == "POST":
+            ok = self.chat_test_ok
+            message = "Chat works." if ok else "Connection refused"
+            return httpx.Response(200, json={"ok": ok, "message": message, "latency_ms": 5})
         if len(parts) >= 4 and parts[:2] == ["api", "spaces"]:
             sid = parts[2]
             if sid not in self.sources:
@@ -129,11 +157,18 @@ class FakeApi:
                 origin = body.get("path") or body.get("url")
                 title = origin.rstrip("/").rsplit("/", 1)[-1]
                 src_id = self.add_source(sid, rest[1], origin, title, status="queued")
+                job_id = f"job{len(self.jobs) + 1}"
+                self.sources[sid][-1]["job_id"] = job_id
+                self.jobs.append(
+                    {"id": job_id, "kind": "ingest", "status": "queued", "error": None}
+                    | {"_source": src_id, "_origin": origin}
+                )
                 return httpx.Response(201, json=self.sources[sid][-1] | {"id": src_id})
             if rest == ["conversations"] and method == "POST":
                 self.conversations += 1
                 return httpx.Response(201, json={"id": f"c{self.conversations}", "title": "t"})
             if len(rest) == 3 and rest[0] == "conversations" and rest[2] == "messages":
+                self.message_bodies.append(body)
                 reply = self.answers.get(body["content"], refusal())
                 if isinstance(reply, int):
                     return httpx.Response(reply, json={"detail": "boom"})
@@ -151,6 +186,27 @@ class FakeApi:
                     s["status"], s["failure_reason"] = "failed", "blocked site"
                 else:
                     s["status"] = nxt
+
+    def _advance_jobs(self) -> None:
+        """A job is running while its source is busy and ends one poll after it."""
+        status = {s["id"]: s["status"] for v in self.sources.values() for s in v}
+        for job in self.jobs:
+            source = status.get(job["_source"])
+            if job["status"] == "queued" and source not in (None, "queued"):
+                job["status"] = "running"
+            elif job["status"] == "running" and source in ("ready", "failed"):
+                end = "done" if source == "ready" else "failed"
+                job["status"] = self.job_outcome.get(job["_origin"], end)
+                if job["status"] == "failed":
+                    job["error"] = "No active exception to reraise"
+
+    def _chat(self, method: str, body: dict[str, Any]) -> httpx.Response:
+        if method == "PUT":
+            self.chat_puts.append(body)
+            for name, value in body.items():
+                self.chat_config[name] = value
+        cfg = self.chat_config
+        return httpx.Response(200, json={"id": "chat", "config": cfg, "status": "ready"})
 
     def client(self) -> httpx.Client:
         return httpx.Client(base_url="http://tb", transport=httpx.MockTransport(self.handler))
