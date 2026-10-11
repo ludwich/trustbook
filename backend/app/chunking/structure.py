@@ -27,6 +27,13 @@ from typing import Literal, cast, get_args
 
 ParentKind = Literal["section", "class", "module"]
 PARENT_KINDS: frozenset[str] = frozenset(get_args(ParentKind))
+# How an import's target is resolved (:meth:`app.chunking.imports.SourceFiles.resolve`):
+# ``import``: Python ``import a`` / ``import a.b as c`` (the name is the module ``spec``);
+# ``from``: Python ``from spec import …``; ``script``: a JS/TS import of exports of ``spec``;
+# ``namespace``: a JS/TS import of the module ``spec`` itself (``* as ns``, ``x = require()``);
+# ``""``: nothing to resolve (C# ``using``, ``__future__``, several modules in one statement).
+ImportForm = Literal["", "import", "from", "script", "namespace"]
+IMPORT_FORMS: frozenset[str] = frozenset(get_args(ImportForm))
 
 # One identifier (Python, JS/TS incl. ``$``, C#), and a dotted class path of them.
 _QUALNAME = re.compile(r"(?:[^\W\d]|\$)[\w$]*(?:\.(?:[^\W\d]|\$)[\w$]*)*")
@@ -38,7 +45,15 @@ class Import:
 
     ``line`` / ``end_line``: file-relative, 1-based. ``text``: the statement on one line,
     whitespace collapsed. ``names``: the names it binds in the file (the alias when aliased).
-    ``target``: the file of the same source it resolves to, else ``None``.
+    ``target``: the file of the same source it resolves to, else ``None``. ``module``: the names
+    bind that file's module itself (``import a``, ``from . import utils as u``,
+    ``import * as u from './u'``); otherwise they bind things the module defines
+    (``from .b import Thing``), or ``target`` is ``None``.
+
+    ``form``, ``spec``, ``member``: what the target is resolved from, so that a refresh can
+    resolve it again against the files of the new snapshot. ``spec``: the module as written
+    (``.b``, ``requests.utils``, ``./x``; for ``import a.b`` the bound ``a``). ``member``: the one
+    name a Python ``from spec import name`` imports (it may be a submodule), else ``None``.
     """
 
     line: int
@@ -46,6 +61,10 @@ class Import:
     text: str
     names: tuple[str, ...]
     target: str | None
+    module: bool = False
+    form: ImportForm = ""
+    spec: str = ""
+    member: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,17 +96,26 @@ def structure_json(s: Structure) -> str:
     if s.defines:
         data["defines"] = list(s.defines)
     if s.imports:
-        data["imports"] = [
-            {
-                "line": i.line,
-                "end_line": i.end_line,
-                "text": i.text,
-                "names": list(i.names),
-                "target": i.target,
-            }
-            for i in s.imports
-        ]
+        data["imports"] = [_import_json(i) for i in s.imports]
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _import_json(i: Import) -> dict[str, object]:
+    data: dict[str, object] = {
+        "line": i.line,
+        "end_line": i.end_line,
+        "text": i.text,
+        "names": list(i.names),
+        "target": i.target,
+    }
+    if i.module:
+        data["module"] = True
+    if i.form:
+        data["form"] = i.form
+        data["spec"] = i.spec
+    if i.member is not None:
+        data["member"] = i.member
+    return data
 
 
 class _InvalidError(ValueError):
@@ -126,12 +154,19 @@ def parse_structure(raw: str | None) -> Structure | None:
 def _import(value: object) -> Import:
     if not isinstance(value, dict):
         raise _InvalidError
+    form = value.get("form", "")
+    if form not in IMPORT_FORMS:
+        raise _InvalidError
     return Import(
         line=_int(value.get("line")),
         end_line=_int(value.get("end_line")),
         text=_str(value.get("text")),
         names=_strings(value.get("names", [])),
         target=_optional_str(value.get("target")),
+        module=_bool(value.get("module", False)),
+        form=cast(ImportForm, form),
+        spec=_str(value.get("spec", "")),
+        member=_optional_str(value.get("member")),
     )
 
 

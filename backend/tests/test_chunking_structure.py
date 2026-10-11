@@ -385,14 +385,23 @@ def test_python_defines_and_imports(code_drafts: list[ChunkDraft]) -> None:
     first, last = line_of(PY_SOURCE, "from .compat"), line_of(PY_SOURCE, "urlparse as parse") + 1
     assert (compat.line, compat.end_line) == (first, last)  # one Import for the whole statement
     assert compat.names == ("basestring", "parse")
-    assert compat.target == "src/pkg/compat.py"
-    assert imports["from .auth import _basic_auth_str"].target == "src/pkg/auth.py"
+    assert (compat.target, compat.module) == ("src/pkg/compat.py", False)
+    assert (compat.form, compat.spec, compat.member) == ("from", ".compat", None)
+    auth = imports["from .auth import _basic_auth_str"]
+    # The name is something module ``auth`` defines, not the module itself.
+    assert (auth.target, auth.module, auth.member) == ("src/pkg/auth.py", False, "_basic_auth_str")
     absolute = imports["import pkg.utils"]
-    assert (absolute.names, absolute.target) == (("pkg",), "src/pkg/utils.py")
+    # ``import pkg.utils`` binds ``pkg``: the target is the module ``pkg``, not ``pkg/utils.py``.
+    assert (absolute.names, absolute.target, absolute.module) == (
+        ("pkg",),
+        "src/pkg/__init__.py",
+        True,
+    )
+    assert (absolute.form, absolute.spec) == ("import", "pkg")
     aliased = imports["from . import utils as u"]
-    assert (aliased.names, aliased.target) == (("u",), "src/pkg/utils.py")
+    assert (aliased.names, aliased.target, aliased.module) == (("u",), "src/pkg/utils.py", True)
     future = imports["from __future__ import annotations"]
-    assert (future.names, future.target) == ((), None)
+    assert (future.names, future.target, future.module, future.form) == ((), None, False, "")
     assert imports["import os.path"].names == ("os",)
     assert imports["import simplejson as json"].names == ("json",)  # inside ``try:``
 
@@ -403,9 +412,11 @@ def test_typescript_and_csharp_structure(code_drafts: list[ChunkDraft]) -> None:
     assert top is not None and ts[0].parent_key == module_key(TS_FILE)
     imports = {i.text: i for i in top.imports}
     x = imports["import D, { a, b as c } from './x';"]
-    assert (x.names, x.target) == (("D", "a", "c"), "src/app/x.ts")
+    assert (x.names, x.target, x.module) == (("D", "a", "c"), "src/app/x.ts", False)
+    assert (x.form, x.spec) == ("script", "./x")
     lib = imports["import * as lib from './lib';"]
-    assert (lib.names, lib.target) == (("lib",), "src/app/lib/index.ts")
+    assert (lib.names, lib.target, lib.module) == (("lib",), "src/app/lib/index.ts", True)
+    assert (lib.form, lib.spec) == ("namespace", "./lib")
     assert imports["import type { T } from './missing';"].target is None
     constants = at_line(code_drafts, TS_FILE, line_of(TS_SOURCE, "export const LIMIT"))
     assert constants.structure is not None
@@ -618,12 +629,52 @@ def test_import_resolution_within_the_snapshot() -> None:
     assert files.python(importer, ".", "nothing") == "src/requests/__init__.py"
     assert files.python(importer, "...x") is None
     assert files.python(importer, "json") is None
+    # ``from requests import utils``: the submodule when it is a file, else the package.
+    assert files.python(importer, "requests", "utils") == "src/requests/utils.py"
+    assert files.python(importer, "requests", "Session") == "src/requests/__init__.py"
+    assert files.resolve(importer, "from", "requests", "utils") == ("src/requests/utils.py", True)
+    assert files.resolve(importer, "from", "requests", "Session") == (
+        "src/requests/__init__.py",
+        False,
+    )
+    assert files.resolve(importer, "from", ".", "auth") == ("src/requests/auth.py", True)
+    assert files.resolve(importer, "from", ".auth", None) == ("src/requests/auth.py", False)
+    assert files.resolve(importer, "import", "requests", None) == ("src/requests/__init__.py", True)
+    assert files.resolve(importer, "import", "json", None) == (None, False)
+    assert files.resolve(importer, "", "", None) == (None, False)
+    assert files.resolve("web/src/a.ts", "script", "./x", None) == ("web/src/x.ts", False)
+    assert files.resolve("web/src/a.ts", "namespace", "./x", None) == ("web/src/x.ts", True)
+    assert files.resolve("web/src/a.ts", "namespace", "react", None) == (None, False)
     assert files.script("web/src/a.ts", "./x") == "web/src/x.ts"
     assert files.script("web/src/a.ts", "./x.js") == "web/src/x.ts"  # ESM names the output
     assert files.script("web/src/a.ts", "./lib") == "web/src/lib/index.tsx"
     assert files.script("web/src/a.ts", "./y") == "web/src/y.js"
     assert files.script("web/src/a.ts", "react") is None
     assert files.script("web/src/a.ts", "../../../x") is None
+
+
+def test_python_import_forms_bind_modules_or_their_members() -> None:
+    files = {
+        "pkg/__init__.py": "",
+        "pkg/b.py": "class Thing:\n    pass\n",
+        "pkg/sub.py": "X = 1\n",
+        "pkg/a.py": (
+            "from .b import Thing\nimport pkg.sub\nimport pkg.sub as s\nfrom pkg import sub\n"
+            "from pkg import b, sub as t\nimport os, pkg\n"
+        ),
+    }
+    drafts = chunk_snapshot(code_snapshot(files), CharEstimate())
+    (first,) = [d for d in of_file(drafts, "pkg/a.py") if d.structure and d.structure.imports]
+    assert first.structure is not None
+    found = [(i.text, i.names, i.target, i.module) for i in first.structure.imports]
+    assert found == [
+        ("from .b import Thing", ("Thing",), "pkg/b.py", False),  # a class of module b
+        ("import pkg.sub", ("pkg",), "pkg/__init__.py", True),  # binds ``pkg``
+        ("import pkg.sub as s", ("s",), "pkg/sub.py", True),
+        ("from pkg import sub", ("sub",), "pkg/sub.py", True),  # the submodule
+        ("from pkg import b, sub as t", ("b", "t"), "pkg/__init__.py", False),
+        ("import os, pkg", ("os", "pkg"), None, False),  # several modules: no one target
+    ]
 
 
 JS_BLOCKS = """import { TIMEOUT } from './config';

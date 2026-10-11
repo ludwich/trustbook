@@ -160,14 +160,16 @@ def family_definition(file_rows: FileRows, item: Wanted) -> ChunkRow | None:
 
 
 def import_targets(file_rows: FileRows, source_id: str, file: str, name: str) -> set[str]:
-    """The files of the same source that ``file``'s module-level imports of ``name`` resolve to."""
+    """The files of the same source that ``file``'s module-level imports take ``name`` from
+    (``from .b import NAME`` → ``b``); an import binding ``name`` to a module itself is left out:
+    that module does not define ``name``."""
     module = module_key(file)
     return {
         found.target
         for row in structured_rows(file_rows, source_id, file)
         if row.parent_key == module and row.structure
         for found in row.structure.imports
-        if found.target and name in found.names
+        if found.target and not found.module and name in found.names
     }
 
 

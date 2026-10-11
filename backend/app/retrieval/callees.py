@@ -37,10 +37,11 @@ still reads only the ranked list.
 
 With the retrieval's per-file row cache (D-077, D-078) the lookup also reads the stored structure:
 
-- ``Q.name(`` also names a module-level ``name`` in the file the caller's module-level import of
-  ``Q`` resolves to (``from . import utils as u`` → ``u.f(``), and that file comes first among
-  the matches; D-062's file-or-folder rule for ``Q`` still applies (C# ``using`` and Java
-  packages name namespaces, not files);
+- ``Q.name(`` also names a module-level ``name`` in the module the caller's module-level import
+  binds to ``Q`` (``from . import utils as u`` → ``u.f(``; not ``from .b import Q``, which binds
+  something module ``b`` defines), and that file comes first among the matches; D-062's
+  file-or-folder rule for ``Q`` still applies (C# ``using`` and Java packages name namespaces,
+  not files);
 - receiver calls prefer the caller's class family (its parent key), the same class
   ``enclosing_class`` names, nested classes included;
 - a candidate without a symbol is matched by its stored ``defines`` instead of the definition
@@ -295,14 +296,16 @@ def _in_class(chunk: ContextChunk) -> bool:
 
 
 def imported_modules(file_rows: FileRows, source_id: str, file: str) -> dict[str, str]:
-    """``{bound name: file}`` of the module-level imports of ``file`` that resolve to a file of the
-    same source (D-077), from the file's stored structure; ``{}`` without one."""
+    """``{bound name: file}`` of the module-level imports of ``file`` that bind a module of the
+    same source (D-077: ``import a``, ``from . import utils as u``, ``import * as u``), from the
+    file's stored structure; ``{}`` without one. A name an import binds to something a module
+    defines (``from .b import Thing``) is not that module, and ``import a.b`` binds ``a``."""
     found: dict[str, str] = {}
     for row in structured_rows(file_rows, source_id, file):
         if row.structure is None or row.structure.kind != "module":
             continue
         for item in row.structure.imports:
-            if item.target is not None:
+            if item.target is not None and item.module:
                 for name in item.names:
                     found.setdefault(name, item.target)
     return found

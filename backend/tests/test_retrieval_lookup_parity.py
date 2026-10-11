@@ -299,3 +299,41 @@ def test_a_block_scoped_js_const_is_never_a_modules_definition(engine: Engine) -
     found = definition_extras(engine, [fetch_it], file_rows=file_rows)
     assert not any("TIMEOUT = 1" in e.row.text for e in found)
     assert found == definition_extras(engine, [fetch_it])
+
+
+QUALIFIERS = {
+    "pkg/__init__.py": "def helper():\n    return 'init'\n",
+    "pkg/sub.py": "def helper():\n    return 'sub'\n",
+    "pkg/a.py": "from .b import Thing\n\n\ndef run():\n    return Thing.make()\n",
+    "pkg/b.py": (
+        "class Thing:\n    @classmethod\n    def make(cls):\n        return cls()\n\n\n"
+        "def make():\n    return 'module-level make, not Thing.make'\n"
+    ),
+    "main.py": "import pkg.sub\n\n\ndef main():\n    return pkg.helper()\n",
+    "app.py": "from pkg import sub\n\n\ndef go():\n    return sub.helper()\n",
+}
+
+
+def test_a_qualifier_bound_to_a_class_or_a_package_is_not_the_imported_file(
+    engine: Engine,
+) -> None:
+    """``from .b import Thing`` binds a class, not module ``b``: ``Thing.make(`` never names
+    ``b``'s module-level ``make``. ``import pkg.sub`` binds ``pkg``: ``pkg.helper(`` names
+    ``pkg/__init__.py``'s, not ``pkg/sub.py``'s. ``from pkg import sub`` binds the submodule."""
+    source, rows = index(engine, structure=True, files=QUALIFIERS)
+    file_rows = FileRows(engine, [source])
+    run = chunk(rows, "pkg/a.py", "run")
+    pool = [r for r in rows if r.locator.get("symbol") in ("run", "make")]
+    assert callees([run], pool, None) == []
+    assert callees([run], pool, file_rows) == []
+    assert callees([run], rows, file_rows) == callees([run], rows, None)
+    assert [s for s, _, _ in callees([run], rows, file_rows)] == ["Thing.make"]
+
+    main = chunk(rows, "main.py", "main")
+    ((callee, _, _),) = callee_extras([main], rows, file_rows=file_rows)
+    assert callee.locator["file"] == "pkg/__init__.py"
+    assert callees([main], rows, file_rows) == callees([main], rows, None)
+
+    go = chunk(rows, "app.py", "go")
+    ((callee, _, _),) = callee_extras([go], rows, file_rows=file_rows)
+    assert callee.locator["file"] == "pkg/sub.py"

@@ -31,13 +31,13 @@ import logging
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from app.chunking.code import chunk_code
 from app.chunking.document import ChunkDraft
 from app.chunking.header import header_line
 from app.chunking.imports import SourceFiles
-from app.chunking.structure import Import, Structure, class_key, module_key
+from app.chunking.structure import Import, ImportForm, Structure, class_key, module_key
 from app.chunking.tokens import TokenCounter
 
 if TYPE_CHECKING:
@@ -277,10 +277,17 @@ def _without_values(text: str) -> str:
     return "".join(out)
 
 
-def _python_import(
-    statement: str, path: str, files: SourceFiles | None
-) -> tuple[list[str], str | None]:
-    """``(names bound, target file)`` of a Python import statement on one line
+class _ImportSpec(NamedTuple):
+    """The names an import binds and what its target is resolved from (:class:`Import`)."""
+
+    names: list[str]
+    form: ImportForm = ""
+    spec: str = ""
+    member: str | None = None
+
+
+def _python_import(statement: str) -> _ImportSpec:
+    """The names a Python import statement on one line binds, and how its target resolves
     (``from .compat import (a, b as c)``, ``import os.path, x as y``)."""
     names: list[str] = []
     from_import = _FROM_IMPORT.fullmatch(statement)
@@ -292,15 +299,18 @@ def _python_import(
             if name.strip() != "*":
                 names.append(alias.strip() or name.strip())
         single = items[0].partition(" as ")[0].strip() if len(items) == 1 else None
-        target = files.python(path, module.strip(), single) if files is not None else None
-        return names, target
+        member = single if single is not None and single != "*" else None
+        return _ImportSpec(names, "from", module.strip(), member)
     items = [i.strip() for i in statement.removeprefix("import ").split(",") if i.strip()]
     for item in items:
         name, _, alias = item.partition(" as ")
         names.append(alias.strip() or name.strip().split(".")[0])  # ``import a.b`` binds ``a``
-    if files is None or len(items) != 1:
-        return names, None
-    return names, files.python(path, items[0].partition(" as ")[0].strip())
+    if len(items) != 1:
+        return _ImportSpec(names)  # several modules: no one target
+    name, _, alias = items[0].partition(" as ")
+    # The module the bound name is: ``import a.b as c`` → ``a.b``; ``import a.b`` → ``a``.
+    spec = name.strip() if alias.strip() else name.strip().split(".")[0]
+    return _ImportSpec(names, "import", spec)
 
 
 def _class_keys(path: str, owner: tuple[str, ...]) -> tuple[str, str] | None:
@@ -1023,48 +1033,68 @@ class _FileChunker:
         return _clip(flat) or None
 
     def _import(self, node: Node, path: str, files: SourceFiles | None) -> Import:
-        names: list[str] = []
-        target: str | None = None
         kind = node.type
         text = self._flat(node)  # joined by the node: brackets, line breaks and comments
+        found = _ImportSpec([])
         if self.grammar is GRAMMARS["python"]:
             if kind != "future_import_statement":
-                names, target = _python_import(text, path, files)
+                found = _python_import(text)
         elif kind == "import_statement":  # JavaScript / TypeScript
-            source = node.child_by_field_name("source")
-            for clause in node.named_children:
-                if clause.type == "import_require_clause":
-                    source = clause.child_by_field_name("source")
-                    names.extend(_name(c) or "" for c in clause.named_children[:1])
-                if clause.type != "import_clause":
-                    continue
-                for part in clause.named_children:
-                    if part.type == "identifier":
-                        names.append(_name(part) or "")
-                    elif part.type == "namespace_import":
-                        names.extend(_name(c) or "" for c in part.named_children[-1:])
-                    elif part.type == "named_imports":
-                        for spec in part.named_children:
-                            if spec.type == "import_specifier":
-                                bound = spec.child_by_field_name(
-                                    "alias"
-                                ) or spec.child_by_field_name("name")
-                                names.append(_name(bound) or "")
-            if source is not None and files is not None:
-                fragment = next((c for c in source.named_children), None)
-                target = files.script(path, _name(fragment) or "")
+            found = self._script_import(node)
         elif kind == "using_directive":  # C#: ``using Alias = A.B;`` binds Alias
             alias = node.child_by_field_name("name")
             if alias is not None:
-                names.append(_name(alias) or "")
+                found.names.append(_name(alias) or "")
+        target, module = (
+            files.resolve(path, found.form, found.spec, found.member)
+            if files is not None
+            else (None, False)
+        )
         first, last = _rows(node)
         return Import(
             line=first + 1,
             end_line=last + 1,
             text=_clip(text),
-            names=tuple(dict.fromkeys(n for n in names if _IDENTIFIER.fullmatch(n))),
+            names=tuple(dict.fromkeys(n for n in found.names if _IDENTIFIER.fullmatch(n))),
             target=target,
+            module=module,
+            form=found.form,
+            spec=found.spec,
+            member=found.member,
         )
+
+    @staticmethod
+    def _script_import(node: Node) -> _ImportSpec:
+        """A JavaScript / TypeScript import: ``namespace`` when every name it binds is the module
+        itself (``* as ns``, ``ns = require('./x')``), else ``script`` (exports of the module)."""
+        names: list[str] = []
+        whole = 0  # names bound to the module itself
+        source = node.child_by_field_name("source")
+        for clause in node.named_children:
+            if clause.type == "import_require_clause":
+                source = clause.child_by_field_name("source")
+                bound = [_name(c) or "" for c in clause.named_children[:1]]
+                names.extend(bound)
+                whole += len(bound)
+            if clause.type != "import_clause":
+                continue
+            for part in clause.named_children:
+                if part.type == "identifier":
+                    names.append(_name(part) or "")
+                elif part.type == "namespace_import":
+                    bound = [_name(c) or "" for c in part.named_children[-1:]]
+                    names.extend(bound)
+                    whole += len(bound)
+                elif part.type == "named_imports":
+                    for spec in part.named_children:
+                        if spec.type == "import_specifier":
+                            alias = spec.child_by_field_name("alias")
+                            names.append(_name(alias or spec.child_by_field_name("name")) or "")
+        if source is None:
+            return _ImportSpec(names)
+        fragment = next((c for c in source.named_children), None)
+        form: ImportForm = "namespace" if names and whole == len(names) else "script"
+        return _ImportSpec(names, form, _name(fragment) or "")
 
     def structures(
         self, pieces: list[_Piece], path: str, files: SourceFiles | None

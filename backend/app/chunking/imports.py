@@ -8,6 +8,9 @@ names exactly one file of the source, or it resolves to nothing (``None``).
   ``__init__.py``.
 - Python absolute ``pkg.x`` → the one file whose path ends in ``pkg/x.py`` or
   ``pkg/x/__init__.py`` (so a ``src/`` layout resolves); none when several files match.
+  ``from pkg import x`` → the submodule ``pkg.x`` when it is a file, else ``pkg``.
+- ``import a.b`` binds ``a``, so its target is the module ``a``; ``import a.b as c`` binds
+  ``a.b``.
 - JavaScript / TypeScript ``./x``, ``../x`` → ``x`` itself, ``x.ts``, ``x.tsx``, ``x.js``, … or
   ``x/index.*``; a ``.js`` specifier also finds the ``.ts`` file it is compiled from. Package
   specifiers (``react``) resolve to nothing.
@@ -18,6 +21,9 @@ from __future__ import annotations
 
 import posixpath
 from collections.abc import Iterable
+from dataclasses import replace
+
+from app.chunking.structure import Import, ImportForm, Structure
 
 _PYTHON_EXTENSIONS = (".py", ".pyi")
 _SCRIPT_EXTENSIONS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".d.ts")
@@ -41,8 +47,13 @@ class SourceFiles:
         """The file ``module`` (``.auth``, ``..x.y``, ``requests.utils``) of ``from module import
         name`` / ``import module`` in file ``importer`` names, else ``None``.
 
-        ``name``: the one imported name of ``from . import name`` (a submodule, when it is a file).
+        ``name``: the one imported name of ``from module import name`` (a submodule, when it is a
+        file: :meth:`python_submodule`).
         """
+        if name is not None:
+            submodule = self.python_submodule(importer, module, name)
+            if submodule is not None:
+                return submodule
         dots = len(module) - len(module.lstrip("."))
         rest = module[dots:]
         if dots == 0:
@@ -56,14 +67,38 @@ class SourceFiles:
                 return None
             base = posixpath.dirname(base)
         package = posixpath.join(base, *rest.split(".")) if rest else base
-        if name is not None:
-            submodule = self._python_file(posixpath.join(package, name) if package else name)
-            if submodule is not None:
-                return submodule
         if not rest:
             init = posixpath.join(package, "__init__.py") if package else "__init__.py"
             return init if init in self.paths else None
         return self._python_file(package)
+
+    def python_submodule(self, importer: str, module: str, name: str) -> str | None:
+        """The file of the submodule ``name`` of ``module`` (``from module import name``), else
+        ``None`` (``name`` is then something ``module`` defines)."""
+        if not name.isidentifier():
+            return None
+        joined = module + name if module.endswith(".") else f"{module}.{name}"
+        return self.python(importer, joined)
+
+    def resolve(
+        self, importer: str, form: ImportForm, spec: str, member: str | None
+    ) -> tuple[str | None, bool]:
+        """``(target, module)`` of an import of ``form`` in ``importer`` (see :class:`Import`)."""
+        if not spec:
+            return None, False
+        if form == "import":
+            target = self.python(importer, spec)
+            return target, target is not None
+        if form == "from":
+            if member is not None:
+                submodule = self.python_submodule(importer, spec, member)
+                if submodule is not None:
+                    return submodule, True
+            return self.python(importer, spec), False
+        if form in ("script", "namespace"):
+            target = self.script(importer, spec)
+            return target, target is not None and form == "namespace"
+        return None, False
 
     def script(self, importer: str, specifier: str) -> str | None:
         """The file a JavaScript/TypeScript ``specifier`` (``./x``, ``../lib/y.js``) names."""
@@ -99,3 +134,19 @@ def _module_parts(path: str) -> tuple[str, ...] | None:
     if parts and parts[-1] == "__init__":
         parts = parts[:-1]
     return parts or None
+
+
+def resolve_imports(structure: Structure, importer: str, files: SourceFiles) -> Structure:
+    """``structure`` with its imports' targets resolved against ``files`` (the snapshot's files).
+
+    A file reused unchanged by a refresh keeps its chunks, but its imports may now resolve
+    differently (a file was added, removed or renamed); resolving them again gives what a full
+    re-index of the same snapshot would store.
+    """
+    if not structure.imports:
+        return structure
+    imports: list[Import] = []
+    for item in structure.imports:
+        target, module = files.resolve(importer, item.form, item.spec, item.member)
+        imports.append(replace(item, target=target, module=module))
+    return replace(structure, imports=tuple(imports))
