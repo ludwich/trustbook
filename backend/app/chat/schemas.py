@@ -84,6 +84,14 @@ class CitationChange(BaseModel):
     swapped: list[list[str]] = Field(default_factory=list)
 
 
+class FailedSentenceOut(BaseModel):
+    """A sentence of the model's reply that failed verification and why (both capped at 300
+    characters, D-075)."""
+
+    text: str
+    reason: str
+
+
 class Diagnostics(BaseModel):
     """Scores behind an answer, for threshold tuning (the eval runner reads them; the UI doesn't).
 
@@ -97,6 +105,8 @@ class Diagnostics(BaseModel):
     confirmation failed. ``judge_seconds``: time spent waiting for the judge (None: not called).
     ``retrieval_fingerprint``: a hash of the ordered context chunk ids (None: no context).
     ``generation``: what the answer call used (None: no answer call).
+    ``failed_sentences``: the failed sentences of the reply the outcome rests on (the second one
+    after a regeneration, unless it was unusable), with the reason each failed (D-075).
     """
 
     top_rerank: float | None = None
@@ -108,6 +118,7 @@ class Diagnostics(BaseModel):
     citation_changes: list[CitationChange] = Field(default_factory=list)
     retrieval_fingerprint: str | None = None
     generation: GenerationUsed | None = None
+    failed_sentences: list[FailedSentenceOut] = Field(default_factory=list)
 
 
 class MessageOut(BaseModel):

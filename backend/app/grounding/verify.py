@@ -86,6 +86,9 @@ class SentenceCheck:
     ``method``: what passed it: ``checker``, ``code_judge`` (the checker failed it and the judge
     rescued it), or None (the sentence failed, or the checker is off).
     ``vetoed``: the checker passed it but the judge's confirmation contradicted it, so it failed.
+    ``missing``: names and literals of the sentence that no cited chunk contains (layer 5, or the
+    anchors behind a veto); the regeneration feedback says where the context has them (D-074).
+    ``judge_reason``: why the judge vetoed it, or did not rescue it ("" when not asked).
     """
 
     score: float | None
@@ -94,6 +97,22 @@ class SentenceCheck:
     passed: bool = True
     method: Method | None = None
     vetoed: bool = False
+    missing: tuple[str, ...] = ()
+    judge_reason: str = ""
+
+    def failure(self, threshold: float) -> str:
+        """Why the sentence failed, in a few words ("" when it passed); for diagnostics."""
+        if self.passed:
+            return ""
+        if self.problems:
+            return "; ".join(self.problems)
+        if self.vetoed:
+            return f"judge veto: {self.judge_reason}" if self.judge_reason else "judge veto"
+        if not self.chunk_scores:
+            return "no citations"
+        score = "none" if self.score is None else f"{self.score:.2f}"
+        why = f"checker score {score} < {threshold:g}"
+        return f"{why}; judge: {self.judge_reason}" if self.judge_reason else why
 
     @property
     def diagnostic_score(self) -> float | None:
@@ -185,7 +204,7 @@ class Verifier:
         scores = self._scores(sentences)
         checks: list[SentenceCheck] = []
         for i, ((text, cited), chunk_scores) in enumerate(zip(sentences, scores, strict=True)):
-            problems = self._code_problems(text, cited)
+            problems, missing = self._code_problems(text, cited)
             known = [s for s in chunk_scores if s is not None]
             if i in self._joined:
                 known.append(self._joined[i])
@@ -199,6 +218,7 @@ class Verifier:
                     problems=tuple(problems),
                     passed=passed,
                     method="checker" if self.enabled and passed else None,
+                    missing=tuple(missing),
                 )
             )
         return Checked(self._judge(sentences, checks))
@@ -252,19 +272,31 @@ class Verifier:
         result = list(checks)
         rescued = vetoed = 0
         for n, (i, outcome) in enumerate(zip(pending, outcomes, strict=True)):
-            if i in rescue and outcome.accepted:
+            if i in rescue and not outcome.accepted:
+                result[i] = replace(result[i], judge_reason=outcome.reason)
+            elif i in rescue:
                 again = self._ask_judge([items[n]])
                 if again is None or len(again) != 1 or not again[0].accepted:
                     logger.info("Judge rescue of sentence %d not repeated alone; failed", i + 1)
+                    why = again[0].reason if again and len(again) == 1 else "no second verdict"
+                    result[i] = replace(result[i], judge_reason=f"not repeated alone ({why})")
                     continue
                 result[i] = replace(result[i], passed=True, method="code_judge")
                 rescued += 1
-            elif i not in rescue and outcome.vetoed:
+            elif outcome.vetoed:
                 again = self._ask_judge([items[n]])
                 if again is None or len(again) != 1 or not again[0].vetoed:
                     logger.info("Judge veto of sentence %d not repeated alone; kept", i + 1)
                     continue
-                result[i] = replace(result[i], passed=False, method=None, vetoed=True)
+                missing = tuple(dict.fromkeys([*result[i].missing, *again[0].absent]))
+                result[i] = replace(
+                    result[i],
+                    passed=False,
+                    method=None,
+                    vetoed=True,
+                    missing=missing,
+                    judge_reason=again[0].reason,
+                )
                 vetoed += 1
                 logger.info("Judge vetoed sentence %d (%s)", i + 1, again[0].reason)
         logger.info(
@@ -316,21 +348,21 @@ class Verifier:
             self._joined[i] = max(self._joined.get(i, 0.0), score)
         return per_chunk
 
-    def _code_problems(self, text: str, cited: Sequence[RetrievedChunk]) -> list[str]:
-        problems = [
-            f"`{name}` is not in the cited chunks"
-            for name in missing_identifiers(text, (c.text for c in cited))
-        ]
+    def _code_problems(
+        self, text: str, cited: Sequence[RetrievedChunk]
+    ) -> tuple[list[str], list[str]]:
+        """Layer 5 problems, and the names and literals among them that no cited chunk has."""
+        missing = missing_identifiers(text, (c.text for c in cited))
+        problems = [f"`{name}` is not in the cited chunks" for name in missing]
         if any("file" in chunk.locator for chunk in cited):
-            problems.extend(
-                f"{literal} is not in the cited code"
-                for literal in missing_literals(text, (c.text for c in cited))
-            )
+            literals = missing_literals(text, (c.text for c in cited))
+            missing.extend(literals)
+            problems.extend(f"{literal} is not in the cited code" for literal in literals)
         for chunk in cited:
             problem = locator_problem(self._files, chunk.source_id, chunk.locator)
             if problem is not None:
                 problems.append(problem)
-        return list(dict.fromkeys(problems))
+        return list(dict.fromkeys(problems)), list(dict.fromkeys(missing))
 
 
 def checker_scores(providers: ProviderRegistry) -> ScorePairs:

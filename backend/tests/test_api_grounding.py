@@ -168,8 +168,14 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
         "judge_vetoed": [],
         "citation_changes": [],
         "generation": {"temperature": 0.2, "seed": None},
+        # The second reply's failed sentence and why it failed (D-075).
+        "failed_sentences": [{"text": "Another invention.", "reason": "checker score 0.00 < 0.5"}],
     }
     assert len(chat.calls) == 2  # answer, regeneration
+    # The regeneration is told which sentence of the first reply failed and why (D-074).
+    system = chat.calls[1]["messages"][0]["content"]
+    assert '1. "Made-up fact." (cited c1): not supported by the cited chunks.' in system
+    assert "Made-up fact." not in chat.calls[0]["messages"][0]["content"]
 
 
 def test_generation_override_reaches_the_answer_and_judge_calls(

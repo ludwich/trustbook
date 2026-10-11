@@ -25,8 +25,13 @@ role-swapped claim from a true one. A rescue passes only if **all** hold:
 too, with every chunk it cites (code keeps its real line numbers; prose is numbered from 1, a line
 per sentence). It stays passed unless the judge's verdict contradicts it
 (:attr:`JudgeOutcome.vetoed`): the judge says it is not supported, names evidence outside the
-sentence's cited chunks, or names evidence lines that lack one of its anchors. A missing or
-malformed verdict is no veto.
+sentence's cited chunks, or names evidence lines that lack one of its anchors **and** that anchor
+occurs nowhere in the chunks the sentence cites (header lines and symbols included, D-073; the
+judge often names too few lines). A missing or malformed verdict is no veto.
+
+Anchors and evidence are compared after removing inline markup on both sides (``200 OK``,
+`x`, *x*, **x**, _x_) and collapsing whitespace; plural acronyms (URLs, IDs) are prose words; a
+dotted chunk symbol also names each of its parts (D-072).
 
 Anything that goes wrong with the call (not set up, endpoint error, unusable reply, over
 :data:`JUDGE_TIMEOUT_S`) leaves the checker's results in place.
@@ -48,11 +53,13 @@ from app.capabilities.adapters.base import ChatAdapter, ChatMessage
 from app.chat.output import InvalidOutputError, extract_json
 from app.chat.prompt import describe_locator
 from app.chat.text import STOPWORDS
+from app.chunking.header import without_part
 from app.grounding.code_checks import (
     _NAME_PART,
     _NUMBER,
     _VALUE_CONSTANT,
     _occurs,
+    quoted_in,
     unescape_markdown,
     verbatim,
 )
@@ -164,16 +171,32 @@ def _positive_int(value: object) -> int | None:
     return None
 
 
+_HEADER_SYMBOL = re.compile(r" · (.+?)(?: \(part \d+\))?(?: \(lines? [^)]*\))?$")
+
+
+def _with_parts(name: str) -> list[str]:
+    """``HTTPAdapter.send`` → itself, ``HTTPAdapter``, ``send`` (D-072)."""
+    parts = [p for p in name.split(".") if p]
+    return [name, *parts] if len(parts) > 1 else [name]
+
+
 def chunk_names(chunk: RetrievedChunk) -> list[str]:
-    """The chunk's ``File: …`` header line and its ``locator.symbol`` (names the model saw)."""
+    """The chunk's ``File: …`` header line and its ``locator.symbol`` (names the model saw).
+
+    A dotted symbol also gives each of its parts (D-072): a method chunk ``HTTPAdapter.send``
+    names the class ``HTTPAdapter``, which its lines rarely repeat.
+    """
     names: list[str] = []
     first = chunk.text.split("\n", 1)[0]
     if first.startswith(FILE_PREFIX):
         names.append(first)
+        header = _HEADER_SYMBOL.search(first)
+        if header:
+            names.extend(_with_parts(header.group(1).strip()))
     symbol = chunk.locator.get("symbol")
     if isinstance(symbol, str) and symbol:
-        names.append(symbol)
-    return names
+        names.extend(_with_parts(symbol))
+    return list(dict.fromkeys(names))
 
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=\S)")
@@ -321,6 +344,7 @@ _QUOTED = re.compile(
 )
 _TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 _CAMEL = re.compile(r"[a-z0-9][A-Z]|[A-Z]{2,}[a-z]")
+_PLURAL_ACRONYM = re.compile(r"^[A-Z]{2,}s$")
 _FILE_EXTENSIONS = frozenset(
     "py pyi js mjs cjs jsx ts tsx cs java kt go rs rb php c h cpp hpp sql sh ps1 yaml yml json "
     "toml ini cfg md rst txt al xpp".split()
@@ -419,8 +443,11 @@ def _is_identifier(token: str) -> bool:
     UPPER_CASE means constant-style names with a digit or underscore (``DEFAULT_POOLSIZE``,
     ``MD5``). Letter-only acronyms (HTTP, URL, JSON) are prose words, so they count as content
     words instead: an answer saying "HTTP 429" about a status table is not wrong because the
-    table never spells "HTTP" (D-047).
+    table never spells "HTTP" (D-047). Their plurals (URLs, APIs, IDs: two or more capitals and a
+    final ``s``) are prose words too (D-072).
     """
+    if _PLURAL_ACRONYM.match(token):
+        return False
     if "." in token:
         return all(len(part) > 1 for part in token.split("."))
     if "_" in token.strip("_") or token.startswith("_"):
@@ -499,7 +526,7 @@ def anchor_found(
     if anchor.kind == "file":
         return any(_path_matches(anchor.text, f) for f in files) or _occurs(anchor.text, texts)
     if anchor.kind == "string":
-        return anchor.text in evidence
+        return quoted_in(anchor.text, evidence)
     if anchor.kind == "character":
         wanted = CHARACTER_NAMES.get(anchor.text, ())
         if any(ch in literal for literal in _string_literals(evidence) for ch in wanted):
@@ -611,14 +638,44 @@ class JudgeOutcome:
     """The judge's decision on one sentence.
 
     ``accepted``: it passes rules 1–3 of the module docstring (a rescue). ``vetoed``: the verdict
-    contradicts it (not supported, evidence outside the cited chunks, or evidence lines missing
-    one of its anchors), which ends a confirmation. A missing or malformed verdict, or support
-    without evidence lines, is neither. ``reason`` says why it was not accepted.
+    contradicts it (not supported, evidence outside the cited chunks, or an anchor that is in
+    neither the evidence lines nor anywhere in the cited chunks), which ends a confirmation. A
+    missing or malformed verdict, support without evidence lines, or anchors missing only from
+    the evidence lines (D-073) is neither. ``reason`` says why it was not accepted.
     """
 
     accepted: bool
     vetoed: bool = False
     reason: str = ""
+    absent: tuple[str, ...] = ()
+    """Anchors the sentence names that occur nowhere in its cited chunks (a veto's names)."""
+
+
+def _longer_name_in(anchor: Anchor, evidence: str) -> bool:
+    """The evidence holds a longer name or number that starts with ``anchor`` (``socks5h`` for
+    `socks5`, ``2000`` for 200): the judge's lines are about something else (D-073)."""
+    if anchor.kind not in ("code", "identifier", "number", "constant", "term"):
+        return False
+    text = anchor.text
+    if not text or not (text[-1].isalnum() or text[-1] == "_"):
+        return False
+    pattern = rf"(?<![A-Za-z0-9_.]){re.escape(text)}[A-Za-z0-9_]"
+    return re.search(pattern, evidence) is not None
+
+
+def absent_from_cited(
+    anchors: Sequence[Anchor], sentence: Statement, chunks: Mapping[str, NumberedChunk]
+) -> list[str]:
+    """The ``anchors`` that occur nowhere in the chunks ``sentence`` cites: their whole text,
+    header line included, their files and their symbols (D-073). The ``(part N)`` of a split
+    literal's header is not searched (D-058)."""
+    cited = [chunks[label] for label in sentence.labels if label in chunks]
+    texts = [unescape_markdown(without_part(c.chunk.text)) for c in cited]
+    whole = "\n".join(texts)
+    files = [str(c.chunk.locator.get("file") or "") for c in cited]
+    names = [name for c in cited for name in chunk_names(c.chunk)]
+    prose = not any(is_code_chunk(c.chunk) for c in cited)
+    return [a.text for a in anchors if not anchor_found(a, whole, files, names, texts, prose=prose)]
 
 
 def assess(
@@ -655,10 +712,23 @@ def assess(
         unescape_markdown(chunks[label].chunk.text) for label in sentence.labels if label in chunks
     ]
     missing = [
-        a.text for a in anchors if not anchor_found(a, evidence, files, names, cited, prose=prose)
+        a for a in anchors if not anchor_found(a, evidence, files, names, cited, prose=prose)
     ]
     if missing:
-        return JudgeOutcome(False, True, "not in the evidence lines: " + ", ".join(missing))
+        why = "not in the evidence lines: " + ", ".join(a.text for a in missing)
+        lookalikes = [a.text for a in missing if _longer_name_in(a, evidence)]
+        if lookalikes:
+            # The lines the judge relied on hold a longer name (`socks5h` for `socks5`): it
+            # conflated two names, so its support says nothing about this one.
+            return JudgeOutcome(False, True, why + " (a longer name is there)")
+        absent = absent_from_cited(missing, sentence, chunks)
+        if not absent:
+            # The judge named too few lines; the names are in the chunks the sentence cites. Not
+            # a rescue (evidence lines are strict), but no veto of a checker pass either (D-073).
+            return JudgeOutcome(False, False, why + " (all in the cited chunks)")
+        return JudgeOutcome(
+            False, True, "not in the cited chunks: " + ", ".join(absent), tuple(absent)
+        )
     if anchors:
         return JudgeOutcome(True)
     words = content_words(sentence.text, anchors)

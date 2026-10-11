@@ -33,11 +33,18 @@ from app.chat.citation_choice import choose, upgrade_candidates
 from app.chat.citations import number_citations
 from app.chat.llm import ChatAdapterFactory, generate_structured
 from app.chat.output import DraftSentence, InvalidOutputError, ParsedAnswer, parse_answer
-from app.chat.prompt import ANSWER_SCHEMA, TEMPERATURE, answer_messages, labelled
+from app.chat.prompt import (
+    ANSWER_SCHEMA,
+    TEMPERATURE,
+    FailedSentence,
+    answer_messages,
+    labelled,
+)
 from app.chat.schemas import (
     Badge,
     CitationChange,
     Diagnostics,
+    FailedSentenceOut,
     Generation,
     GenerationUsed,
     Refusal,
@@ -46,6 +53,8 @@ from app.chat.schemas import (
     Stage,
 )
 from app.chat.text import content_terms, question_topic
+from app.chunking.header import without_part
+from app.grounding.code_checks import name_in, unescape_markdown
 from app.grounding.verify import Checked, Verifier
 from app.retrieval.service import Retrieval, RetrievedChunk
 
@@ -252,6 +261,55 @@ def _upgrade(
     return upgraded
 
 
+def _holds(name: str, chunk: RetrievedChunk) -> bool:
+    return name_in(name, [unescape_markdown(without_part(chunk.text))])
+
+
+def failed_sentences(
+    sentences: Sequence[DraftSentence],
+    checked: Checked,
+    chunks: Mapping[str, RetrievedChunk],
+) -> list[FailedSentence]:
+    """The failed sentences of a reply for the regeneration feedback (D-074): for each name or
+    literal no cited chunk holds, the other context chunks that hold it (layer 5's test)."""
+    failed: list[FailedSentence] = []
+    for sentence, check in zip(sentences, checked.checks, strict=True):
+        if check.passed:
+            continue
+        missing = tuple(
+            (
+                name,
+                tuple(
+                    label
+                    for label, chunk in chunks.items()
+                    if label not in sentence.chunk_ids and _holds(name, chunk)
+                ),
+            )
+            for name in check.missing
+        )
+        failed.append(FailedSentence(sentence.text, tuple(sentence.chunk_ids), missing))
+    return failed
+
+
+FAILED_TEXT_CHARS = 300  # diagnostics keep at most this much of a failed sentence and its reason
+
+
+def _cap(text: str) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= FAILED_TEXT_CHARS else flat[: FAILED_TEXT_CHARS - 1] + "…"
+
+
+def failed_sentences_out(
+    sentences: Sequence[DraftSentence], checked: Checked, threshold: float
+) -> list[FailedSentenceOut]:
+    """``diagnostics.failed_sentences``: each failed sentence's text and why it failed (D-075)."""
+    return [
+        FailedSentenceOut(text=_cap(sentence.text), reason=_cap(check.failure(threshold)))
+        for sentence, check in zip(sentences, checked.checks, strict=True)
+        if not check.passed
+    ]
+
+
 def retrieval_fingerprint(chunks: Sequence[RetrievedChunk]) -> str | None:
     """A short hash of the ordered context chunk ids (None without a context)."""
     if not chunks:
@@ -296,10 +354,10 @@ def answer(
     used = GenerationUsed(temperature=temperature, seed=seed)
     diagnostics = diagnostics.model_copy(update={"generation": used})
 
-    def generate(regenerate: bool) -> ParsedAnswer:
+    def generate(regenerate: bool, failed: Sequence[FailedSentence] = ()) -> ParsedAnswer:
         return generate_structured(
             adapter,
-            answer_messages(question, retrieval.chunks, regenerate=regenerate),
+            answer_messages(question, retrieval.chunks, regenerate=regenerate, failed=failed),
             ANSWER_SCHEMA,
             lambda text: parse_answer(text, chunks.keys()),
             temperature=temperature,
@@ -336,7 +394,7 @@ def answer(
         regenerated = True
         on_stage("generating")
         try:
-            second = generate(True)
+            second = generate(True, failed_sentences(sentences, checked, chunks))
         except InvalidOutputError:
             second = ParsedAnswer([])
         on_stage("checking")
@@ -344,7 +402,7 @@ def answer(
             # The first reply was refused and the second has nothing usable.
             return Refused(
                 refusal("unsupported", question),
-                _diagnostics(diagnostics, checked, verifier, True, _Changes(), chunks),
+                _diagnostics(diagnostics, checked, verifier, True, _Changes(), chunks, sentences),
             )
         parsed = second
         sentences = parsed.sentences
@@ -360,11 +418,13 @@ def answer(
         )
         return Refused(
             refusal("unsupported", question),
-            _diagnostics(diagnostics, checked, verifier, regenerated, changes, chunks),
+            _diagnostics(diagnostics, checked, verifier, regenerated, changes, chunks, sentences),
         )
 
     kept, removed = choose_citations(question, sentences, checked, chunks, verifier, changes)
-    diagnostics = _diagnostics(diagnostics, checked, verifier, regenerated, changes, chunks)
+    diagnostics = _diagnostics(
+        diagnostics, checked, verifier, regenerated, changes, chunks, sentences
+    )
     numbered = number_citations([k.sentence for k in kept], chunks)
     scores = [
         {
@@ -399,6 +459,7 @@ def _diagnostics(
     regenerated: bool,
     changes: _Changes,
     chunks: Mapping[str, RetrievedChunk],
+    sentences: Sequence[DraftSentence],
 ) -> Diagnostics:
     return base.model_copy(
         update={
@@ -408,5 +469,6 @@ def _diagnostics(
             "judge_vetoed": checked.vetoed,
             "judge_seconds": round(verifier.judge_seconds, 3) if verifier.judge_calls else None,
             "citation_changes": changes.out(chunks),
+            "failed_sentences": failed_sentences_out(sentences, checked, verifier.threshold),
         }
     )

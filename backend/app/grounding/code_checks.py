@@ -50,12 +50,61 @@ def unescape_markdown(text: str) -> str:
     return _MARKDOWN_ESCAPE.sub(r"\1", text)
 
 
-def verbatim(span: str, text: str) -> bool:
-    """``span`` occurs in ``text`` and is not part of a longer name: an edge of the span that is
-    a name character may not continue into one (`socks5` is not in ``socks5h``, D-063)."""
+# Inline markup (D-072): reStructuredText literals (``200 OK``), Markdown code spans (`x`) and
+# emphasis (*x*, **x**, _x_). A sentence quoting a docstring's "is **not** a check to see if the
+# response code is ``200 OK``" writes the words without the markup. Emphasis needs a non-word
+# character outside its markers and no space inside them, so ``2*x*y``, ``*args, **kwargs`` and
+# ``__init__`` are left alone.
+_RST_LITERAL = re.compile(r"``([^`\n]+?)``")
+_CODE_SPAN = re.compile(r"`([^`\n]+)`")
+_STRONG = re.compile(r"(?<![\w*])\*\*(?![\s*])([^*\n]+?)(?<![\s*])\*\*(?![\w*])")
+_EMPHASIS = re.compile(r"(?<![\w*])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![\w*])")
+_UNDERSCORE_EMPHASIS = re.compile(r"(?<![\w])_(?![\s_])([^_\n]+?)(?<![\s_])_(?!\w)")
+
+
+def normalize_inline(text: str) -> str:
+    """``text`` without inline markup and with runs of whitespace collapsed to one space.
+
+    Only for comparing a sentence with a source: ``This is **not** a check … ``200 OK``.`` →
+    ``This is not a check … 200 OK.`` Both sides are normalised the same way (D-072).
+    """
+    out = _RST_LITERAL.sub(r"\1", text)
+    out = _CODE_SPAN.sub(r"\1", out)
+    out = _STRONG.sub(r"\1", out)
+    out = _EMPHASIS.sub(r"\1", out)
+    out = _UNDERSCORE_EMPHASIS.sub(r"\1", out)
+    return " ".join(out.split())
+
+
+def _verbatim_exact(span: str, text: str) -> bool:
     left = r"(?<![A-Za-z0-9_])" if span[:1].isalnum() or span[:1] == "_" else ""
     right = r"(?![A-Za-z0-9_])" if span[-1:].isalnum() or span[-1:] == "_" else ""
     return re.search(left + re.escape(span) + right, text) is not None
+
+
+def verbatim(span: str, text: str) -> bool:
+    """``span`` occurs in ``text`` and is not part of a longer name: an edge of the span that is
+    a name character may not continue into one (`socks5` is not in ``socks5h``, D-063).
+
+    The span also matches when both sides are equal after :func:`normalize_inline` (inline markup
+    removed, whitespace collapsed; D-072); every word must still be there, in order.
+    """
+    if _verbatim_exact(span, text):
+        return True
+    wanted = normalize_inline(span)
+    return bool(wanted) and _verbatim_exact(wanted, normalize_inline(text))
+
+
+def quoted_in(quoted: str, text: str) -> bool:
+    """A quoted phrase of a sentence occurs in ``text``, as is or after :func:`normalize_inline`
+    on both sides (D-072). English puts a sentence's own full stop or comma inside the quotes, so
+    one trailing ``.,;:`` of the phrase is not required in the normalised comparison."""
+    if quoted in text:
+        return True
+    wanted = normalize_inline(quoted)
+    if len(wanted) > 1 and wanted[-1] in ".,;:":
+        wanted = wanted[:-1].rstrip()
+    return bool(wanted) and wanted in normalize_inline(text)
 
 
 def _occurs(token: str, texts: list[str]) -> bool:
@@ -75,14 +124,16 @@ def missing_identifiers(text: str, chunk_texts: Iterable[str]) -> list[str]:
     header is not code and is not searched (D-058).
     """
     texts = [unescape_markdown(without_part(t)) for t in chunk_texts]
-    missing: list[str] = []
-    for token in backticked(text):
-        if any(verbatim(token, t) for t in texts):
-            continue
-        parts = _NAME_PART.findall(token)
-        if not parts or not all(_occurs(part, texts) for part in parts):
-            missing.append(token)
-    return missing
+    return [token for token in backticked(text) if not name_in(token, texts)]
+
+
+def name_in(name: str, texts: list[str]) -> bool:
+    """Layer 5's test for one backticked name: verbatim in one of ``texts`` (not inside a longer
+    name), or every identifier and number in it as a whole word somewhere in them (D-042)."""
+    if any(verbatim(name, t) for t in texts):
+        return True
+    parts = _NAME_PART.findall(name)
+    return bool(parts) and all(_occurs(part, texts) for part in parts)
 
 
 def _line(value: Any) -> int | None:
