@@ -1482,3 +1482,26 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     stored text.
   - Live (trustbook-g3, expansion off and on, temperature 0, seed 42): docs-04 verified 6/6 on the first reply in
     20.9–31.2 s (before: 2 of 4 regenerated, 74–83 s); ref-near-07 verified 4/4 in 12.9–35.9 s.
+
+### D-082 The feedback after a failed rescue says where a missing name is; the judge names a line for every name
+- **Finding (gate attempt 3, run 1 and real-use: ref-near-10 refused both times):**
+  - The first reply was "… on requests.codes …", citing only `_codes (part 6)` (line 85). The module docstring
+    that introduces `requests.codes` was in the context as c1, but the reply did not cite it.
+  - The sentence failed the checker and the judge did not rescue it ("not in the cited chunks: requests.codes").
+    That rescue path kept only `judge_reason`, so the feedback said "not supported by the cited chunks". The
+    regenerated reply backticked the name, cited c8 again, and layer 5 failed it.
+  - When the model did cite c1 and c8, the judge named only line 85 ("give the fewest lines needed"). The
+    anchor check then vetoed `requests.codes` as missing from the evidence lines.
+- **Decision:**
+  1. `verify.py`: a failed rescue keeps the judge's `absent` names in `SentenceCheck.missing`, as a confirmation
+     veto already did. The feedback then reads "`requests.codes` is not in c8; it is in c1, c2, c3". This is
+     feedback only (D-074): the sentence fails either way and nothing is asked again.
+  2. The judge prompt keeps "the fewest lines needed", but adds: give a line for every name and value the
+     statement uses, and when the statement combines facts from several excerpts, give lines from each. The
+     anchor check on the named lines (D-063/D-069/D-073) is unchanged.
+- **Consequences:**
+  - The D-063/D-069/D-073/D-077 claim replay (trustbook-g3, Qwen3.6, scratch copy of the gate space) is the same
+    as before. Forced checker, base set: 0 of 41 false claims passed (19 of 21 true passed). Extra set: 0 of 33
+    false passed (4 of 4 true passed). Real checker: 0 of 41 false passed (18 of 21 true passed).
+  - Live (temperature 0, seed 42): ref-near-10 was verified 4 of 4 times (before: 1 of 3); code-04 answered 3 of 3
+    (2 verified, 1 partially verified).

@@ -19,6 +19,9 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
    b. `phase-4` from phase-3b: Phase 4 (Ideation) per SPEC §14. PR phase-4 → phase-3b, `phase-4-rc`, Gate 4.
    If phase-3 changes after Gate 3 review: rebase the stacked branches.
 3. CI green on every push; DECISIONS/TASKS current; never weaken grounding.
+   Status 22:00: attempt 3 on p3h, run 1 FAIL (code-04 + ref-near-10), run 2 PASS, real-use PASS, Qwen3.8 reference
+   precision 77.8% (comparison only). Fix D-082 (feedback after a failed rescue, judge evidence for every name);
+   rerun all 4 on the next image.
 4. Stop when Phase 4 is done or blocked on a decision only Ludwig can make. Summary at the top of docs/GATES.md:
    what waits for him (Gate 3 → 3b → 4) and how to test each.
 

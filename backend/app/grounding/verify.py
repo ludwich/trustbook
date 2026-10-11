@@ -277,7 +277,10 @@ class Verifier:
         rescued = vetoed = 0
         for n, (i, outcome) in enumerate(zip(pending, outcomes, strict=True)):
             if i in rescue and not outcome.accepted:
-                result[i] = replace(result[i], judge_reason=outcome.reason)
+                # The names the judge found in no cited chunk feed only the regeneration feedback
+                # (D-074, D-082); the sentence fails either way.
+                missing = tuple(dict.fromkeys([*result[i].missing, *outcome.absent]))
+                result[i] = replace(result[i], missing=missing, judge_reason=outcome.reason)
             elif i in rescue:
                 again = self._ask_judge([items[n]])
                 if again is None or len(again) != 1 or not again[0].accepted:

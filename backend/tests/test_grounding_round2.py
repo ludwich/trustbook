@@ -26,6 +26,7 @@ from app.grounding.code_checks import (
     verbatim,
 )
 from app.grounding.code_judge import (
+    JUDGE_SYSTEM,
     Anchor,
     CodeJudge,
     Statement,
@@ -317,6 +318,32 @@ def test_a_pass_naming_something_absent_from_every_cited_chunk_is_vetoed() -> No
     assert not check.passed and check.vetoed and calls == 2
     assert check.missing == ("DEFAULT_RETRIES",)
     assert check.judge_reason == "not in the cited chunks: DEFAULT_RETRIES"
+
+
+def test_a_failed_rescue_names_what_no_cited_chunk_holds_for_the_feedback() -> None:
+    # D-082 (gate run ref-near-10): a sentence that failed only the checker and that the judge
+    # does not rescue gets the names no cited chunk holds, so the regeneration feedback can say
+    # where they are. The sentence fails either way, and nothing is asked again.
+    sentence = "When max_retries is left at its default, Requests uses DEFAULT_RETRIES."
+    chat = ScriptedChat(verdicts((1, True, [("c1", 164, 165)])))
+    verifier = Verifier(
+        lambda pairs: [0.1 for _ in pairs],
+        threshold=0.5,
+        files=SNAPSHOT,
+        code_judge=CodeJudge(lambda: chat),
+    )
+    check = verifier.check([(sentence, [adapter_chunk()])]).checks[0]
+    assert not check.passed and not check.vetoed and len(chat.calls) == 1
+    assert check.missing == ("DEFAULT_RETRIES",)
+    assert check.judge_reason == "not in the cited chunks: DEFAULT_RETRIES"
+
+
+def test_the_judge_is_asked_for_a_line_for_every_name_from_each_excerpt() -> None:
+    # D-082: "the fewest lines" alone made the judge name only the value's line when a sentence
+    # combined two cited chunks; the anchor check on the named lines is unchanged.
+    flat = " ".join(JUDGE_SYSTEM.split())
+    assert "give a line for every name and value the statement uses" in flat
+    assert "give lines from each" in flat
 
 
 # HISTORY.md lines 186-206 (psf/requests v2.34.2, Apache-2.0): the 2.32.0 heading is in the
