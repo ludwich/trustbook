@@ -605,6 +605,9 @@ class QuestionResult:
     # (``diagnostics.retrieval_fingerprint`` / ``diagnostics.generation``); None when not sent.
     retrieval_fingerprint: str | None = None
     generation: dict[str, Any] | None = None
+    # ``diagnostics.failed_sentences``: each failed sentence of a refused or partially verified
+    # answer and why it failed (D-075); None when the API did not send them.
+    failed_sentences: list[dict[str, str]] | None = None
 
     @property
     def answer_text(self) -> str:
@@ -829,7 +832,8 @@ def _ratio_json(r: Ratio) -> dict[str, Any]:
     return {"num": r.num, "den": r.den, "value": r.value}
 
 
-SIDECAR_VERSION = 2
+SIDECAR_VERSION = 3
+FAILED_TEXT_CHARS = 300  # the app caps failed sentences at this; the runner does too
 
 
 def sidecar(
@@ -840,7 +844,9 @@ def sidecar(
 ) -> dict[str, Any]:
     """The JSON written next to the report: scores per question and the sweep.
 
-    Only ids, types, settings and numbers: no question or answer text.
+    Ids, types, settings and numbers, and no question text. The only answer text is
+    ``failed_sentences``: the sentences that failed verification and why (D-075), for diagnosing
+    false refusals.
     """
     thresholds = info.thresholds
     metrics = compute_metrics(results)
@@ -900,6 +906,7 @@ def sidecar(
                 "latency_s": r.latency_s,
                 "retrieval_fingerprint": r.retrieval_fingerprint,
                 "generation": r.generation,
+                "failed_sentences": r.failed_sentences,
             }
             for r in results
         ],
@@ -1242,6 +1249,26 @@ def read_message_extras(result: QuestionResult, message: dict[str, Any]) -> None
         result.retrieval_fingerprint = json.dumps(fingerprint, sort_keys=True)
     generation = diagnostics.get("generation")
     result.generation = generation if isinstance(generation, dict) else None
+    result.failed_sentences = read_failed_sentences(diagnostics.get("failed_sentences"))
+
+
+def _capped(value: str) -> str:
+    flat = " ".join(value.split())
+    return flat if len(flat) <= FAILED_TEXT_CHARS else flat[: FAILED_TEXT_CHARS - 1] + "…"
+
+
+def read_failed_sentences(raw: Any) -> list[dict[str, str]] | None:
+    """``diagnostics.failed_sentences`` as ``[{"text", "reason"}]`` (None when not a list)."""
+    if not isinstance(raw, list):
+        return None
+    found: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            continue
+        reason = item.get("reason")
+        why = _capped(reason) if isinstance(reason, str) else ""
+        found.append({"text": _capped(item["text"]), "reason": why})
+    return found
 
 
 def _sentence(data: dict[str, Any]) -> tuple[str, list[Citation]]:
@@ -2122,6 +2149,8 @@ def render_report(
         )
     out.append("")
 
+    out.extend(render_false_refusals(results))
+
     answered_unans = [r for r in results if not r.question.answerable and r.outcome == "answered"]
     if answered_unans:
         out.append("#### Unanswerable questions that were answered")
@@ -2201,6 +2230,24 @@ def render_report(
         out.extend(f"- {n}" for n in notes)
         out.append("")
     return "\n".join(out).rstrip() + "\n"
+
+
+def render_false_refusals(results: Sequence[QuestionResult]) -> list[str]:
+    """For each false refusal, the sentences that failed verification and why (D-075)."""
+    refused = [r for r in results if r.question.answerable and r.outcome == "refused"]
+    if not refused:
+        return []
+    out = ["#### False refusals: failed sentences", ""]
+    for r in refused:
+        out.append(f"- `{r.question.id}` (refused, {r.refusal_reason or 'no reason'}):")
+        if r.failed_sentences is None:
+            out.append("  - the API did not report failed sentences")
+        elif not r.failed_sentences:
+            out.append("  - no failed sentences (the model gave no usable answer)")
+        for f in r.failed_sentences or []:
+            out.append(f"  - “{_cell(f['text'])}” — {_cell(f['reason'] or 'no reason given')}")
+    out.append("")
+    return out
 
 
 def _ratio_cell(r: Ratio) -> str:
