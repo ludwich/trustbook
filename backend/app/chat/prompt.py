@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.capabilities.adapters.base import ChatMessage
+from app.chunking.headings import heading_syntax
+from app.grounding.code_checks import unescape_markdown
 from app.retrieval.parents import OutlineBlock, outline_text
 from app.retrieval.service import RetrievedChunk
 
@@ -218,12 +220,28 @@ def describe_locator(locator: Mapping[str, object]) -> str:
     return ""
 
 
+def reader_text(chunk: RetrievedChunk) -> str:
+    """A chunk's text as a reader sees it rendered (D-081).
+
+    Web pages, pasted or uploaded text and converted documents are stored as Markdown, with
+    backslash escapes (``\\~/.netrc, \\~/\\_netrc``). The model copied them badly ("~/.netrc,
+    ~/.netrc"), and the checks compare a sentence with the unescaped text anyway
+    (:func:`app.grounding.code_checks.unescape_markdown`). Source code, reStructuredText and other
+    non-Markdown files keep every backslash. Citations and the viewer use the stored text.
+    """
+    file = chunk.locator.get("file")
+    if isinstance(file, str) and file:
+        markdown = "heading" in chunk.locator and heading_syntax(file) == "markdown"
+        return unescape_markdown(chunk.text) if markdown else chunk.text
+    return unescape_markdown(chunk.text)
+
+
 def chunk_block(chunk_label: str, chunk: RetrievedChunk) -> str:
     """One numbered chunk as the model sees it."""
     where = describe_locator(chunk.locator)
     title = " ".join(chunk.source_title.split()) or "Untitled"
     header = f"[{chunk_label}] Source: {title}" + (f" ({where})" if where else "")
-    return f"{header}\n{chunk.text.strip()}"
+    return f"{header}\n{reader_text(chunk).strip()}"
 
 
 def chunks_section(chunks: Sequence[RetrievedChunk]) -> str:

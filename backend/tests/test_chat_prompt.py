@@ -7,6 +7,7 @@ from app.chat.prompt import (
     ANSWER_SYSTEM,
     OVERVIEW_SCHEMA,
     answer_messages,
+    chunk_block,
     describe_locator,
     estimate_tokens,
     labelled,
@@ -116,3 +117,38 @@ def test_question_topic_is_cut_on_a_word_boundary() -> None:
     assert len(topic) <= 80 and topic.endswith("…")
     assert topic.startswith("why word0 word1") and "word3…" not in topic[:-1]
     assert topic[:-1].split(" ")[-1].startswith("word")
+
+
+def test_markdown_escapes_are_removed_from_prose_but_never_from_code() -> None:
+    page = chunk("w", "Searched at \\~/.netrc, \\~/\\_netrc or `NETRC`.", "netrc Authentication")
+    assert "at ~/.netrc, ~/_netrc or `NETRC`." in chunk_block("c1", page)
+    notes = chunk(
+        "n",
+        "File: docs/notes.md · Setup (lines 3-3)\nUse \\~/\\_netrc.",
+        "requests",
+        file="docs/notes.md",
+        heading="Setup",
+        start_line=3,
+        end_line=3,
+    )
+    assert "Use ~/_netrc." in chunk_block("c1", notes)
+    rst = chunk(
+        "r",
+        "File: docs/auth.rst · Auth (lines 3-3)\nA literal \\* star.",
+        "requests",
+        file="docs/auth.rst",
+        heading="Auth",
+        start_line=3,
+        end_line=3,
+    )
+    assert "A literal \\* star." in chunk_block("c1", rst)
+    code = chunk(
+        "k",
+        'File: src/x.py · f (lines 1-1)\npattern = re.compile(r"\\.netrc\\_")',
+        "requests",
+        file="src/x.py",
+        symbol="f",
+        start_line=1,
+        end_line=1,
+    )
+    assert 'r"\\.netrc\\_"' in chunk_block("c1", code)

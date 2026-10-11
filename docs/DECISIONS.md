@@ -1466,3 +1466,19 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     2. expansion budget 900 → 500 tokens and 3 → 2 children;
     3. parent context off.
   - Thresholds and the answer key are never changed.
+
+### D-081 The model reads Markdown chunks without backslash escapes
+- **Finding (docs-04, integration check of D-077):** the `netrc Authentication` web page is stored as Markdown,
+  `\~/.netrc, \~/\_netrc`. The model copied it badly ("~/.netrc, ~/.netrc"), the judge rightly vetoed the sentence,
+  and the answer was regenerated: 74.0 s and 82.6 s, one of them refused. With expansion off and on the prompt was
+  byte-identical, so this was not caused by the parent mechanism.
+- **Decision:** `chat/prompt.py` `reader_text()` gives the model a chunk's text as a reader sees it rendered:
+  Markdown backslash escapes removed (`unescape_markdown`) for web pages, pasted and uploaded text, transcripts and
+  folder documents with Markdown syntax (`.md`, parsed PDF/Word). Source code, reStructuredText and other
+  non-Markdown files keep every backslash. Only the answer prompt changes.
+- **Consequences:**
+  - Grounding is unchanged: layer 5, the judge's anchors and its evidence already compare sentences with the
+    unescaped text (D-042), the checker premise and citations use the stored text, and the viewer shows the
+    stored text.
+  - Live (trustbook-g3, expansion off and on, temperature 0, seed 42): docs-04 verified 6/6 on the first reply in
+    20.9–31.2 s (before: 2 of 4 regenerated, 74–83 s); ref-near-07 verified 4/4 in 12.9–35.9 s.
