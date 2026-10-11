@@ -902,3 +902,30 @@ under test. Choices under §15:
   mismatch on a job of the running image still fails the run.
 - **Sidecar:** `setup.refreshed` (count) and `setup.jobs[].earlier` are added. The sidecar stays version 2,
   because both fields are additive.
+
+### D-067 e2e: every source type's ingest job must agree with its source (item B)
+- `frontend/e2e/job-status.spec.ts` adds one source of each type and waits until **both** the source
+  (ready/failed) and its job from `GET /api/jobs` (via `source.job_id`) have finished. A source turns ready
+  a moment before its job closes, so polling only the source would miss a job that fails afterwards (the F1 bug).
+- **The invariant** (helper `expectSourceMatchesJob`): ready ⇔ job `done` with no error; failed ⇔ job `failed`
+  whose `error` equals the source's `failure_reason`. After each test every source left in the space is
+  checked the same way. The Queue page must list the job under "Recently finished" with the matching
+  badge (Done/Failed), the reason for a failure, and never under "In progress and waiting".
+- **Per type:** paste through the UI (Done), text-file upload through the UI (Done), PDF upload (the existing
+  OCR spec now also checks its job), folder (Done; needs `E2E_BROWSE_ROOT`), LAN URL (Failed, local-network
+  reason), web search with the mock provider (Failed, local-network reason: the search runs in the backend, but
+  the test rewrites the two specific results to literal private IPs `10.255.0.1` / `172.31.255.1` with
+  Playwright `page.route` before the page sees them, so adding them needs no DNS lookup and no connection).
+- **No network by default** (CLAUDE.md "no network calls in tests", SPEC §13 "no real endpoints in CI"): the
+  public web page (`https://example.com/`, Done) and YouTube ("Me at the zoo", Done **or** Failed with a reason,
+  since captions may be blocked; the outcome is a test annotation) need the real internet, so they run only with
+  `E2E_INTERNET=1`. `release.yml` does not set it, so the release gate never depends on outside sites; there is
+  no runner-side probe either. The whole suite passes against a mock container started with `--dns 127.0.0.2`
+  (no working resolver), which shows nothing else needs the network.
+- **Open for Ludwig:** item B asks for URL and YouTube job coverage; doing that offline in CI would need a seam
+  that lets the backend fetch a local fixture server, i.e. relaxing the SSRF address guard under the mock flag.
+  That was not done (security layer). Until he decides, run `E2E_INTERNET=1 pnpm e2e` by hand for those two.
+- **The bug class itself:** after a successful paste the header processing indicator returns to empty, the
+  Queue shows exactly one job for the space, Done, no Failed row and no unfinished list, and the API lists the
+  space's jobs as `["done"]`.
+- No app code or API changed; the Queue's existing `job-<id>` test ids and badges were enough.
