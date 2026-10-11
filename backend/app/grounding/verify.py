@@ -22,7 +22,11 @@ covers two kinds of sentence:
   word overlap cannot tell a negated or role-swapped claim from a true one (D-064).
 - **Confirmation:** a sentence the checker passed (with a score below :data:`CONFIRM_BELOW`, by
   default every one) fails if the judge's verdict contradicts it (a veto). HHEM passes role-swapped
-  false claims on technical prose at 0.58–0.98 (D-063).
+  false claims on technical prose at 0.58–0.98 (D-063). Anchors missing from the judge's evidence
+  lines veto only when they are in none of the cited chunks either (D-073).
+
+A failed sentence keeps why it failed (:meth:`SentenceCheck.failure`) and the names no cited chunk
+holds (``missing``), for diagnostics and the regeneration feedback (D-074, D-075).
 
 Any judge failure (not set up, endpoint error, unusable reply, timeout) leaves the checker's
 results in place.

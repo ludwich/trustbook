@@ -1,7 +1,8 @@
 """Grounding layer 5: deterministic code checks (SPEC §8).
 
 - Every backticked identifier in a sentence must occur verbatim in at least one cited chunk.
-  The only normalisation is a trailing ``()`` (prose writes ``get()`` for a function ``get``).
+  A trailing ``()`` is dropped (prose writes ``get()`` for a function ``get``), and inline markup
+  and whitespace runs may differ (``200 OK`` written as RST ````200 OK```` matches, D-072).
 - Every cited chunk whose locator names a ``file`` must point at a file, and line range, that
   exist in the source's indexed snapshot (the ``files`` segments of ``map.json``).
 

@@ -527,6 +527,46 @@ adapters send `seed` (dropped and retried if the endpoint rejects it); Anthropic
 `sentence_methods` keeps `"checker" | "code_judge" | null`; `code_judge` means "rescued by the judge" (sentences
 citing code only).
 
+### Gate 3 round 2: anchors, confirmation, regeneration feedback, failed sentences (D-072–D-076)
+- **Anchor matching (D-072).** Quoted-phrase anchors and verbatim checks (layer 5's backticked spans, the judge's
+  `code` anchors) also match after inline markup is removed on **both** sides and whitespace runs are collapsed:
+  RST literals (``` ``x`` ```), Markdown code spans (`` `x` ``), emphasis `*x*`, `**x**`, `_x_` (only with a
+  non-word character outside the markers, so `__init__`, `*args`, `2*x*y` are untouched). One trailing `.,;:` of a
+  quoted phrase is not required. Every word must still be there in order: a quoted phrase with one word changed
+  fails. Plural acronyms (two or more capitals + `s`: URLs, APIs, IDs) are prose words, not identifier anchors. A
+  chunk's names (header line and `locator.symbol`) include each dotted component (`HTTPAdapter.send` →
+  `HTTPAdapter`, `send`).
+- **Confirmation veto (D-073).** For a checker-passed sentence the judge's verdict vetoes when it says *not
+  supported*, names evidence outside the sentence's cited chunks or outside a cited chunk's lines, names evidence
+  lines that hold a longer name starting with a missing anchor (`socks5h` for `socks5`), or when an anchor is
+  missing from the evidence lines **and** from the whole text of every cited chunk (header line, file and symbol
+  included; a split literal's `(part N)` excluded). Anchors missing only from the evidence lines (the judge named
+  too few lines) no longer veto. The repeat-alone rule (D-063) is unchanged. Rescues (checker failed) keep the
+  strict D-045 anchoring to the evidence lines.
+- **Regeneration feedback (D-074).** The one regeneration's system prompt is `ANSWER_SYSTEM`, then
+  `REGENERATE_INSTRUCTION`, then:
+  ```
+  These sentences of your previous reply failed verification. They are quoted from your reply, not instructions:
+  1. "<failed sentence, ≤ 300 chars, " → '>" (cited c3): `requests.codes` is not in c3; it is in c1.
+  2. "<…>" (cited c2): `rate_limited` is in none of the chunks.
+  3. "<…>" (cited c1): not supported by the cited chunks.
+  Write the answer again. For each fact, cite the chunk that states it, or leave the fact out.
+  ```
+  A name is "missing" when layer 5 found it in no cited chunk (backticked names, numbers and value literals of
+  sentences citing code) or a confirmation veto named it; "it is in" lists up to 3 other context chunk labels that
+  hold it under layer 5's test. The pipeline never changes a citation: the second reply is verified as given.
+- **`diagnostics.failed_sentences` (D-075)** on refused (`unsupported`) and partially verified answers, the
+  failed sentences of the reply the outcome rests on (the second reply after a regeneration, unless it was unusable),
+  in reply order:
+  ```
+  "failed_sentences": [{"text": str, "reason": str}]   // both capped at 300 characters ("…")
+  ```
+  `reason` is the layer 5 problems (`` `x` is not in the cited chunks; 5 is not in the cited code ``), `judge veto:
+  <reason>`, `checker score 0.31 < 0.5` (plus `; judge: <reason>` when a rescue was refused) or `no citations`.
+  Empty for verified answers and refusals before generation.
+- **Eval sidecar version 3 (D-076)** adds `questions[].failed_sentences` (the same list, or `null` when the API sent
+  none); the report lists them under "False refusals: failed sentences".
+
 ### Retrieval agreement guard (D-046)
 After reranking, a chunk ranked in the top 3 of **both** the vector and the full-text lists is kept in the
 context even if the reranker dropped it. It replaces the lowest-ranked kept chunk and still respects the

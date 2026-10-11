@@ -10,12 +10,15 @@
 4. Layers 4 and 5 (:mod:`app.grounding.verify`): every sentence is checked against its cited
    chunks. When the refusal rule would fire (more than half failing, or the first sentence
    failing), one regeneration with the same chunks plus
-   :data:`~app.chat.prompt.REGENERATE_INSTRUCTION` is checked again (D-063). Then the refusal
+   :data:`~app.chat.prompt.REGENERATE_INSTRUCTION` and the list of the first reply's failed
+   sentences with their reasons (:func:`failed_sentences`, D-074) is checked again (D-063); its
+   citations are verified as given. Then the refusal
    rule: more than half failing, or the first sentence failing → refuse (``unsupported``).
    Otherwise the failing sentences are removed (``partially_verified``) or none fail
    (``verified``). With the grounding checker off, layer 4 is skipped and the badge is
    ``unverified``. The judge rescues sentences about code the checker failed and confirms checker
-   passes (D-045, D-063, D-064); ``diagnostics.sentence_methods`` records which passed them.
+   passes (D-045, D-063, D-064); ``diagnostics.sentence_methods`` records which passed them and
+   ``diagnostics.failed_sentences`` the failed sentences and why (D-075).
 5. Citations of passing sentences are chosen (:mod:`app.chat.citation_choice`, D-052 and its
    extension): supporting chunks only, near-copies collapsed, the defining chunk preferred.
 
