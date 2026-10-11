@@ -975,8 +975,12 @@ under test. Choices under §15:
     requirements-dev.txt).
   - The chunk holding HISTORY.md line 188 is `File: HISTORY.md · Release History › 2.32.0 (2024-05-20) (lines
     159-199)`, locator heading `2.32.0 (2024-05-20)`.
-- **Known limit:** a heading ending in "(part N)" right before `(lines a-b)` reads as a split literal's part number
-  (D-058): its N is then not searched by layer 5 or full-text search (stricter, never looser).
+- **Known limits:**
+  - A heading ending in "(part N)" right before `(lines a-b)` reads as a split literal's part number (D-058): its
+    N is then not searched by layer 5 or full-text search (stricter, never looser).
+  - A single `.md`/`.rst`/`.txt` file **uploaded** (not in a linked folder) still gets Markdown `#` sections only
+    (`sections_from_markdown`), so its setext/reStructuredText headings name no section. Changing that also moves
+    web page sections and chunk boundaries, which needs its own measurement; left as a follow-up.
 
 ### D-069 The section of a document chunk is context for the judge and its anchors
 - **Why:** the judge names the fewest lines (HISTORY.md 188), which never repeat their release heading, so
