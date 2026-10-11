@@ -331,6 +331,91 @@ def test_jobs_api_failure_and_old_jobs(tmp_path: Path) -> None:
     assert "| requests | ready | not listed | ready | ok (older job, no longer listed) |" in text
 
 
+def _space_indexed_by_f1_image(api: FakeApi) -> str:
+    """Both corpus sources already ready, each with the failed job the phase-3-rc image left."""
+    sid = api.add_space("Smoke")
+    for kind, origin, title in [
+        ("folder", "trustbook-eval/requests", "requests"),
+        ("url", QS_URL, "Quickstart"),
+    ]:
+        api.add_source(sid, kind, origin, title)
+        api._new_job(api.sources[sid][-1], status="failed")
+    return sid
+
+
+def test_earlier_failed_jobs_are_noted_not_failed(tmp_path: Path) -> None:
+    # Re-running the gate on a space indexed by an older image: the jobs ended before this run.
+    api = good_api()
+    _space_indexed_by_f1_image(api)
+    code, text, log, sidecar = run(api, tmp_path)
+    assert code == 0, text
+    assert (
+        "| Ingest jobs ended as expected (setup) | 2/2 (2 ended before this run, not re-checked) "
+        "| all | pass |"
+    ) in text
+    assert "ok (job/source mismatch from an earlier ingest (job failed: No active" in text
+    assert "`--refresh` re-ingests every corpus source" in text
+    assert "job for requests: failed, source ready (job/source mismatch from an earlier" in log
+    jobs = json.loads(sidecar.read_text())["setup"]["jobs"]
+    assert [(j["earlier"], j["ok"]) for j in jobs] == [(True, True), (True, True)]
+
+
+def test_earlier_job_still_fails_when_the_source_is_not_as_expected() -> None:
+    src = SourceInfo("s1", "Doc", "https://x.org/", "url", "failed", "blocked", job_id="j1")
+    info = JobInfo("j1", "ingest", "failed", error="blocked")
+    check = runner.check_job(src, info, "ready", added=False, earlier=True)
+    assert check.earlier and check.problem == "source failed: blocked"
+    ready = SourceInfo("s1", "Doc", "https://x.org/", "url", "ready", job_id="j1")
+    done = JobInfo("j1", "ingest", "done")
+    check = runner.check_job(ready, done, "failed", added=False, earlier=True)
+    assert check.problem == "expected to fail, but the source is ready"
+    assert runner.check_job(ready, done, "ready", added=False, earlier=True).note == (
+        "earlier job (job done), ended before this run: not re-checked, --refresh re-ingests "
+        "and checks it"
+    )
+    # A job this run started is never "earlier".
+    failed = JobInfo("j1", "ingest", "failed", error="boom")
+    check = runner.check_job(ready, failed, "ready", added=True, earlier=True)
+    assert not check.earlier
+    assert check.problem == "job/source mismatch: source ready, job failed: boom"
+
+
+def test_refresh_reingests_present_sources_and_checks_their_new_jobs(tmp_path: Path) -> None:
+    api = good_api()
+    sid = _space_indexed_by_f1_image(api)
+    code, text, log, sidecar = run(api, tmp_path, "--refresh")
+    assert code == 0, text
+    assert "| Ingest jobs ended as expected (setup) | 2/2 | all | pass |" in text
+    assert "refreshed folder trustbook-eval/requests" in log
+    assert "setup: 0 added, 2 refreshed, 0 already present" in text
+    assert [s["job_id"] for s in api.sources[sid]] == ["job3", "job4"]
+    data = json.loads(sidecar.read_text())["setup"]
+    assert data["refreshed"] == 2 and not any(j["earlier"] for j in data["jobs"])
+
+    # The image under test still fails the job: now it is a current mismatch, and the run fails.
+    api = good_api()
+    _space_indexed_by_f1_image(api)
+    api.job_outcome[QS_URL] = "failed"
+    code, text, _, _ = run(api, tmp_path, "--refresh")
+    assert code == 1
+    assert "**job/source mismatch: source ready, job failed: No active exception" in text
+
+
+def test_refresh_that_is_refused_fails_the_run(tmp_path: Path) -> None:
+    api = good_api()
+    _space_indexed_by_f1_image(api)
+    api.refresh_refused.add(QS_URL)
+    code, text, log, _ = run(api, tmp_path, "--refresh")
+    assert code == 1, text
+    assert "could not refresh url" in log
+    assert "**refresh failed: " in text
+
+
+def test_refresh_needs_setup(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        run(good_api(), tmp_path, "--refresh", setup=False)
+
+
 def test_load_corpus_rejects_bad_expect(tmp_path: Path) -> None:
     path = corpus_file(tmp_path, "  - url: https://x.org/\n    expect: maybe\n")
     with pytest.raises(runner.EvalError, match="expect"):

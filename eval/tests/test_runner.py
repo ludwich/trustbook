@@ -87,6 +87,7 @@ class FakeApi:
         self.jobs: list[dict[str, Any]] = []
         self.job_outcome: dict[str, str] = {}
         self.jobs_status = 200
+        self.refresh_refused: set[str] = set()
         self.message_bodies: list[dict[str, Any]] = []
         self.chat_config: dict[str, Any] = {
             "enabled": True,
@@ -157,13 +158,17 @@ class FakeApi:
                 origin = body.get("path") or body.get("url")
                 title = origin.rstrip("/").rsplit("/", 1)[-1]
                 src_id = self.add_source(sid, rest[1], origin, title, status="queued")
-                job_id = f"job{len(self.jobs) + 1}"
-                self.sources[sid][-1]["job_id"] = job_id
-                self.jobs.append(
-                    {"id": job_id, "kind": "ingest", "status": "queued", "error": None}
-                    | {"_source": src_id, "_origin": origin}
-                )
+                self._new_job(self.sources[sid][-1])
                 return httpx.Response(201, json=self.sources[sid][-1] | {"id": src_id})
+            if len(rest) == 3 and rest[::2] == ["sources", "refresh"] and method == "POST":
+                src = next((x for x in self.sources[sid] if x["id"] == rest[1]), None)
+                if src is None:
+                    return httpx.Response(404, json={"detail": "Source not found"})
+                if src["origin"] in self.refresh_refused:
+                    return httpx.Response(409, json={"detail": "can't be refreshed"})
+                src["status"], src["failure_reason"] = "queued", None
+                self._new_job(src)
+                return httpx.Response(200, json=src)
             if rest == ["conversations"] and method == "POST":
                 self.conversations += 1
                 return httpx.Response(201, json={"id": f"c{self.conversations}", "title": "t"})
@@ -176,6 +181,16 @@ class FakeApi:
                     200, content=reply.encode(), headers={"content-type": "text/event-stream"}
                 )
         return httpx.Response(404, json={"detail": "Not Found"})
+
+    def _new_job(self, src: dict[str, Any], status: str = "queued") -> str:
+        job_id = f"job{len(self.jobs) + 1}"
+        src["job_id"] = job_id
+        error = "No active exception to reraise" if status == "failed" else None
+        self.jobs.append(
+            {"id": job_id, "kind": "ingest", "status": status, "error": error}
+            | {"_source": src["id"], "_origin": src["origin"]}
+        )
+        return job_id
 
     def _advance(self, sid: str) -> None:
         flow = {"queued": "reading", "reading": "indexing", "indexing": "ready"}

@@ -20,7 +20,9 @@ question set never ends up in the repository unless the report path is inside it
 
 Exit codes: 0 = report written; 1 = a ``--min-*`` / ``--max-*`` target was not met, or (with
 ``--setup``) an ingest job did not end as expected; 2 = the API is unreachable or the input
-(questions, corpus, space, code root, chat override) is invalid; 130 = interrupted.
+(questions, corpus, space, code root, chat override) is invalid; 130 = interrupted. A job that
+ended before the run is noted, not judged; ``--refresh`` re-ingests the sources already in the
+space so that their jobs run on, and are checked against, the running image.
 
 Generation: every question is sent with ``"generation": {"temperature": 0, "seed": 42}`` so runs
 are comparable (``--temperature``, ``--seed``); ``--app-default`` sends nothing (a real-use run with
@@ -864,6 +866,7 @@ def sidecar(
         if setup is None
         else {
             "jobs_ok": not setup.job_problems,
+            "refreshed": len(setup.refreshed),
             "jobs": [
                 {
                     "source_id": j.source_id,
@@ -872,6 +875,7 @@ def sidecar(
                     "job_status": j.job_status,
                     "expect": j.expect,
                     "ok": j.ok,
+                    "earlier": j.earlier,
                 }
                 for j in setup.jobs
             ],
@@ -1014,6 +1018,17 @@ class Api:
         )
         if not isinstance(data, dict):
             raise EvalError(f"add {kind} source: unexpected response")
+        return SourceInfo.from_api(data)
+
+    def refresh_source(self, space_id: str, source_id: str) -> SourceInfo:
+        """Re-ingest a source (a new ingest job with the running image's pipeline)."""
+        data = self._request(
+            "POST",
+            f"/api/spaces/{space_id}/sources/{source_id}/refresh",
+            f"refresh source {source_id}",
+        )
+        if not isinstance(data, dict):
+            raise EvalError(f"refresh source {source_id}: unexpected response")
         return SourceInfo.from_api(data)
 
     def jobs(self) -> dict[str, JobInfo]:
@@ -1321,6 +1336,8 @@ class JobCheck:
     ``problem`` is set when the job did not end as expected: ``done`` for a ready source, ``failed``
     for a source the corpus expects to fail. A ready source whose job failed (or the reverse) is a
     job/source mismatch. ``note`` explains a job that could not be checked but is not an error.
+    ``earlier``: the job had already ended before this run started, so it may have run on another
+    image; only the source's current status is judged (``--refresh`` re-ingests and checks it).
     """
 
     source_id: str
@@ -1331,6 +1348,7 @@ class JobCheck:
     expect: str = "ready"
     problem: str | None = None
     note: str | None = None
+    earlier: bool = False
 
     @property
     def ok(self) -> bool:
@@ -1338,10 +1356,17 @@ class JobCheck:
 
 
 def check_job(
-    source: SourceInfo, job: JobInfo | None, expect: str, *, added: bool, listed: bool = True
+    source: SourceInfo,
+    job: JobInfo | None,
+    expect: str,
+    *,
+    added: bool,
+    listed: bool = True,
+    earlier: bool = False,
 ) -> JobCheck:
-    """Judge one source's ingest job. ``added``: this run added the source (so its job must be
-    listed); ``listed``: ``GET /api/jobs`` answered at all."""
+    """Judge one source's ingest job. ``added``: this run started the job (it added or refreshed
+    the source), so the job must be listed; ``listed``: ``GET /api/jobs`` answered at all;
+    ``earlier``: the job had already ended when this run started (see :class:`JobCheck`)."""
     base = JobCheck(
         source_id=source.id,
         label=source.title or str(source.origin),
@@ -1349,6 +1374,7 @@ def check_job(
         job_id=source.job_id,
         job_status=job.status if job else None,
         expect=expect,
+        earlier=earlier and job is not None and not added,
     )
     if not listed:
         return replace(base, problem="job statuses unavailable (GET /api/jobs failed)")
@@ -1359,6 +1385,8 @@ def check_job(
             return replace(base, problem="ingest job not listed in GET /api/jobs")
         return replace(base, note="older job, no longer listed")
     reason = f": {job.error}" if job.error else ""
+    if base.earlier:
+        return _check_earlier(base, source, job, reason)
     if job.status not in JOB_DONE:
         return replace(base, problem=f"job still {job.status}")
     if job.status == "cancelled":
@@ -1377,11 +1405,32 @@ def check_job(
     return base
 
 
+def _check_earlier(base: JobCheck, source: SourceInfo, job: JobInfo, reason: str) -> JobCheck:
+    """A job that ended before this run: it says nothing about the image under test (Gate 3 F1
+    failed every job of the phase-3-rc image while each source was indexed correctly), so it is
+    noted, and only the source's current status, which this run's answers depend on, is judged."""
+    if base.expect == "ready" and source.status != "ready":
+        why = source.failure_reason or job.error
+        return replace(base, problem=f"source {source.status}" + (f": {why}" if why else ""))
+    if base.expect == "failed" and source.status == "ready":
+        return replace(base, problem="expected to fail, but the source is ready")
+    mismatch = (source.status == "ready" and job.status == "failed") or (
+        source.status == "failed" and job.status == "done"
+    )
+    what = "job/source mismatch from an earlier ingest" if mismatch else "earlier job"
+    return replace(
+        base,
+        note=f"{what} (job {job.status}{reason}), ended before this run: not re-checked, "
+        "--refresh re-ingests and checks it",
+    )
+
+
 @dataclass
 class SetupReport:
     space_created: bool = False
     added: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    refreshed: list[str] = field(default_factory=list)
     add_failed: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     not_ready: list[str] = field(default_factory=list)
@@ -1396,6 +1445,11 @@ class SetupReport:
     @property
     def jobs_ratio(self) -> Ratio:
         return Ratio(sum(j.ok for j in self.jobs), len(self.jobs))
+
+    @property
+    def earlier_jobs(self) -> int:
+        """Jobs that ended before this run and were therefore not re-checked."""
+        return sum(j.earlier for j in self.jobs)
 
 
 def _progress_line(elapsed: float, tracked: Sequence[SourceInfo]) -> str:
@@ -1417,6 +1471,7 @@ def setup_corpus(
     corpus: Corpus,
     *,
     timeout_s: float,
+    refresh: bool = False,
     poll_s: float = 5.0,
     log: TextIO = sys.stderr,
     sleep: Callable[[float], None] = time.sleep,
@@ -1425,7 +1480,10 @@ def setup_corpus(
     """Create the space if missing, add missing sources, wait until all are ready or failed,
     then wait for their ingest jobs and check each job's status against its source (D-055).
 
-    Idempotent: a corpus entry whose origin already exists in the space is skipped.
+    Idempotent: a corpus entry whose origin already exists in the space is skipped, or with
+    ``refresh`` re-ingested, so that its job runs (and is checked) on the image under test. The
+    job of a skipped source that had already ended when the run started is an earlier job: it
+    is noted, not judged (see :func:`check_job`).
     """
     report = SetupReport()
     space = find_space(api.spaces(), space_key)
@@ -1434,13 +1492,31 @@ def setup_corpus(
         report.space_created = True
         print(f"created space {space.get('name')} ({space['id']})", file=log)
     sid = str(space["id"])
+    ended_before = _ended_jobs(api)
     existing = api.sources(sid)
     tracked: dict[str, CorpusEntry] = {}
-    added_ids: set[str] = set()
+    added_ids: set[str] = set()  # sources whose current job this run started
+    earlier: dict[str, str] = {}  # source id -> its job id, for jobs that ended before the run
+    refresh_failed: dict[str, str] = {}
     for entry in corpus.entries:
         match = next((s for s in existing if entry_present(entry, s)), None)
         if match is not None:
             tracked[match.id] = entry
+            if refresh:
+                try:
+                    api.refresh_source(sid, match.id)
+                except ApiUnreachableError:
+                    raise
+                except EvalError as exc:
+                    refresh_failed[match.id] = str(exc)
+                    print(f"could not refresh {entry.kind} {entry.value}: {exc}", file=log)
+                else:
+                    added_ids.add(match.id)
+                    report.refreshed.append(entry.value)
+                    print(f"refreshed {entry.kind} {entry.value}", file=log)
+                    continue
+            if match.job_id is not None and match.job_id in ended_before:
+                earlier[match.id] = match.job_id
             report.skipped.append(f"{entry.value} (already present: {match.status})")
             print(f"skip {entry.kind} {entry.value}: already present ({match.status})", file=log)
             continue
@@ -1489,14 +1565,33 @@ def setup_corpus(
         current,
         {source_id: e.expect for source_id, e in tracked.items()},
         added_ids,
+        earlier=earlier,
         deadline=start + timeout_s,
         poll_s=poll_s,
         log=log,
         sleep=sleep,
         clock=clock,
     )
+    report.jobs = [
+        replace(j, problem=f"refresh failed: {refresh_failed[j.source_id]}", note=None)
+        if j.source_id in refresh_failed
+        else j
+        for j in report.jobs
+    ]
     report.seconds = clock() - start
     return space, report
+
+
+def _ended_jobs(api: Api) -> set[str]:
+    """Ids of the jobs that had already ended when the run started (empty if unknown: then no
+    job counts as earlier, and a failing ``GET /api/jobs`` is reported by the job checks)."""
+    try:
+        jobs = api.jobs()
+    except ApiUnreachableError:
+        raise
+    except EvalError:
+        return set()
+    return {j.id for j in jobs.values() if j.status in JOB_DONE}
 
 
 def wait_for_jobs(
@@ -1505,6 +1600,7 @@ def wait_for_jobs(
     expect: dict[str, str],
     added: set[str],
     *,
+    earlier: dict[str, str] | None = None,
     deadline: float,
     poll_s: float,
     log: TextIO,
@@ -1542,6 +1638,7 @@ def wait_for_jobs(
             expect.get(s.id, "ready"),
             added=s.id in added,
             listed=listed,
+            earlier=earlier is not None and s.job_id is not None and earlier.get(s.id) == s.job_id,
         )
         for s in sources
     ]
@@ -1975,9 +2072,11 @@ def render_report(
     if setup is not None:
         jobs = setup.jobs_ratio
         j_res = "pass" if not setup.job_problems else "**FAIL**"
-        out.append(
-            f"| Ingest jobs ended as expected (setup) | {jobs.num}/{jobs.den} | all | {j_res} |"
+        n_earlier = setup.earlier_jobs
+        j_val = f"{jobs.num}/{jobs.den}" + (
+            f" ({n_earlier} ended before this run, not re-checked)" if n_earlier else ""
         )
+        out.append(f"| Ingest jobs ended as expected (setup) | {j_val} | all | {j_res} |")
     out.append("")
     out.append(
         "| ID | Type | Category | Outcome | Citations correct/total "
@@ -2085,8 +2184,15 @@ def render_report(
             notes.append("failed sources: " + "; ".join(setup.failed))
         if setup.add_failed:
             notes.append("sources that could not be added: " + "; ".join(setup.add_failed))
+        if setup.earlier_jobs:
+            notes.append(
+                f"{setup.earlier_jobs} ingest jobs ended before this run (possibly on another "
+                "image) and were not re-checked; `--refresh` re-ingests every corpus source and "
+                "checks its job"
+            )
+        refreshed = f"{len(setup.refreshed)} refreshed, " if setup.refreshed else ""
         notes.append(
-            f"setup: {len(setup.added)} added, {len(setup.skipped)} already present, "
+            f"setup: {len(setup.added)} added, {refreshed}{len(setup.skipped)} already present, "
             f"waited {setup.seconds:.0f} s"
         )
     if notes:
@@ -2350,6 +2456,12 @@ def build_parser() -> argparse.ArgumentParser:
         "with .json",
     )
     p.add_argument("--setup", help="corpus YAML to ingest into the space before asking")
+    p.add_argument(
+        "--refresh",
+        action="store_true",
+        help="with --setup: also re-ingest every corpus source already in the space, so that "
+        "all are indexed and their jobs checked on the running image",
+    )
     p.add_argument("--setup-timeout", type=float, default=3600.0, help="seconds (default 3600)")
     p.add_argument("--poll-interval", type=float, default=5.0, help=argparse.SUPPRESS)
     p.add_argument("--timeout", type=float, default=300.0, help="seconds per answer (default 300)")
@@ -2462,6 +2574,8 @@ def main(
         parser.error("--space and --questions are required (unless --compare)")
     if args.min_ranges_valid is not None and not args.code_root:
         parser.error("--min-ranges-valid needs --code-root")
+    if args.refresh and not args.setup:
+        parser.error("--refresh needs --setup")
     if args.app_default and (args.temperature is not None or args.seed is not None):
         parser.error("--app-default sends no override; drop --temperature/--seed")
     generation = generation_override(args)
@@ -2505,6 +2619,7 @@ def main(
                     args.space,
                     corpus,
                     timeout_s=args.setup_timeout,
+                    refresh=args.refresh,
                     poll_s=args.poll_interval,
                     log=log,
                     sleep=sleep,
