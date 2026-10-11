@@ -95,6 +95,7 @@ counts once.
 | **Answer latency p50 / p95** (target with `--max-p95 SECONDS`) | Time from sending the message request to the first `done` or `refused` event, over `answered` and `refused` questions. Percentiles use linear interpolation between closest ranks (NumPy's default). A p95 above 60 s is flagged "**above 60 s**" in the report even without `--max-p95`. |
 | **Cited ranges valid** (with `--code-root PATH`; target with `--min-ranges-valid`) | Over every citation (deduplicated per answer, all answered questions) whose locator has a `file`: the file exists under `PATH` (a checkout of the corpus at the indexed commit; paths that leave `PATH` count as missing) and, when the citation has line numbers, `1 <= start_line <= end_line <=` the file's line count. Invalid ones are listed under "Cited ranges" with the reason. Gate 3 wants 100%. |
 | **must_contain hit rate** (target with `--min-must-contain`) | Answerable questions with `must_contain` whose answer text contains **all** keywords / answerable questions with `must_contain`. Refused or failed answers count as misses. Per question shown as `found/total`. Catches answers that cite the right passage but stop short of the value asked for (e.g. a constant's name instead of its value). |
+| **Ingest jobs ended as expected** (with `--setup`; always a target) | Corpus sources whose ingest job ended as expected / corpus sources. See "Corpus file". Exit 1 when any did not. |
 | **Expected sources cited** (informational) | Per answerable question: distinct expected sources (as resolved in the space) that were cited / expected sources found in the space. Shows whether a multi-source answer used both sources. |
 
 `--min-precision`, `--min-refusal`, `--min-must-contain` and `--min-ranges-valid` (fractions, `0.9` or
@@ -111,12 +112,86 @@ space_description: "optional, used when the space is created"
 sources:
   - folder: trustbook-eval/requests      # path relative to the browse root
   - url: https://requests.readthedocs.io/en/stable/user/quickstart/
+  - url: https://example.org/blocked-page
+    expect: failed                       # optional: ready (default) | failed
 ```
 
 The runner creates the space (named by `--space`) if missing, adds each source unless one with the
 same origin already exists (URL or path match as above), then polls `GET /api/spaces/{sid}/sources`
 until every corpus source is `ready` or `failed`, printing progress. After `--setup-timeout`
 (default 3600 s) it continues anyway and notes the unfinished sources in the report.
+
+**Ingest jobs (D-055).** A source's status alone is not enough: a source can look `ready` while its
+ingest job fails in a later step (Gate 3 F1 failed every job that way). So the runner then polls
+`GET /api/jobs` until the job of every finished source (`Source.job_id`) has ended (same timeout), and
+checks each one:
+
+| Source | Job | `expect: ready` (default) | `expect: failed` |
+|---|---|---|---|
+| `ready` | `done` | ok | **expected to fail** |
+| `failed` | `failed` | **source and job failed** | ok |
+| `ready` | `failed` | **job/source mismatch** | **job/source mismatch** |
+| `failed` | `done` | **job/source mismatch** | **job/source mismatch** |
+| any | `queued`/`running`/`paused` at the timeout | **job still …** | **job still …** |
+| any | `cancelled` | **job cancelled** | **job cancelled** |
+
+A source this run added must have its job listed; a source that was already in the space may have an
+older job that `GET /api/jobs` no longer lists (it keeps the last 50 finished), which is noted, not
+an error. If `GET /api/jobs` fails, every check fails. The report shows the metric "Ingest jobs ended
+as expected" and an "Ingest jobs" table (source, source status, job status, expected, check); any
+problem makes the run exit 1, whatever the other targets.
+
+## Generation settings (D-055)
+
+Every question is sent with a per-request override in the message body,
+`{"content": …, "generation": {"temperature": 0, "seed": 42}}`, so that runs and models can be
+compared. The app's own default (SPEC: temperature 0.2, no seed) is not changed by this and applies
+to everything else.
+
+| Flag | Sends |
+|---|---|
+| (none) | `{"temperature": 0, "seed": 42}` |
+| `--temperature T` (0–2), `--seed N` | the given values (the other one keeps its default) |
+| `--app-default` | no `generation` at all: a **real-use** run with the app's settings |
+
+The report header says which one was used ("Generation: …"; "**real-use run**" for `--app-default`)
+and, when answers carry `diagnostics.generation`, what the app reports it used ("Generation reported
+by the app: temperature 0, seed 42 (45/45 answers)"). A seed does not make every endpoint
+deterministic: llama-server with several parallel slots or speculative decoding, and most hosted APIs,
+can still return different answers for the same request, which the header also states. An API that
+rejects the override (HTTP 422 naming `generation`: an image before the override existed) stops the
+run with exit 2 and a hint to use `--app-default`.
+
+## Chat model for the run (`--chat-endpoint`, `--chat-model`)
+
+`--chat-endpoint URL` (an OpenAI-compatible base URL, such as a llama-server) and/or
+`--chat-model NAME` switch Trustbook's chat capability for the run:
+
+1. `GET /api/capabilities/chat` saves the current preset, base URL, model and API version.
+2. `PUT /api/capabilities/chat` with `{"preset": "custom", "base_url": URL}` (endpoint) and/or
+   `{"model": NAME}`, then `POST /api/capabilities/chat/test`; a failing test stops the run (exit 2).
+3. The questions are asked. The header names the model and endpoint host read back from
+   `GET /api/capabilities/chat` ("Chat model: `NAME` at `host:port` (preset custom; set for this
+   run …)"); without an override it names the saved ones.
+4. The saved preset, base URL, model and API version are `PUT` back, also after an error, Ctrl-C or
+   `kill` (SIGTERM). If that fails, the runner prints the values to restore in Settings.
+
+API keys are never read (the API only says whether one is set), sent or printed. Trustbook deletes a
+saved chat API key when the chat server (scheme, host, port) changes, so that it never reaches another
+host. The runner could not put such a key back, so when a key is saved, an endpoint on another server
+is refused (exit 2, nothing changed); a model change on the same server is fine. The gate capability
+follows the chat model when it is set to "use the chat model".
+
+## Comparing two runs (`--compare A.json B.json`)
+
+Prints a Markdown table of the questions whose outcome differs between two sidecars (`answered 2/3`
+= correct/total citations, plus `must_contain found/total`; `refused (reason)`; `error`), with each
+run's date, chat model, generation settings and citation precision. For each difference it says
+whether retrieval was the **same** (equal `retrieval_fingerprint`, or, for sidecars without one, an
+equal top rerank score, shown as "same top score") or **different**. Same retrieval means the model or
+its sampling made the difference; different retrieval points at the pipeline or the index. It also
+lists every question whose retrieval differs, and the ids found in only one run. Exits 0, or 2 for a
+file that is not a sidecar. Version 1 sidecars work, with less to compare.
 
 ## Scores sidecar (`--report out.md` → `out.json`)
 
@@ -125,13 +200,21 @@ another name gets `.json` appended). It holds **ids and numbers only**, never qu
 text, and nothing is written anywhere else, so a private set stays wherever you keep it.
 
 ```json
-{"version": 1, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
+{"version": 2, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
  "thresholds": {"refuse": 0.15, "verify": 0.5},          // GET /api/settings; null if unavailable
+ "generation_requested": {"temperature": 0, "seed": 42}, // null with --app-default
+ "chat": {"model": "Qwen3.6-35B-A3B", "endpoint_host": "192.168.1.5:8080", "preset": "llama_server",
+          "overridden": false},                           // null if the API did not say
+ "setup": {"jobs_ok": true,                               // null without --setup
+           "jobs": [{"source_id": "…", "job_id": "…", "source_status": "ready",
+                     "job_status": "done", "expect": "ready", "ok": true}]},
  "questions": [{"id": "code-01", "type": "answerable", "category": "code",
                 "outcome": "answered", "refusal_reason": null, "badge": "partially_verified",
                 "top_rerank": 0.83, "sentence_scores": [0.97, 0.12],
                 "sentence_methods": ["checker", null], "regenerated": false,
-                "removed_sentences": 1, "citations": 2, "citations_correct": 2, "latency_s": 4.1}],
+                "removed_sentences": 1, "citations": 2, "citations_correct": 2,
+                "must_contain_found": 1, "must_contain_total": 1, "latency_s": 4.1,
+                "retrieval_fingerprint": "…", "generation": {"temperature": 0, "seed": 42}}],
  "false_refusals": {"docs": {"num": 0, "den": 5, "value": 0.0}, "code": {…}, "multi": {…}, "other": {…}},
  "false_refusals_code": {"num": 1, "den": 17, "value": 0.06},
  "cited_ranges": {"num": 48, "den": 48, "value": 1.0},     // only with --code-root
@@ -139,14 +222,17 @@ text, and nothing is written anywhere else, so a private set stays wherever you 
             "answered": {…}, "precision_proxy": {…}}]}
 ```
 
-`top_rerank`, `sentence_scores`, `sentence_methods` and `regenerated` come from the answer's
+`top_rerank`, `sentence_scores`, `sentence_methods`, `regenerated`, `retrieval_fingerprint` (which
+chunks the answer was generated from; a list or object is stored as sorted JSON text) and
+`generation` (the settings the app used for that answer) come from the answer's
 `diagnostics` (docs/ARCHITECTURE.md, "Grounding layers 4–5" and "Code claim verification").
 `sentence_scores` follows the model's cited sentences, removed ones included: the grounding
 checker's best score over the cited chunks, `0.0` when a deterministic code check failed (it fails
 at any threshold), `null` when the checker is off. `sentence_methods` (same order) says what passed
 each sentence: `checker`, `code_judge` (it failed the checker and passed the code judge; its score
 is still the checker's) or `null` (failed, or checker off). They are `null` for answers from an
-API without them.
+API without them. Version 1 sidecars (before Gate 3's rework) lack `generation_requested`, `chat`,
+`setup`, `must_contain_*`, `retrieval_fingerprint` and `generation`.
 
 ## Threshold sweep
 

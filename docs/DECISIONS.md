@@ -570,3 +570,30 @@ grounding correctness > data safety > simplicity > performance > features.
   tied to `CHUNKER_VERSION` and the embedding model revision so it cannot be forgotten (the Phase 3 chunker left
   the Phase 2 "Indexing code" rate in place).
 - **Scope:** Phase 3b (agent CLI + Claude Code skill) is queued after Gate 3 passes, not mixed into the fixes.
+
+### D-056 Eval runner: generation override, chat model switch, job checks, run comparison
+SPEC §13 and D-055 do not say how the runner does these things. Choices made under §15:
+- **Generation:** the default is `{"temperature": 0, "seed": 42}`. `--temperature` and `--seed` change it, and
+  `--app-default` sends nothing (the "real-use" run). The header states the settings and that a seed is not
+  honoured by every endpoint: the variance diagnosis measured 2–3 different answers in 3 identical calls on
+  llama-server (`--parallel 2`, speculative decoding) even at temperature 0 with a seed. An API that rejects the
+  field stops the run (exit 2) rather than silently running at the app default, because a report must never
+  claim settings it did not use.
+- **Chat switch:** an endpoint is saved as the `custom` preset, which covers every OpenAI-compatible server.
+  The endpoint is tested once before the run, so a typo fails in seconds rather than after 45 refusals. The
+  original preset, base URL, model and API version are restored in a `finally` (Ctrl-C and SIGTERM included),
+  then read back and compared. Keys: the backend deletes a saved key when the chat origin changes, so that it
+  never leaks to another host. The runner never sees keys, so it could not restore one. An override to
+  another origin while a key is saved is therefore refused before anything changes. The header names the
+  model and `host:port` read back from the API after the switch, not the flag values.
+- **Job checks:** the runner waits for each finished source's ingest job and compares the two statuses, as
+  set out in `eval/format.md`. Any problem fails the run (exit 1), like a missed target, because the F1 bug
+  was invisible in source status. An entry can declare `expect: failed`. Old jobs no longer listed (only the
+  last 50 finished are kept) are noted, not failed, but only for sources this run did not add.
+- **Comparison:** `--compare A.json B.json` lists only questions whose outcome cell differs. Retrieval is "same"
+  by `retrieval_fingerprint`. For sidecars without one, an equal top rerank score is used instead and labelled
+  "same top score", which is weaker evidence. Repeated runs (`--repeat`) were not added: three separate runs
+  plus `--compare` cover F4 and keep the runner simple.
+- **Sidecar version 2** adds `generation_requested`, `chat`, `setup.jobs`, and per question
+  `retrieval_fingerprint`, `generation` and `must_contain_found/total`. It holds no question or answer text
+  (D-039's rule).
