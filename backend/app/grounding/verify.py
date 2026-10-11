@@ -17,9 +17,9 @@ covers two kinds of sentence:
 
 - **Rescue:** a sentence that fails the checker (and passes layer 5), whatever it cites, passes if
   the judge accepts it.
-- **Confirmation:** a sentence the checker passed with a score below :data:`CONFIRM_BELOW` fails if
-  the judge's verdict contradicts it (a veto). HHEM passes role-swapped false claims on technical
-  prose at 0.58–0.96 (D-056).
+- **Confirmation:** a sentence the checker passed (with a score below :data:`CONFIRM_BELOW`, by
+  default every one) fails if the judge's verdict contradicts it (a veto). HHEM passes role-swapped
+  false claims on technical prose at 0.58–0.98 (D-056).
 
 Any judge failure (not set up, endpoint error, unusable reply, timeout) leaves the checker's
 results in place.
@@ -57,9 +57,10 @@ JudgeCode = Callable[[Sequence[JudgeItem]], list[JudgeOutcome] | None]
 Method = Literal["checker", "code_judge"]
 
 MAX_FAILED_SHARE = 0.5  # refuse (or regenerate) when more than half of the sentences fail
-# Checker passes below this score are confirmed by the judge (D-056). HHEM passed false claims at
-# up to 0.958, so the bound is above every measured false pass; see DECISIONS.md for the data.
-CONFIRM_BELOW = 1.0
+# Checker passes below this score are confirmed by the judge (D-056). Measured on live data, HHEM
+# passed false claims at 0.58-0.98 and true ones at 0.56-0.99: no band separates them, so every
+# checker pass is confirmed. A finite bound is for tests and tuning only.
+CONFIRM_BELOW = math.inf
 
 
 @dataclass(frozen=True)

@@ -188,7 +188,19 @@ def test_generation_override_reaches_the_answer_and_judge_calls(
     guide(env)
     chat = ScriptedChat(
         answer_json((QUOTE, ["c1"]), ("Proxies also need a licence key.", ["c1"])),
-        NOT_SUPPORTED,
+        # One judge call: statement 1 confirms the checker pass, statement 2 is the rescue.
+        json.dumps(
+            {
+                "verdicts": [
+                    {
+                        "index": 1,
+                        "supported": True,
+                        "evidence": [{"chunk": "c1", "start_line": 1, "end_line": 1}],
+                    },
+                    {"index": 2, "supported": False, "evidence": []},
+                ]
+            }
+        ),
     )
     monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
     cid = env.conversation()
@@ -205,6 +217,9 @@ def test_generation_override_reaches_the_answer_and_judge_calls(
     answer_call, judge_call = chat.calls
     assert (answer_call["temperature"], answer_call["seed"]) == (0.0, 7)
     assert (judge_call["temperature"], judge_call["seed"]) == (0.0, 7)
+    assert message["badge"] == "partially_verified"
+    assert message["diagnostics"]["sentence_methods"] == ["checker", None]
+    assert message["diagnostics"]["judge_vetoed"] == []
 
 
 def test_default_generation_is_the_spec_temperature_without_a_seed(
