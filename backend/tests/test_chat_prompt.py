@@ -61,15 +61,15 @@ def test_describe_locator_variants() -> None:
 
 def test_parse_prompt_round_trips_chunks_and_question() -> None:
     chunks = [chunk("x1", "Alpha line.\n\nMore alpha."), chunk("x2", "Beta.", "Other")]
-    parsed, question = parse_prompt(answer_messages("What is alpha?", chunks)[1]["content"])
-    assert question == "What is alpha?"
-    assert [(c.label, c.source, c.text) for c in parsed] == [
+    parts = parse_prompt(answer_messages("What is alpha?", chunks)[1]["content"])
+    assert parts.question == "What is alpha?" and parts.outline == ""
+    assert [(c.label, c.source, c.text) for c in parts.chunks] == [
         ("c1", "Doc", "Alpha line.\n\nMore alpha."),
         ("c2", "Other", "Beta."),
     ]
-    parsed, question = parse_prompt(overview_messages(chunks)[1]["content"])
-    assert question is None
-    assert [c.text for c in parsed] == ["Alpha line.\n\nMore alpha.", "Beta."]
+    parts = parse_prompt(overview_messages(chunks)[1]["content"])
+    assert parts.question is None
+    assert [c.text for c in parts.chunks] == ["Alpha line.\n\nMore alpha.", "Beta."]
 
 
 def test_text_helpers() -> None:

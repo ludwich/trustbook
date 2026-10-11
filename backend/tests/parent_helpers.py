@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy import Engine, text
 
 from app.chunking.structure import Import, Structure, class_key, module_key, structure_json
+from app.grounding.code_checks import LineRange, SnapshotFiles
 from app.index.base import SpaceIndex
 from app.retrieval import service
 from app.retrieval.store import ChunkRow, chunks_at_ordinals, load_chunks
@@ -284,3 +285,16 @@ def outline_text_of(blocks: Sequence[Any]) -> str:
 
 def dump(value: object) -> str:
     return json.dumps(value, sort_keys=True, default=str)
+
+
+class AllFiles(SnapshotFiles):
+    """Every file these tests cite is in each source's indexed snapshot (layer 5's locator check
+    passes), so a sentence fails only on what its cited text holds."""
+
+    FILES = (ADAPTERS, HISTORY, "src/requests/compat.py", "src/requests/auth.py")
+
+    def __init__(self) -> None:
+        super().__init__(None)
+
+    def files(self, source_id: str) -> dict[str, list[LineRange | None]]:
+        return {name: [(1, 100_000)] for name in self.FILES}

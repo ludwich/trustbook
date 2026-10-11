@@ -160,6 +160,10 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
     assert diagnostics.pop("judge_seconds") is None
     fingerprint = diagnostics.pop("retrieval_fingerprint")
     assert isinstance(fingerprint, str) and len(fingerprint) == 16
+    timings = diagnostics.pop("timings")
+    assert len(timings["generation_s"]) == 2 and len(timings["verification_s"]) == 2
+    assert timings["citation_s"] is None and timings["gate_s"] >= 0
+    assert len(diagnostics.pop("prompt_tokens")) == 2
     assert diagnostics == {
         "top_rerank": 1.0,
         "sentence_scores": [0.0],
@@ -170,12 +174,27 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
         "generation": {"temperature": 0.2, "seed": None},
         # The second reply's failed sentence and why it failed (D-075).
         "failed_sentences": [{"text": "Another invention.", "reason": "checker score 0.00 < 0.5"}],
+        # Latency (D-080): two answer calls and two passes, no judge call.
+        "judge_calls": 0,
+        "judge_calls_per_pass": [0, 0],
+        "answer_calls": 2,
+        "completion_tokens": [None, None],
+        "outline_only": [0, 0],
+        "expansions": [],
+        "promoted_tokens": 0,
+        "outline_tokens": 0,
+        "outline_fingerprint": None,
+        "promoted_cited": [0, 0],
     }
     assert len(chat.calls) == 2  # answer, regeneration
-    # The regeneration is told which sentence of the first reply failed and why (D-074).
-    system = chat.calls[1]["messages"][0]["content"]
-    assert '1. "Made-up fact." (cited c1): not supported by the cited chunks.' in system
-    assert "Made-up fact." not in chat.calls[0]["messages"][0]["content"]
+    # The regeneration is told which sentence of the first reply failed and why (D-074), in the
+    # user message; the system message is the same on both attempts (D-079).
+    first, second = (call["messages"] for call in chat.calls)
+    assert (
+        '1. "Made-up fact." (cited c1): not supported by the cited chunks.' in second[1]["content"]
+    )
+    assert "Made-up fact." not in first[1]["content"]
+    assert second[0] == first[0]
 
 
 def test_generation_override_reaches_the_answer_and_judge_calls(
