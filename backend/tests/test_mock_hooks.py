@@ -161,3 +161,18 @@ def test_mock_web_search_through_the_api(
         "https://docs.example.com/certificates/ab-731",
         "https://learn.example.com/exams/ab-731",
     ]
+
+
+def test_mock_answers_never_quote_a_code_chunk_header() -> None:
+    from app.capabilities.adapters.mock import grounded_answer
+    from app.chat.prompt import PromptChunk
+
+    chunk = PromptChunk(
+        "c1",
+        "pool.py",
+        "File: pool.py · make_pool (lines 354-356)\ndef make_pool(size=DEFAULT_POOLSIZE):\n"
+        '    """Create a pool. The default pool size is DEFAULT_POOLSIZE, which is 10."""',
+    )
+    reply = grounded_answer([chunk], "What is the default pool size in make_pool?")
+    assert reply["sentences"]
+    assert all("354" not in s["text"] and "File:" not in s["text"] for s in reply["sentences"])

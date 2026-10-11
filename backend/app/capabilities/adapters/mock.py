@@ -49,9 +49,20 @@ def _overlap(terms: set[str], text: str) -> int:
     return len(terms & set(content_terms(text)))
 
 
+def _body(text: str) -> str:
+    """A chunk's text without a code chunk's ``File: … (lines a-b)`` header line.
+
+    A model quotes the code, not the header; quoting it put line numbers into the answer, which
+    the judge's anchor check (correctly) finds in no code line.
+    """
+    first, sep, rest = text.partition("\n")
+    return rest if sep and first.startswith("File: ") else text
+
+
 def _best_sentence(chunk: PromptChunk, terms: set[str]) -> str:
     """The chunk sentence sharing most terms with the question (first one on ties)."""
-    candidates = _sentences(chunk.text) or [chunk.text]
+    body = _body(chunk.text)
+    candidates = _sentences(body) or [body]
     best = max(candidates, key=lambda s: (_overlap(terms, s), -candidates.index(s)))
     return truncate(best, MAX_QUOTE_CHARS)
 
