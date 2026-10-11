@@ -13,6 +13,15 @@ the entry a referrer looks up (``ERROR_MESSAGES[code]``) is usually in another p
 definition is the literal's parts, counted as one extra: all of them up to
 :data:`LITERAL_MAX_TOKENS` (what one chunk held before the split), preferring the parts the
 reranker scored highest for the question, then the parts in order (D-058).
+
+With the retrieval's per-file row cache (D-077, D-078) the lookup goes through parent keys first:
+a name the referrer's own file defines is found in the ``structure.defines`` of that file's
+module family (one indexed query per file, cached), without the source-wide ``NAME =`` search,
+and a split literal's parts come from the same rows. On a miss, or when the file has no stored
+structure (rows indexed before chunker p3-treesitter-6, fallback-chunked languages), the
+source-wide search runs exactly as before; when it finds the name in several files, the file the
+referrer imports the name from wins the tie. The selection policy (which names, how many, the
+token limits) does not change.
 """
 
 from __future__ import annotations
@@ -25,7 +34,7 @@ from typing import Protocol
 from sqlalchemy import Engine
 
 from app.chunking.header import header_part
-from app.chunking.structure import Structure
+from app.chunking.structure import Structure, module_key
 from app.chunking.syntax import MODULE_MAX_TOKENS
 from app.retrieval.store import ChunkRow, FileRows, chunks_assigning, chunks_of_symbol
 
@@ -131,12 +140,54 @@ def wanted_names(chunks: Sequence[ContextChunk]) -> list[Wanted]:
     return wanted[:MAX_NAMES]
 
 
-def find_definitions(engine: Engine, wanted: Sequence[Wanted]) -> dict[Wanted, ChunkRow]:
-    """The code chunk defining each wanted name: same file first, then the same source."""
+def structured_rows(file_rows: FileRows, source_id: str, file: str) -> Sequence[ChunkRow]:
+    """The rows of a code file with stored structure (D-077), or ``()`` when the file has none
+    or any of its rows lacks a readable structure record (then nothing is looked up by key)."""
+    rows = file_rows(source_id, file)
+    if any(row.structure is None for row in rows):
+        return ()
+    return rows
+
+
+def family_definition(file_rows: FileRows, item: Wanted) -> ChunkRow | None:
+    """The first row (by ordinal) of the referrer file's module family whose stored ``defines``
+    holds ``item.name``, else ``None`` (D-078)."""
+    module = module_key(item.file)
+    for row in structured_rows(file_rows, item.source_id, item.file):
+        if row.parent_key == module and row.structure and item.name in row.structure.defines:
+            return row
+    return None
+
+
+def import_targets(file_rows: FileRows, source_id: str, file: str, name: str) -> set[str]:
+    """The files of the same source that ``file``'s module-level imports of ``name`` resolve to."""
+    module = module_key(file)
+    return {
+        found.target
+        for row in structured_rows(file_rows, source_id, file)
+        if row.parent_key == module and row.structure
+        for found in row.structure.imports
+        if found.target and name in found.names
+    }
+
+
+def find_definitions(
+    engine: Engine, wanted: Sequence[Wanted], file_rows: FileRows | None = None
+) -> dict[Wanted, ChunkRow]:
+    """The code chunk defining each wanted name: same file first, then the same source.
+
+    ``file_rows`` (D-078): a name the referrer's file defines comes from its module family's
+    stored ``defines``; the others take the source-wide search, where a file the referrer imports
+    the name from comes before other files that define it too.
+    """
+    found: dict[Wanted, ChunkRow] = {}
     by_source: dict[str, list[Wanted]] = {}
     for item in wanted:
-        by_source.setdefault(item.source_id, []).append(item)
-    found: dict[Wanted, ChunkRow] = {}
+        row = family_definition(file_rows, item) if file_rows is not None else None
+        if row is not None:
+            found[item] = row
+        else:
+            by_source.setdefault(item.source_id, []).append(item)
     for source_id, items in by_source.items():
         rows = chunks_assigning(engine, source_id, sorted({w.name for w in items}))
         defines = [
@@ -145,24 +196,41 @@ def find_definitions(engine: Engine, wanted: Sequence[Wanted]) -> dict[Wanted, C
         for item in items:
             matches = [row for row, names in defines if item.name in names]
             same_file = [row for row in matches if code_file(row.locator) == item.file]
-            if matches:
+            if not matches:
+                continue
+            if same_file or file_rows is None:
                 found[item] = (same_file or matches)[0]
+                continue
+            targets = import_targets(file_rows, source_id, item.file, item.name)
+            found[item] = min(matches, key=lambda r: code_file(r.locator) not in targets)
     return found
 
 
 def literal_parts(
-    engine: Engine, definer: ChunkRow, scores: Mapping[str, float] | None = None
+    engine: Engine,
+    definer: ChunkRow,
+    scores: Mapping[str, float] | None = None,
+    file_rows: FileRows | None = None,
 ) -> list[ChunkRow]:
     """The chunks that make up ``definer``'s definition, in line order.
 
     ``[definer]`` unless it is part 1 of a split data literal; then its parts up to
     :data:`LITERAL_MAX_TOKENS`, the ones with the highest ``scores`` (rerank scores by chunk id)
-    first, then the rest in order.
+    first, then the rest in order. ``file_rows`` (D-078): the parts come from the file's cached
+    rows when the definer is one of them (the same rows the ``file`` / ``symbol`` query gives).
     """
     file, symbol = code_file(definer.locator), definer.locator.get("symbol")
     if header_part(definer.text) != 1 or file is None or not isinstance(symbol, str):
         return [definer]
-    rows = chunks_of_symbol(engine, definer.source_id, file, symbol)
+    cached = structured_rows(file_rows, definer.source_id, file) if file_rows is not None else ()
+    if any(row.chunk_id == definer.chunk_id for row in cached):
+        rows = [
+            row
+            for row in cached
+            if code_file(row.locator) == file and row.locator.get("symbol") == symbol
+        ]
+    else:
+        rows = chunks_of_symbol(engine, definer.source_id, file, symbol)
     ids = [row.chunk_id for row in rows]
     if definer.chunk_id not in ids:
         return [definer]
@@ -197,14 +265,13 @@ def definition_extras(
     """Chunks (not already in ``chunks``) defining constants they use, for up to ``max_extra``
     names. A split data literal brings several of its parts (:func:`literal_parts`).
 
-    ``file_rows``: the retrieval's per-file row cache for lookups through parent keys (D-077);
-    ``None`` keeps the lookup without parent keys. Not used yet: the lookups through it follow.
+    ``file_rows``: the retrieval's per-file row cache for lookups through parent keys (D-077,
+    D-078); ``None`` keeps the lookup without parent keys.
     """
-    del file_rows  # interface first (D-077); the family lookup lands with the structure pass
     wanted = wanted_names(chunks)
     if not wanted:
         return []
-    definitions = find_definitions(engine, wanted)
+    definitions = find_definitions(engine, wanted, file_rows)
     taken = {c.chunk_id for c in chunks}
     extras: list[Extra] = []
     names = 0
@@ -212,7 +279,8 @@ def definition_extras(
         row = definitions.get(item)
         if row is None:
             continue
-        rows = [r for r in literal_parts(engine, row, scores) if r.chunk_id not in taken]
+        parts = literal_parts(engine, row, scores, file_rows)
+        rows = [r for r in parts if r.chunk_id not in taken]
         if not rows:
             continue
         taken |= {r.chunk_id for r in rows}
