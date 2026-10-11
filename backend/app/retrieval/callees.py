@@ -9,8 +9,9 @@ After the context is chosen (and the D-032 constants are added), the calls in ea
 collected: bare calls ``name(``, calls on the enclosing class's receiver ``self.name(`` /
 ``this.name(`` / ``cls.name(``, and qualified calls ``Q.name(`` (``AuthHelpers.BuildBasic(``,
 ``utils.basic_auth(``, ``pkg.Func(``, ``a.b.Q.name(``; ``Q`` is the last qualifier). Only chunks
-made by a code chunker count (their first line is ``File: … (lines a-b)``); examples in a
-document file are not the source's code. A callee is added when a code chunk of the **same
+made by a code chunker count (their first line is ``File: … (lines a-b)`` and their locator has no
+``heading``, which every document file's chunk has since D-068); examples in a document file are
+not the source's code. A callee is added when a code chunk of the **same
 source**
 
 - is a function or method: ``locator.kind`` when the chunker records it, otherwise a ``def`` /
@@ -141,8 +142,8 @@ def code_path(chunk: ContextChunk) -> str | None:
     """The file of a chunk made by a code chunker, else ``None`` (documents such as ``.rst`` files
     also have a file and lines, and their examples are not the source's code)."""
     file = code_file(chunk.locator)
-    if file is None or not _CODE_HEADER.match(chunk.text):
-        return None
+    if file is None or "heading" in chunk.locator or not _CODE_HEADER.match(chunk.text):
+        return None  # a document file's header names lines too (D-068); its locator a heading
     return file
 
 

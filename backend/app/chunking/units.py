@@ -6,11 +6,13 @@ into lines. A unit longer than the chunk maximum is split at whitespace as a las
 
 from __future__ import annotations
 
+import bisect
 import math
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 
+from app.chunking.headings import FENCE, Heading
 from app.chunking.tokens import TokenCounter
 
 _PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
@@ -106,6 +108,67 @@ def _hard_split(
     return units
 
 
+def _markdown_heading(text: str, start: int, end: int) -> tuple[str, int] | None:
+    """``(title, end)`` of a Markdown ``#`` heading on the first line of a paragraph."""
+    first_end = text.find("\n", start, end)
+    first_end = end if first_end == -1 else first_end
+    heading = _HEADING_LINE.fullmatch(text, start, first_end)
+    return (heading.group(1).strip(), first_end) if heading else None
+
+
+def _fence_lines(
+    text: str,
+    start: int,
+    end: int,
+    headings: Sequence[Heading],
+    starts: Sequence[int],
+    fence: re.Pattern[str],
+) -> int:
+    """How many lines of ``text[start:end]`` open or close a fenced code block (``fence``: the
+    file's syntax, :data:`app.chunking.headings.FENCES`), not counting a heading's adornment
+    lines (``headings`` in order, ``starts`` their offsets)."""
+    count = 0
+    cursor = start
+    while cursor < end:
+        newline = text.find("\n", cursor, end)
+        stop = end if newline == -1 else newline
+        k = bisect.bisect_right(starts, cursor) - 1
+        inside = k >= 0 and cursor < headings[k].end
+        if not inside and fence.match(text, cursor, stop):
+            count += 1
+        cursor = stop + 1
+    return count
+
+
+Region = tuple[int, int, tuple[str, int] | None]
+
+
+def _heading_regions(
+    text: str,
+    start: int,
+    p_start: int,
+    p_end: int,
+    headings: Sequence[Heading],
+    starts: Sequence[int],
+) -> list[Region]:
+    """A paragraph cut at the document's heading blocks: ``(start, end, heading)`` per region,
+    where ``heading`` is ``(title, end of its block)`` when the region starts with one."""
+    first_line = text.rfind("\n", start, p_start) + 1 or start
+    index = bisect.bisect_left(starts, first_line)
+    regions: list[Region] = []
+    cursor = p_start
+    pending: tuple[str, int] | None = None
+    for heading in headings[index:]:
+        if heading.start >= p_end:
+            break
+        h_start = max(heading.start, p_start)
+        if h_start > cursor or pending is not None:
+            regions.append((cursor, h_start, pending))
+        cursor, pending = h_start, (heading.title, heading.end)
+    regions.append((cursor, p_end, pending))
+    return [(s, e, h) for s, e, h in regions if e > s]
+
+
 def _starts_line(text: str, start: int, offset: int) -> bool:
     line = text.rfind("\n", start, offset) + 1 or start
     return not text[line:offset].strip()
@@ -143,43 +206,62 @@ def split_units(
     *,
     max_tokens: int,
     lines: bool = False,
+    headings: Sequence[Heading] | None = None,
+    fence: re.Pattern[str] = FENCE,
 ) -> list[Unit]:
     """Units covering the non-blank text of ``text[start:end]`` in order.
 
     ``lines``: prose is also split at line ends and every unit says whether it starts a line, so
     chunks of a file can end on whole lines (a line locator then names only lines the chunk holds
     in full, D-056).
+
+    ``headings`` (a document file's, D-068): each heading block (an underlined title is two or
+    three lines) is one heading unit, in place of the Markdown ``#`` lines found here otherwise;
+    ``fence``: the lines that open or close a code block in the file's syntax.
     """
     units: list[Unit] = []
     rows: set[int] = set()
     in_fence = False
+    ordered = sorted(headings, key=lambda h: h.start) if headings is not None else None
+    starts = [h.start for h in ordered] if ordered is not None else []
     for p_start, p_end in _paragraphs(text, start, end):
         p_start, p_end = _trimmed(text, p_start, p_end)
         if p_end <= p_start:
             continue
         paragraph = text[p_start:p_end]
-        fence_marks = paragraph.count("```") + paragraph.count("~~~")
-        structured = in_fence or fence_marks > 0 or bool(_STRUCTURED.match(paragraph))
+        if ordered is None:
+            fence_marks = paragraph.count("```") + paragraph.count("~~~")
+        else:  # fence lines, not a ``~~~~~`` heading adornment (D-068)
+            fence_marks = _fence_lines(text, p_start, p_end, ordered, starts, fence)
+        fenced = in_fence or fence_marks > 0
         if fence_marks % 2 == 1:
             in_fence = not in_fence
-        body_start = p_start
-        if not structured:
-            first_end = text.find("\n", p_start, p_end)
-            first_end = p_end if first_end == -1 else first_end
-            heading = _HEADING_LINE.fullmatch(text, p_start, first_end)
-            if heading:
-                tokens = counter.count(text[p_start:first_end])
-                units.append(Unit(p_start, first_end, tokens, heading=heading.group(1).strip()))
-                body_start = first_end
-        pieces: Iterable[tuple[int, int]] = (
-            _lines(text, body_start, p_end) if structured else _sentences(text, body_start, p_end)
-        )
-        if lines and not structured:
-            pieces = [line for s, e in pieces for line in _lines(text, s, e)]
-        for s_start, s_end in pieces:
-            s_start, s_end = _trimmed(text, s_start, s_end)
-            if s_end > s_start:
-                if structured:
-                    rows.add(s_start)
-                units.extend(_hard_split(text, s_start, s_end, counter, max_tokens))
+        # Without the document's headings: Markdown ``#`` lines, the paragraph's kind for all of it.
+        whole = fenced or bool(_STRUCTURED.match(paragraph))
+        if ordered is None:
+            regions = [(p_start, p_end, None if whole else _markdown_heading(text, p_start, p_end))]
+        else:
+            regions = _heading_regions(text, start, p_start, p_end, ordered, starts)
+        for r_start, r_end, heading in regions:
+            if heading is not None:
+                h_end = min(heading[1], r_end)
+                tokens = counter.count(text[r_start:h_end])
+                units.append(Unit(r_start, h_end, tokens, heading=heading[0]))
+                r_start = _trimmed(text, h_end, r_end)[0]
+            if r_end <= r_start:
+                continue
+            structured = (
+                whole if ordered is None else fenced or bool(_STRUCTURED.match(text[r_start:r_end]))
+            )
+            pieces: Iterable[tuple[int, int]] = (
+                _lines(text, r_start, r_end) if structured else _sentences(text, r_start, r_end)
+            )
+            if lines and not structured:
+                pieces = [line for s, e in pieces for line in _lines(text, s, e)]
+            for s_start, s_end in pieces:
+                s_start, s_end = _trimmed(text, s_start, s_end)
+                if s_end > s_start:
+                    if structured:
+                        rows.add(s_start)
+                    units.extend(_hard_split(text, s_start, s_end, counter, max_tokens))
     return _mark_lines(text, start, units, rows) if lines else units

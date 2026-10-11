@@ -241,6 +241,13 @@ A chunk's `locator` (JSON in `chunks.locator`) is derived from the segments it o
 A file locator's `kind` (Phase 3) is `"function"|"method"|"class"|"module"|"data"` for tree-sitter code
 chunks and `null` for fallback-chunked code and document files; chunks indexed before chunker
 `p3-treesitter-4` have no `kind` (treat as `null`).
+A **document file's** locator (`.md`, `.rst`, `.txt`, … and parsed documents in a folder; chunker
+`p3-treesitter-5`, D-068) always has `"heading"`: the innermost heading of the section holding most of the chunk
+(`null` before the first heading), plus `"headings"` (every section it spans) when there are several:
+`{"file":"HISTORY.md","start_line":159,"end_line":199,"symbol":null,"kind":null,"heading":"2.32.0 (2024-05-20)"}`;
+a paged document file: `{"file":"report.pdf","pages":[3],"heading":"Results"}`. Code locators never have
+`heading`, which is how a file chunk is told to be a document. Chunks indexed before `p3-treesitter-5` have no
+`heading` and a bare `File: <path>` first line.
 
 ### Sources API
 - `GET /api/spaces/{sid}/sources` → `Source[]` (creation order)
@@ -472,6 +479,12 @@ only if **all** of the following hold:
    Anchors are backticked spans, identifiers (snake_case, camelCase, UPPER_CASE, dotted), numbers, quoted
    strings, and `True`/`False`/`None` in value claims. A sentence without anchors needs at least half of its
    content words in the evidence lines, with identifiers split into words (`b64encode` → b64, encode).
+   For a document file's chunk, a name or term may also be in the **section of the evidence lines**: the
+   header's heading path, or the title of a heading inside the chunk above them (D-069); a range in which a
+   heading inside the chunk starts after its first line has no section (D-071). A number counts from the
+   section only when the sentence writes it exactly as the section does (`2.32.0`, `2024-05-20`; not "2.32",
+   "2025" or "20"), and a heading's numbering (`4.2` of `4.2 Timeouts`) never counts (D-071). Strings, value
+   constants, named characters and every other number must be in the lines.
 4. Layer 5 checks still pass.
 
 The setting `grounding.code_judge` (default on) lives in the grounding capability card ("Check code claims
@@ -486,6 +499,8 @@ chat call.
   least one code chunk (locator has `file`) is judged on its cited code chunks only, and passes under rules 1–4
   above **and** when asked again with the sentence judged alone (one more call). Sentences citing only prose
   (web pages, documents, transcripts) are never rescued: their checker failure stands (D-064).
+- **Document excerpts** (folder document files, D-069) are titled `[cN] <path>, lines a-b, in section “<heading
+  path>”` and numbered by their body lines like code; the header line is not numbered.
 - **Confirmation:** every sentence the checker passed is judged too, with all its cited chunks, and fails (a veto)
   when the verdict says it is not supported, names evidence outside the sentence's cited chunks, or names evidence
   lines missing one of its anchors. A veto from the batch is asked again with the sentence judged alone (one more
@@ -544,7 +559,8 @@ same dtype) gives the same candidates, fused order and context:
 
 ### Callee definitions (D-060, D-062; D-032 generalised to functions)
 After the context is chosen (agreement guard, D-032 constants), `app/retrieval/callees.py` collects the calls in
-the context's **code** chunks (first line `File: … (lines a-b)`; document files such as `.rst` don't count) as
+the context's **code** chunks (first line `File: … (lines a-b)` and no `heading` in the locator; document files
+such as `.rst` don't count, D-068) as
 `Call(name, symbols, qualifier)`: bare `name(` → symbols `name`, `<CallerClass>.name`; `self.` / `this.` /
 `cls.name(` → `<CallerClass>.name`; qualified `Q.name(` (also `a.b.Q.name(`; not `super.`/`base.`, not
 `x[0].f(` / `f().g(`) → `Q.name` with qualifier `Q`. A callee is a code chunk of the same source that is a
@@ -593,6 +609,24 @@ refusal threshold still reads only `ranked`.
   the chunk ends at an earlier line end (a sentence end when there is one) and the rest of the line starts the
   next chunk; overlaps start on a line too. Only a single line longer than the 800-token maximum is cut inside
   that line, and its locator then names the line(s) the text is part of.
+- **Section context of document files** (D-068): every chunk of a document file starts with
+  `File: <path> · <heading path> (lines a-b)`, e.g. `File: HISTORY.md · Release History › 2.32.0 (2024-05-20)
+  (lines 159-199)`; before the first heading `File: <path> (lines a-b)`; a paged document leaves out
+  `(lines a-b)`. The heading path (outermost first, ` › `, outer headings dropped past 200 characters) is the
+  section of the chunk's **first** line; headings further down are in the body. `(lines a-b)` are the body's
+  lines, which hold exactly the file's lines a–b (indentation of the first line included). Headings follow the
+  file's format (D-071): Markdown (`.md`, `.markdown`, parsed documents): ATX (`#`…`######`) and setext (`=`
+  level 1, `-` level 2), outside ```/`~~~` fences; reStructuredText rules (`.rst`, `.txt`): ATX, underlined and
+  over- and underlined titles (any adornment character, levels by first appearance), only ``` fences;
+  AsciiDoc (`.adoc`, `.asciidoc`): `=`…`======`/`#` titles, none inside delimited blocks; Org (`.org`): `*`
+  headlines, none inside `#+BEGIN_…` blocks. A heading starts a
+  new chunk once the current one has 100 tokens; a smaller section that starts at its heading joins the chunk
+  before it when that stays within the 500-token target (otherwise the next one, as before). Full-text search
+  indexes the header without `(lines a-b)` (D-051), so the heading path is searchable. Web pages, pasted and
+  uploaded documents are unchanged (no `File:` line; the prompt names their section from the locator).
+  What a header **states** to the grounding checks (layer 5, the code judge) is its path and section or symbol,
+  without `(part N)`, `(lines a-b)` and the headings' numbering; its numbers vouch for a sentence's number only
+  as written in full (D-071).
 - `Source` gains `"ahead": {"indexed_commit": str, "head_commit": str, "commits_ahead": int|null}|null`, filled when
   the linked folder's HEAD differs from the indexed commit. Commits are counted from the commit graph with a
   permissively licensed library (no GPL `git` binary). The UI shows "Indexed at <short>, folder is N commits

@@ -17,8 +17,12 @@ role-swapped claim from a true one. A rescue passes only if **all** hold:
    (:mod:`app.grounding.verify`).
 2. **Evidence anchoring:** every evidence range lies inside a chunk the sentence cites.
 3. **Symbol/literal matching:** every anchor of the sentence occurs in the evidence lines
-   (see :func:`code_anchors`). A sentence without anchors needs at least half of its content
-   words in the evidence lines, with identifiers split into words (``b64encode`` → b64, encode).
+   (see :func:`code_anchors`); names may also be in the section of the evidence lines of a
+   document file's chunk (:func:`section_context`, D-069), and a number written exactly as the
+   section writes it (``2.32.0``, ``2024-05-20``; never a heading's numbering, D-071). A
+   sentence without anchors needs
+   at least half of its content words in the evidence lines, with identifiers split into words
+   (``b64encode`` → b64, encode).
 4. Layer 5 still passes (sentences with layer 5 problems are never sent to the judge).
 
 **Confirmation.** A sentence the checker passed with a score below the confirmation bound is sent
@@ -40,7 +44,7 @@ import queue
 import re
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,6 +52,15 @@ from app.capabilities.adapters.base import ChatAdapter, ChatMessage
 from app.chat.output import InvalidOutputError, extract_json
 from app.chat.prompt import describe_locator
 from app.chat.text import STOPWORDS
+from app.chunking.header import (
+    complete_numbers,
+    header_content,
+    header_context,
+    section_of,
+    stated_in_full,
+    without_numbering,
+    without_numbers,
+)
 from app.grounding.code_checks import (
     _NAME_PART,
     _NUMBER,
@@ -165,15 +178,40 @@ def _positive_int(value: object) -> int | None:
 
 
 def chunk_names(chunk: RetrievedChunk) -> list[str]:
-    """The chunk's ``File: …`` header line and its ``locator.symbol`` (names the model saw)."""
+    """The chunk's ``File: …`` header line and its ``locator.symbol`` (names the model saw).
+
+    A document file's header counts only up to the file: its heading path is the section of the
+    lines before any heading inside the chunk, which :func:`section_context` gives per range.
+    A code chunk's header counts without ``(part N)`` and ``(lines a-b)`` (D-071).
+    """
     names: list[str] = []
     first = chunk.text.split("\n", 1)[0]
-    if first.startswith(FILE_PREFIX):
-        names.append(first)
+    file = chunk.locator.get("file")
+    if "heading" in chunk.locator and isinstance(file, str) and first.startswith(FILE_PREFIX):
+        names.append(f"{FILE_PREFIX}{file}")
+    elif first.startswith(FILE_PREFIX):
+        names.append(header_content(first))
     symbol = chunk.locator.get("symbol")
     if isinstance(symbol, str) and symbol:
         names.append(symbol)
     return names
+
+
+def section_context(chunk: RetrievedChunk, start: int | None = None, end: int | None = None) -> str:
+    """The heading path a document file's chunk header names (``Release History › 2.32.0
+    (2024-05-20)``, D-068), else ``""``. Code chunks have no ``heading`` in their locator.
+
+    With ``start`` (and ``end``, default ``start``): the section of those lines, which is a
+    heading's title instead when they are below a heading inside the chunk, and ``""`` when a
+    heading inside the chunk starts within them (:func:`app.chunking.header.section_of`).
+    """
+    file = chunk.locator.get("file")
+    if "heading" not in chunk.locator or not isinstance(file, str):
+        return ""
+    if start is None:
+        return header_context(chunk.text, file)
+    first = _positive_int(chunk.locator.get("start_line")) or 1
+    return section_of(chunk.text, file, first, start, start if end is None else end)
 
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=\S)")
@@ -226,6 +264,9 @@ def _where(chunk: NumberedChunk) -> str:
     file = str(locator.get("file") or "")
     symbol = locator.get("symbol")
     where = f"{file}, lines {chunk.first}-{chunk.last}"
+    section = section_context(chunk.chunk)
+    if section:
+        return f"{where}, in section “{section}”"
     return f"{where} ({symbol})" if isinstance(symbol, str) and symbol else where
 
 
@@ -478,6 +519,8 @@ def anchor_found(
     cited: Sequence[str] = (),
     *,
     prose: bool = False,
+    sections: Sequence[str] = (),
+    numbers: Collection[str] = (),
 ) -> bool:
     """Whether the evidence lines (or, for a file name, the evidence's file) contain ``anchor``.
 
@@ -494,8 +537,14 @@ def anchor_found(
     identifier such as ``MD5`` or ``SHA256`` matches ``md5`` or ``SHA-256``; backticked spans
     stay exact. A named character ("colon") must occur in a string literal of the evidence, or,
     for ``prose`` evidence (no code chunk), as the word itself.
+
+    ``sections`` are the sections of the evidence lines (D-069), numbers blanked out: the lines
+    are under them, so a name or term there counts like one in the lines. ``numbers`` are the
+    number literals of the sentence written exactly as a section writes them (``2.32`` of
+    "2.32.0" under "2.32.0 (2024-05-20)", D-071); every other number, and strings, value
+    constants and characters, must be in the lines themselves.
     """
-    texts = [evidence]
+    texts = [evidence, *sections]
     if anchor.kind == "file":
         return any(_path_matches(anchor.text, f) for f in files) or _occurs(anchor.text, texts)
     if anchor.kind == "string":
@@ -507,12 +556,12 @@ def anchor_found(
         word = re.compile(rf"\b{re.escape(anchor.text)}(?:e?s)?\b", re.IGNORECASE)
         return prose and word.search(evidence) is not None
     if anchor.kind == "term":
-        numbers = _DIGITS.findall(anchor.text)
-        return _term_in(anchor.text, evidence) or all(_occurs(n, texts) for n in numbers)
+        in_text = any(_term_in(anchor.text, t) for t in texts)
+        return in_text or all(_occurs(n, [evidence]) for n in _DIGITS.findall(anchor.text))
     if anchor.kind in ("code", "identifier"):
-        if anchor.kind == "code" and verbatim(anchor.text, evidence):
+        if anchor.kind == "code" and any(verbatim(anchor.text, t) for t in texts):
             return True
-        texts = [evidence, *names]
+        texts = [*texts, *names]
         if _occurs(anchor.text, texts):
             return True
         if anchor.kind == "identifier" and "." in anchor.text:
@@ -525,9 +574,11 @@ def anchor_found(
         return (
             anchor.kind == "identifier"
             and _TERM_PARTS.match(term_key(anchor.text)) is not None
-            and _term_in(anchor.text, evidence)
+            and any(_term_in(anchor.text, t) for t in [evidence, *sections])
         )
-    return _occurs(anchor.text, texts)  # number, constant
+    if anchor.kind == "constant":
+        return _occurs(anchor.text, [evidence])
+    return _occurs(anchor.text, [evidence]) or anchor.text in numbers  # number
 
 
 # --- content words ---------------------------------------------------------------------------
@@ -637,6 +688,8 @@ def assess(
     pieces: list[str] = []
     files: list[str] = []
     names: list[str] = []
+    sections: list[str] = []
+    section_numbers: set[str] = set()
     for ev in verdict.evidence:
         chunk = chunks.get(ev.chunk)
         if ev.chunk not in sentence.labels or chunk is None:
@@ -648,14 +701,25 @@ def assess(
         pieces.append(chunk.text(ev.start_line, ev.end_line))
         files.append(str(chunk.chunk.locator.get("file") or ""))
         names.extend(chunk_names(chunk.chunk))
+        section = without_numbering(
+            unescape_markdown(section_context(chunk.chunk, ev.start_line, ev.end_line))
+        )
+        section_numbers |= complete_numbers(section)
+        if section and without_numbers(section) not in sections:
+            sections.append(without_numbers(section))
     evidence = unescape_markdown("\n".join(pieces))
     prose = not any(is_code_chunk(chunks[e.chunk].chunk) for e in verdict.evidence)
     anchors = code_anchors(sentence.text)
     cited = [
         unescape_markdown(chunks[label].chunk.text) for label in sentence.labels if label in chunks
     ]
+    in_section = stated_in_full(sentence.text, frozenset(section_numbers), _NUMBER)
     missing = [
-        a.text for a in anchors if not anchor_found(a, evidence, files, names, cited, prose=prose)
+        a.text
+        for a in anchors
+        if not anchor_found(
+            a, evidence, files, names, cited, prose=prose, sections=sections, numbers=in_section
+        )
     ]
     if missing:
         return JudgeOutcome(False, True, "not in the evidence lines: " + ", ".join(missing))
@@ -668,6 +732,7 @@ def assess(
         f"{c.chunk.locator.get('file') or ''} {c.chunk.locator.get('symbol') or ''}"
         for c in (chunks[e.chunk] for e in verdict.evidence)
     )
+    context = " ".join([context, *sections])
     share = content_share(words, evidence, context)
     if share < MIN_CONTENT_SHARE:
         why = f"only {share:.0%} of the sentence's words are in the evidence lines"

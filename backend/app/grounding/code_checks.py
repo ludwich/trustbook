@@ -18,7 +18,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from app.chunking.header import without_part
+from app.chunking.header import complete_numbers, header_content, split_header, stated_in_full
 
 logger = logging.getLogger("trustbook.grounding")
 
@@ -64,6 +64,13 @@ def _occurs(token: str, texts: list[str]) -> bool:
     return any(pattern.search(t) for t in texts)
 
 
+def without_location(chunk_text: str) -> str:
+    """``chunk_text`` with its ``File:`` header reduced to what it states
+    (:func:`app.chunking.header.header_content`); a chunk without a header unchanged."""
+    header, body = split_header(chunk_text)
+    return f"{header_content(header)}\n{body}" if header else chunk_text
+
+
 def missing_identifiers(text: str, chunk_texts: Iterable[str]) -> list[str]:
     """Backticked names of ``text`` not found in ``chunk_texts`` (exact, deterministic).
 
@@ -72,9 +79,10 @@ def missing_identifiers(text: str, chunk_texts: Iterable[str]) -> list[str]:
     number inside it occurs there as a whole word: code defines ``class Response`` and
     ``def ok``, so ``Response.ok`` never appears verbatim (D-042). A span without identifiers
     (e.g. a quoted literal) must occur verbatim. The ``(part N)`` of a split data literal's
-    header is not code and is not searched (D-058).
+    header is not code and is not searched (D-058), nor are the header's line numbers and a
+    heading's numbering (D-071).
     """
-    texts = [unescape_markdown(without_part(t)) for t in chunk_texts]
+    texts = [unescape_markdown(without_location(t)) for t in chunk_texts]
     missing: list[str] = []
     for token in backticked(text):
         if any(verbatim(token, t) for t in texts):
@@ -296,11 +304,21 @@ def missing_literals(text: str, chunk_texts: Iterable[str]) -> list[str]:
     Used for sentences citing code, where the grounding checker cannot tell ``True`` from
     ``False`` reliably (D-044). The ``(part N)`` of a split data literal's header is not a
     number the code states and is not searched: "retries 6 times" citing ``_codes (part 6)``
-    would otherwise pass (D-058).
+    would otherwise pass (D-058). Nor are the header's line numbers and a heading's numbering
+    (``4.2`` of ``4.2 Timeouts``). A number of the header's path, section or symbol counts only
+    for a number the sentence writes exactly as the header does (``2.32.0`` under the section
+    ``2.32.0 (2024-05-20)``; not "2.32", "2024" or "20"), D-071. Everything else must be in the
+    body; ``True``/``False``/``None`` always.
     """
-    texts = [without_part(t) for t in chunk_texts]
+    bodies: list[str] = []
+    stated: set[str] = set()
+    for chunk_text in chunk_texts:
+        header, body = split_header(chunk_text)
+        bodies.append(body)
+        stated |= complete_numbers(header_content(header))
+    in_header = stated_in_full(text, frozenset(stated), _NUMBER)
     found = dict.fromkeys(
         [m.group(0) for m in _NUMBER.finditer(text)]
         + [m.group(1) for m in _VALUE_CONSTANT.finditer(text)]
     )
-    return [lit for lit in found if not _occurs(lit, texts)]
+    return [lit for lit in found if lit not in in_header and not _occurs(lit, bodies)]

@@ -246,6 +246,20 @@ def test_only_chunks_from_a_code_chunker_are_code() -> None:
     assert code_path(doc_chunk("d", "def init_poolmanager(self):")) is None
     web = RetrievedChunk("w", "s", "Docs", "Basic auth", {"heading": "Basic"}, 10, 0.5)
     assert code_path(web) is None
+    # Since D-068 a document file's header names its lines too; its locator has a heading.
+    locator: dict[str, object] = {
+        "file": "docs/user/advanced.rst",
+        "start_line": 1,
+        "end_line": 2,
+        "symbol": None,
+        "kind": None,
+        "heading": "Transport Adapters",
+    }
+    text = "File: docs/user/advanced.rst · Transport Adapters (lines 1-2)\n    def f(self):\n"
+    assert code_path(RetrievedChunk("r", "s", "requests", text, locator, 10, 0.5)) is None
+    before_heading = {**locator, "heading": None}
+    plain = "File: docs/user/advanced.rst (lines 1-2)\n    def f(self):\n"
+    assert code_path(RetrievedChunk("r", "s", "requests", plain, before_heading, 10, 0.5)) is None
 
 
 def bare(name: str) -> Call:

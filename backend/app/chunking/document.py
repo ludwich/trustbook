@@ -7,10 +7,12 @@ longer than the maximum. A heading starts a new chunk unless the current one is 
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from app.chunking.headings import FENCE, Heading
 from app.chunking.tokens import TokenCounter
 from app.chunking.units import Unit, split_units
 
@@ -21,6 +23,8 @@ OVERLAP_TOKENS = 80
 MIN_SECTION_TOKENS = 100
 
 Locate = Callable[[int, int], dict[str, Any]]
+# A chunk's first line for its body ``text[start:end]`` (a folder file's ``File:`` line).
+Header = Callable[[int, int], str]
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,7 @@ def pack_units(
     overlap: int = OVERLAP_TOKENS,
     min_section: int = MIN_SECTION_TOKENS,
     align_lines: bool = False,
+    join_back: bool = False,
 ) -> list[list[Unit]]:
     """Group units into chunks (each a list of consecutive units, possibly overlapping).
 
@@ -82,12 +87,30 @@ def pack_units(
     unit starts a line, so it holds each of its lines in full. When the target is reached mid-line
     the chunk ends at an earlier line end (preferably a sentence end) and the rest of the line
     starts the next chunk. Only a single line longer than the maximum is cut inside.
+
+    A section smaller than ``min_section`` joins the next one. With ``join_back`` (D-068) a small
+    section that starts at its heading joins the chunk before it instead when that stays within
+    the target, so the next section starts a chunk of its own: a chunk then starts at the heading
+    its header names (a changelog's tiny "2.32.1" entry no longer puts the "2.32.0" entry under a
+    "2.32.1" header).
     """
     groups: list[list[Unit]] = []
     current: list[Unit] = []
     tokens = 0
+
+    def joined_back() -> bool:
+        if not (join_back and groups and current and current[0].heading is not None):
+            return False
+        before = groups[-1]
+        if before[-1].end > current[0].start or sum(u.tokens for u in before) + tokens > target:
+            return False
+        before.extend(current)
+        return True
+
     for unit in units:
-        if current and unit.heading is not None and tokens >= min_section:
+        if current and unit.heading is not None and tokens < min_section and joined_back():
+            current, tokens = [], 0
+        elif current and unit.heading is not None and tokens >= min_section:
             groups.append(current)
             current, tokens = [], 0
         elif current and tokens + unit.tokens > target:
@@ -117,9 +140,22 @@ def pack_units(
                         current, tokens = [], 0
         current.append(unit)
         tokens += unit.tokens
-    if current:
+    if current and not (tokens < min_section and joined_back()):
         groups.append(current)
     return groups
+
+
+def _whole_lines(text: str, start: int, end: int, lo: int, hi: int) -> tuple[int, int]:
+    """``(start, end)`` widened to the start and end of their lines when only whitespace is
+    between (the indentation of a first line, trailing spaces), never beyond ``lo``/``hi``."""
+    line_start = text.rfind("\n", lo, start) + 1 or lo
+    if not text[line_start:start].strip():
+        start = line_start
+    line_end = text.find("\n", end, hi)
+    line_end = hi if line_end == -1 else line_end
+    if not text[end:line_end].strip():
+        end = line_end
+    return start, end
 
 
 def chunk_document(
@@ -133,27 +169,51 @@ def chunk_document(
     max_tokens: int = MAX_TOKENS,
     overlap: int = OVERLAP_TOKENS,
     prefix: str = "",
+    header: Header | None = None,
+    headings: Sequence[Heading] | None = None,
+    fence: re.Pattern[str] = FENCE,
     align_lines: bool = False,
 ) -> list[ChunkDraft]:
     """Chunk ``text[start:end]``; ``locate(start, end)`` builds each chunk's locator.
 
-    ``align_lines``: chunks hold whole lines (for files, whose locators name lines).
+    ``align_lines``: chunks hold whole lines (for files, whose locators name lines), indentation
+    of the first line included. ``header(start, end)``: a first line naming where the body is
+    (instead of the fixed ``prefix``). ``headings``: the document's headings
+    (:func:`app.chunking.headings.find_headings`) instead of the Markdown ``#`` lines, with
+    ``fence`` the lines that open or close a code block in their syntax.
     """
-    units = split_units(text, start, end, counter, max_tokens=max_tokens, lines=align_lines)
+    units = split_units(
+        text,
+        start,
+        end,
+        counter,
+        max_tokens=max_tokens,
+        lines=align_lines,
+        headings=headings,
+        fence=fence,
+    )
     drafts: list[ChunkDraft] = []
     groups = pack_units(
-        units, target=target, max_tokens=max_tokens, overlap=overlap, align_lines=align_lines
+        units,
+        target=target,
+        max_tokens=max_tokens,
+        overlap=overlap,
+        align_lines=align_lines,
+        join_back=headings is not None,
     )
     for group in groups:
         c_start, c_end = group[0].start, group[-1].end
+        if align_lines:
+            c_start, c_end = _whole_lines(text, c_start, c_end, start, end)
         body = text[c_start:c_end]
+        first = header(c_start, c_end) + "\n" if header is not None else prefix
         drafts.append(
             ChunkDraft(
-                text=prefix + body,
+                text=first + body,
                 start=c_start,
                 end=c_end,
                 locator=locate(c_start, c_end),
-                token_count=counter.count(prefix + body),
+                token_count=counter.count(first + body),
             )
         )
     return drafts
