@@ -39,6 +39,13 @@ def backticked(text: str) -> list[str]:
 
 
 _NAME_PART = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?")
+_MARKDOWN_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+
+def unescape_markdown(text: str) -> str:
+    """Markdown backslash escapes removed (``trust\\_env`` → ``trust_env``): web pages and
+    converted documents are stored as Markdown, and a name must match what the reader sees."""
+    return _MARKDOWN_ESCAPE.sub(r"\1", text)
 
 
 def verbatim(span: str, text: str) -> bool:
@@ -64,7 +71,7 @@ def missing_identifiers(text: str, chunk_texts: Iterable[str]) -> list[str]:
     ``def ok``, so ``Response.ok`` never appears verbatim (D-042). A span without identifiers
     (e.g. a quoted literal) must occur verbatim.
     """
-    texts = list(chunk_texts)
+    texts = [unescape_markdown(t) for t in chunk_texts]
     missing: list[str] = []
     for token in backticked(text):
         if any(verbatim(token, t) for t in texts):

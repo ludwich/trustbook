@@ -43,7 +43,14 @@ from app.capabilities.adapters.base import ChatAdapter, ChatMessage
 from app.chat.output import InvalidOutputError, extract_json
 from app.chat.prompt import describe_locator
 from app.chat.text import STOPWORDS
-from app.grounding.code_checks import _NAME_PART, _NUMBER, _VALUE_CONSTANT, _occurs, verbatim
+from app.grounding.code_checks import (
+    _NAME_PART,
+    _NUMBER,
+    _VALUE_CONSTANT,
+    _occurs,
+    unescape_markdown,
+    verbatim,
+)
 from app.retrieval.service import RetrievedChunk
 
 logger = logging.getLogger("trustbook.grounding")
@@ -635,10 +642,12 @@ def assess(
         pieces.append(chunk.text(ev.start_line, ev.end_line))
         files.append(str(chunk.chunk.locator.get("file") or ""))
         names.extend(chunk_names(chunk.chunk))
-    evidence = "\n".join(pieces)
+    evidence = unescape_markdown("\n".join(pieces))
     prose = not any(is_code_chunk(chunks[e.chunk].chunk) for e in verdict.evidence)
     anchors = code_anchors(sentence.text)
-    cited = [chunks[label].chunk.text for label in sentence.labels if label in chunks]
+    cited = [
+        unescape_markdown(chunks[label].chunk.text) for label in sentence.labels if label in chunks
+    ]
     missing = [
         a.text for a in anchors if not anchor_found(a, evidence, files, names, cited, prose=prose)
     ]

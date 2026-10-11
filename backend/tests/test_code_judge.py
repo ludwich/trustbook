@@ -631,3 +631,16 @@ def test_content_words_match_digit_abbreviations_both_ways() -> None:
     assert content_share(["utf8"], "Bodies are decoded as UTF-8.") == 1.0
     assert content_share(["base32"], "b64encode(x)") == 0.0
     assert content_share(["sha1"], "hashlib.sha256(x)") == 0.0
+
+
+def test_markdown_escapes_do_not_hide_names() -> None:
+    # Web pages are stored as Markdown: "trust\\_env" is what the page shows as trust_env.
+    text = "Usage of netrc file can be disabled by setting trust\\_env to False in the session."
+    page = RetrievedChunk("w", "w", "Authentication", text, {"heading": "netrc"}, 20, 0.9)
+    chunks, statements = prepare([("Setting trust_env to False disables netrc.", [page])])
+    supported = parse_verdicts(verdicts((1, True, [("c1", 1, 1)])))[1]
+    assert accept(statements[0], supported, chunks) == (True, "")
+    from app.grounding.code_checks import missing_identifiers
+
+    assert missing_identifiers("Set `trust_env` to False.", [text]) == []
+    assert missing_identifiers("Set `trust_envs` to False.", [text]) == ["trust_envs"]
