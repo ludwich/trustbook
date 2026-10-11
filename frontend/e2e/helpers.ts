@@ -201,6 +201,7 @@ export interface SourceState {
   id: string;
   type: string;
   title: string;
+  origin: string | null;
   status: string;
   failure_reason: string | null;
   job_id: string | null;

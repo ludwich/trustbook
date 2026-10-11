@@ -6,6 +6,9 @@ import { defineConfig, devices } from "@playwright/test";
  * The test configures the "mock" chat preset itself. Never points at a real chat endpoint.
  *
  *   E2E_BASE_URL=http://localhost:8484 pnpm e2e
+ *
+ * No test touches the internet unless E2E_INTERNET=1 is set (public web page and YouTube in
+ * job-status.spec.ts); release.yml never sets it.
  */
 export default defineConfig({
   testDir: "./e2e",

@@ -28,11 +28,15 @@ import {
  * API (GET /api/jobs) and on the Queue page. At Gate 3 a bare `raise` failed every successful job
  * while every source looked ready; checking only the source status missed it.
  *
- * Network: the LAN address and the mock search results never leave the machine (the mock results
- * use example.com sub-domains that do not resolve). The public-page test probes the internet
- * first and skips when the runner is offline; YouTube accepts Done or Failed (captions may be
- * blocked from CI) as long as source and job agree.
+ * Network: none by default (CLAUDE.md "no network calls in tests", SPEC §13). The LAN URL and the
+ * search results point at literal private IP addresses, which the address guard refuses before any
+ * DNS lookup or connection. The public web page and YouTube tests need the real internet and run
+ * only with E2E_INTERNET=1 (never set in release.yml); YouTube then accepts Done or Failed (captions
+ * may be blocked) as long as source and job agree.
  */
+
+const INTERNET = process.env.E2E_INTERNET === "1";
+const NO_INTERNET = "needs the internet; set E2E_INTERNET=1 to run it";
 
 const NOTE_TEXT = [
   "The ferry to Gull Island leaves the north pier at nine in the morning.",
@@ -75,15 +79,6 @@ async function addUrlInUi(page: Page, url: string): Promise<void> {
   await dialog.getByLabel("Web address").fill(url);
   await dialog.getByRole("button", { name: "Add page" }).click();
   await expect(dialog).toBeHidden();
-}
-
-async function internetReachable(url: string): Promise<boolean> {
-  try {
-    const res = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(8_000) });
-    return res.status < 500;
-  } catch {
-    return false;
-  }
 }
 
 test("a successful add: job Done, header back to idle, no failed jobs in the Queue", async ({
@@ -204,9 +199,9 @@ test("URL: a LAN address fails, and so does its job, with the same reason", asyn
   await expectQueueShows(page, job);
 });
 
-test("URL: a public web page's job is Done (needs internet)", async ({ page, request }) => {
+test("URL: a public web page's job is Done (E2E_INTERNET=1)", async ({ page, request }) => {
+  test.skip(!INTERNET, NO_INTERNET);
   const url = "https://example.com/";
-  test.skip(!(await internetReachable(url)), `${url} is not reachable from this runner`);
   const space = await createNamedSpace(request, "E2E job web");
   spaceId = space.id;
   await openSpace(page, space.id);
@@ -220,10 +215,11 @@ test("URL: a public web page's job is Done (needs internet)", async ({ page, req
   await expectQueueShows(page, job);
 });
 
-test("YouTube: Done or Failed with a reason, never a mismatch with the source", async ({
+test("YouTube: Done or Failed with a reason, never a mismatch with the source (E2E_INTERNET=1)", async ({
   page,
   request,
 }) => {
+  test.skip(!INTERNET, NO_INTERNET);
   test.setTimeout(420_000);
   const space = await createNamedSpace(request, "E2E job youtube");
   spaceId = space.id;
@@ -241,7 +237,13 @@ test("YouTube: Done or Failed with a reason, never a mismatch with the source", 
   await expectQueueShows(page, job);
 });
 
-test("web search (mock provider): unreachable results fail, and so do their jobs", async ({
+// Literal private addresses: the address guard refuses them without a DNS lookup or a connection.
+const OFFLINE_RESULTS = new Map([
+  ["https://docs.example.com/certificates/ab-731", "http://10.255.0.1/certificates/ab-731"],
+  ["https://learn.example.com/exams/ab-731", "http://172.31.255.1/exams/ab-731"],
+]);
+
+test("web search (mock provider): refused results fail, and so do their jobs", async ({
   page,
   request,
 }) => {
@@ -252,6 +254,15 @@ test("web search (mock provider): unreachable results fail, and so do their jobs
 
     const space = await createNamedSpace(request, "E2E job search");
     spaceId = space.id;
+    // The mock provider's results are real host names; adding them would look them up in public
+    // DNS. The search still runs in the backend, but the two specific results are pointed at
+    // literal private addresses before the page sees them, so nothing leaves the machine.
+    await page.route(`**/api/spaces/${space.id}/web-search`, async (route) => {
+      const response = await route.fetch();
+      const body = (await response.json()) as { results: { url: string }[] };
+      for (const r of body.results) r.url = OFFLINE_RESULTS.get(r.url) ?? r.url;
+      await route.fulfill({ response, json: body });
+    });
     await openSpace(page, space.id);
     await openAddSource(page, /^Search the web/);
     const dialog = page.getByRole("dialog", { name: "Search the web" });
@@ -259,11 +270,7 @@ test("web search (mock provider): unreachable results fail, and so do their jobs
     await dialog.getByRole("button", { name: "Search" }).click();
     const results = dialog.getByRole("list", { name: "Search results" });
     await expect(results).toBeVisible();
-    // The two specific mock results: example.com sub-domains that do not resolve.
-    for (const url of [
-      "https://docs.example.com/certificates/ab-731",
-      "https://learn.example.com/exams/ab-731",
-    ]) {
+    for (const url of OFFLINE_RESULTS.values()) {
       await results.locator(`li[data-url="${url}"]`).getByRole("checkbox").check();
     }
     await dialog.getByRole("button", { name: "Add 2 sources" }).click();
@@ -272,11 +279,13 @@ test("web search (mock provider): unreachable results fail, and so do their jobs
     await expect
       .poll(async () => (await listSources(request, space.id)).length, { timeout: 30_000 })
       .toBe(2);
-    for (const added of await listSources(request, space.id)) {
-      const { source, job } = await settleSourceAndJob(request, space.id, added.id, 120_000);
+    const added = await listSources(request, space.id);
+    expect(added.map((s) => s.origin).sort()).toEqual([...OFFLINE_RESULTS.values()].sort());
+    for (const { id } of added) {
+      const { source, job } = await settleSourceAndJob(request, space.id, id, 120_000);
       expect(source.type).toBe("search");
       expect(source.status).toBe("failed");
-      expect(source.failure_reason).toBe("Trustbook could not reach this site.");
+      expect(source.failure_reason).toContain("This address is on your local network");
       expectSourceMatchesJob(source, job);
       await expectQueueShows(page, job);
     }
