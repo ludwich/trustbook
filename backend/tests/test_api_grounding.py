@@ -30,6 +30,7 @@ from tests.chat_helpers import (
 from tests.conftest import AppFactory
 from tests.fakes import FakeGrounding, Router
 
+NOT_SUPPORTED = json.dumps({"verdicts": [{"index": 1, "supported": False, "evidence": []}]})
 GUIDE = "Requests is an HTTP library for Python. Proxies are configured with the proxies argument."
 QUOTE = "Proxies are configured with the proxies argument."
 
@@ -139,7 +140,10 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
 ) -> None:
     guide(env)
     chat = ScriptedChat(
-        answer_json(("Made-up fact.", ["c1"])), answer_json(("Another invention.", ["c1"]))
+        answer_json(("Made-up fact.", ["c1"])),
+        NOT_SUPPORTED,  # the judge's verdict on the failed sentence (D-056)
+        answer_json(("Another invention.", ["c1"])),
+        NOT_SUPPORTED,
     )
     monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
     events = env.ask("How are proxies configured?")
@@ -154,13 +158,77 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
     message = events[-1][1]["message"]
     assert message["badge"] == "refused"
     assert message["content"]["sentences"] == []
-    assert message["diagnostics"] == {
+    diagnostics = message["diagnostics"]
+    assert isinstance(diagnostics.pop("judge_seconds"), float)
+    fingerprint = diagnostics.pop("retrieval_fingerprint")
+    assert isinstance(fingerprint, str) and len(fingerprint) == 16
+    assert diagnostics == {
         "top_rerank": 1.0,
         "sentence_scores": [0.0],
         "regenerated": True,
         "sentence_methods": [None],
+        "judge_vetoed": [],
+        "citation_changes": [],
+        "generation": {"temperature": 0.2, "seed": None},
     }
-    assert len(chat.calls) == 2
+    assert len(chat.calls) == 4  # answer, judge, regeneration, judge
+    assert [
+        c["schema"] is not None and "verdicts" in c["schema"]["properties"] for c in chat.calls
+    ] == [
+        False,
+        True,
+        False,
+        True,
+    ]
+
+
+def test_generation_override_reaches_the_answer_and_judge_calls(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guide(env)
+    chat = ScriptedChat(
+        answer_json((QUOTE, ["c1"]), ("Proxies also need a licence key.", ["c1"])),
+        NOT_SUPPORTED,
+    )
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
+    cid = env.conversation()
+    response = env.client.post(
+        env.url(f"/conversations/{cid}/messages"),
+        json={
+            "content": "How are proxies configured?",
+            "generation": {"temperature": 0, "seed": 7},
+        },
+    )
+    assert response.status_code == 200, response.text
+    message = parse_sse(response.text)[-1][1]["message"]
+    assert message["diagnostics"]["generation"] == {"temperature": 0.0, "seed": 7}
+    answer_call, judge_call = chat.calls
+    assert (answer_call["temperature"], answer_call["seed"]) == (0.0, 7)
+    assert (judge_call["temperature"], judge_call["seed"]) == (0.0, 7)
+
+
+def test_default_generation_is_the_spec_temperature_without_a_seed(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guide(env)
+    chat = ScriptedChat(answer_json((QUOTE, ["c1"])))
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
+    message = env.ask("How are proxies configured?")[-1][1]["message"]
+    assert message["diagnostics"]["generation"] == {"temperature": 0.2, "seed": None}
+    assert (chat.calls[0]["temperature"], chat.calls[0]["seed"]) == (0.2, None)
+
+
+@pytest.mark.parametrize(
+    "generation",
+    [{"temperature": 1.5}, {"temperature": -0.1}, {"seed": -1}, {"seed": 2**32}, {"top_p": 1}],
+)
+def test_generation_override_is_validated(env: Env, generation: dict[str, Any]) -> None:
+    cid = env.conversation()
+    response = env.client.post(
+        env.url(f"/conversations/{cid}/messages"),
+        json={"content": "How are proxies configured?", "generation": generation},
+    )
+    assert response.status_code == 422
 
 
 def test_grounding_off_badges_unverified(env: Env) -> None:

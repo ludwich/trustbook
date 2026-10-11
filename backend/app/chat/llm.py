@@ -25,13 +25,17 @@ def generate_structured[T](
     parse: Callable[[str], T],
     *,
     max_tokens: int = MAX_TOKENS,
+    temperature: float = TEMPERATURE,
+    seed: int | None = None,
 ) -> T:
     """Ask for JSON matching ``schema`` and parse it; retry once if the reply is unusable.
 
-    Raises :class:`InvalidOutputError` when both attempts fail, and lets adapter errors through.
+    ``temperature`` and ``seed`` default to the SPEC's 0.2 and none; the eval runner overrides
+    them per request (F5). Raises :class:`InvalidOutputError` when both attempts fail, and lets
+    adapter errors through.
     """
     first = adapter.chat(
-        messages, temperature=TEMPERATURE, max_tokens=max_tokens, json_schema=schema
+        messages, temperature=temperature, max_tokens=max_tokens, json_schema=schema, seed=seed
     )
     try:
         return parse(first.text)
@@ -42,5 +46,7 @@ def generate_structured[T](
         {"role": "assistant", "content": first.text[:4_000] or "(empty reply)"},
         {"role": "user", "content": RETRY_INSTRUCTION},
     ]
-    second = adapter.chat(retry, temperature=TEMPERATURE, max_tokens=max_tokens, json_schema=schema)
+    second = adapter.chat(
+        retry, temperature=temperature, max_tokens=max_tokens, json_schema=schema, seed=seed
+    )
     return parse(second.text)

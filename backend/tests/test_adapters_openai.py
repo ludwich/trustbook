@@ -250,3 +250,26 @@ def test_endpoints_rejecting_the_thinking_hint_get_it_again_without(
     reply = adapter.chat([{"role": "user", "content": "Hi"}], json_schema=SCHEMA, think=False)
     assert reply.text == '{"a": "x"}'
     assert adapter.json_mode == "json_schema"  # the hint was dropped, not the JSON schema
+
+
+def test_seed_is_sent_only_when_given(http: OutboundHttp, router: Router) -> None:
+    router.json("POST", BASE, chat_reply("OK"))
+    _adapter(http).chat([{"role": "user", "content": "Hi"}], temperature=0, seed=42)
+    assert router.last_json()["seed"] == 42
+    _adapter(http).chat([{"role": "user", "content": "Hi"}], json_schema=SCHEMA, seed=7)
+    assert router.last_json()["seed"] == 7
+    _adapter(http).chat([{"role": "user", "content": "Hi"}])
+    assert "seed" not in router.last_json()
+
+
+def test_endpoint_rejecting_seed_gets_the_request_without_it(
+    http: OutboundHttp, router: Router
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "seed" in json.loads(request.content):
+            return httpx.Response(400, json={"error": {"message": "Unknown parameter: seed"}})
+        return httpx.Response(200, json=chat_reply("OK"))
+
+    router.add("POST", BASE, handler)
+    assert _adapter(http).chat([{"role": "user", "content": "Hi"}], seed=3).text == "OK"
+    assert "seed" not in router.last_json()

@@ -60,7 +60,10 @@ class AnthropicAdapter:
         max_tokens: int = 1024,
         json_schema: dict[str, Any] | None = None,
         think: bool = True,
+        seed: int | None = None,
     ) -> ChatResult:
+        """``seed`` is ignored: the Messages API has no seed parameter."""
+        del seed
         system_parts = [m["content"] for m in messages if m["role"] == "system"]
         if json_schema is not None:
             system_parts.append(schema_instruction(json_schema))

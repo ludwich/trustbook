@@ -50,20 +50,66 @@ class MessageContent(BaseModel):
     hint: Hint | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
+MAX_SEED = 2**32 - 1
+
+
+class Generation(BaseModel):
+    """Per-request generation settings (only the eval runner sends them, F5 / D-055).
+
+    Left out, the answer uses the SPEC default (temperature 0.2, no seed).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    temperature: float | None = Field(default=None, ge=0.0, le=1.0)
+    seed: int | None = Field(default=None, ge=0, le=MAX_SEED)
+
+
+class GenerationUsed(BaseModel):
+    """The temperature and seed the answer call actually used."""
+
+    temperature: float
+    seed: int | None = None
+
+
+class CitationChange(BaseModel):
+    """How Trustbook changed one sentence's citations (chunk ids only, never text).
+
+    ``added``: cited before verification because the sentence names something only they contain
+    (D-056). ``dropped``: near-copies of a kept citation (D-052 extension). ``swapped``:
+    ``[from, to]`` pairs, a near-copy replaced by the chunk that defines the named symbol.
+    """
+
+    sentence: int
+    added: list[str] = Field(default_factory=list)
+    dropped: list[str] = Field(default_factory=list)
+    swapped: list[list[str]] = Field(default_factory=list)
+
+
 class Diagnostics(BaseModel):
     """Scores behind an answer, for threshold tuning (the eval runner reads them; the UI doesn't).
 
     ``sentence_scores`` follows the model's cited sentences, removed ones included: the grounding
-    checker's best score per sentence, 0.0 when a code check failed, None when the checker is off.
+    checker's best score per sentence, 0.0 when a code check failed or the judge vetoed it, None
+    when the checker is off.
     ``sentence_methods`` (same order): what passed each sentence, ``checker`` or ``code_judge``
-    (failed the checker, passed on the code judge, D-045); None for failed sentences and when the
-    checker is off.
+    (failed the checker, passed on the judge, D-045/D-056); None for failed sentences and when
+    the checker is off.
+    ``judge_vetoed``: indices (same order) of sentences the checker passed and the judge's
+    confirmation failed. ``judge_seconds``: time spent waiting for the judge (None: not called).
+    ``retrieval_fingerprint``: a hash of the ordered context chunk ids (None: no context).
+    ``generation``: what the answer call used (None: no answer call).
     """
 
     top_rerank: float | None = None
     sentence_scores: list[float | None] = Field(default_factory=list)
     regenerated: bool = False
     sentence_methods: list[SentenceMethod | None] = Field(default_factory=list)
+    judge_vetoed: list[int] = Field(default_factory=list)
+    judge_seconds: float | None = None
+    citation_changes: list[CitationChange] = Field(default_factory=list)
+    retrieval_fingerprint: str | None = None
+    generation: GenerationUsed | None = None
 
 
 class MessageOut(BaseModel):
@@ -95,6 +141,7 @@ class MessageCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    generation: Generation | None = None
 
     @field_validator("content")
     @classmethod
