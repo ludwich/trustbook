@@ -10,10 +10,10 @@ import pytest
 
 from app.chunking import syntax
 from app.chunking.document import ChunkDraft
+from app.chunking.header import header_line, header_part, without_part
 from app.chunking.syntax import (
     chunk_source_code,
     chunk_syntax,
-    header_line,
     language_for_path,
 )
 from app.chunking.tokens import CharEstimate
@@ -460,3 +460,16 @@ def test_search_text_drops_line_numbers_and_part_numbers() -> None:
     assert search_text(text) == "File: src/codes.py · _codes\n    429: ('too_many',),"
     plain = "File: src/a.py · f (lines 1-2)\ndef f(): pass"
     assert search_text(plain) == "File: src/a.py · f\ndef f(): pass"
+
+
+def test_part_number_is_read_from_the_header_only() -> None:
+    text = "File: src/codes.py · _codes (part 3) (lines 81-88)\n    429: ('too_many',),"
+    assert header_part(text) == 3
+    assert without_part(text) == "File: src/codes.py · _codes (lines 81-88)\n    429: ('too_many',),"
+    # Only a split literal's header has a part; "(part 2)" in code or a symbol-less header is not.
+    for other in (
+        "File: src/a.py · f (lines 1-2)\nx = '(part 2) (lines 1-2)'",
+        "File: src/a.py (lines 1-2)\n(part 2)",
+        "Some prose (part 2) (lines 1-2)",
+    ):
+        assert header_part(other) is None and without_part(other) == other

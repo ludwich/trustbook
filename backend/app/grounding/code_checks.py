@@ -18,6 +18,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from app.chunking.header import without_part
+
 logger = logging.getLogger("trustbook.grounding")
 
 _BACKTICKED = re.compile(r"`([^`\n]+)`")
@@ -53,9 +55,10 @@ def missing_identifiers(text: str, chunk_texts: Iterable[str]) -> list[str]:
     A backticked span passes if it occurs verbatim in a cited chunk, or if every identifier and
     number inside it occurs there as a whole word: code defines ``class Response`` and
     ``def ok``, so ``Response.ok`` never appears verbatim (D-042). A span without identifiers
-    (e.g. a quoted literal) must occur verbatim.
+    (e.g. a quoted literal) must occur verbatim. The ``(part N)`` of a split data literal's
+    header is not code and is not searched (D-058).
     """
-    texts = list(chunk_texts)
+    texts = [without_part(t) for t in chunk_texts]
     missing: list[str] = []
     for token in backticked(text):
         if any(token in t for t in texts):
@@ -254,9 +257,11 @@ def missing_literals(text: str, chunk_texts: Iterable[str]) -> list[str]:
     """Numbers, and ``True``/``False``/``None`` stated as values, that no cited chunk contains.
 
     Used for sentences citing code, where the grounding checker cannot tell ``True`` from
-    ``False`` reliably (D-044).
+    ``False`` reliably (D-044). The ``(part N)`` of a split data literal's header is not a
+    number the code states and is not searched: "retries 6 times" citing ``_codes (part 6)``
+    would otherwise pass (D-058).
     """
-    texts = list(chunk_texts)
+    texts = [without_part(t) for t in chunk_texts]
     found = dict.fromkeys(
         [m.group(0) for m in _NUMBER.finditer(text)]
         + [m.group(1) for m in _VALUE_CONSTANT.finditer(text)]

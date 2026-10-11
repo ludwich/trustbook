@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Literal
 
 from app.chunking.code import chunk_code
 from app.chunking.document import ChunkDraft
+from app.chunking.header import header_line
 from app.chunking.tokens import TokenCounter
 
 if TYPE_CHECKING:
@@ -699,20 +700,6 @@ def _line_spans(text: str, start: int, end: int) -> list[tuple[int, int]]:
             return spans
         spans.append((cursor, newline))
         cursor = newline + 1
-
-
-def header_line(
-    path: str, symbol: str | None, first_line: int, last_line: int, part: int | None = None
-) -> str:
-    """``File: path · symbol (lines a-b)``: the first line of every code chunk.
-
-    Each group of a split data literal says which part it is:
-    ``File: path · _codes (part 3) (lines a-b)``.
-    """
-    where = f"{path} · {symbol}" if symbol else path
-    if symbol and part is not None:
-        where += f" (part {part})"
-    return f"File: {where} (lines {first_line}-{last_line})"
 
 
 def chunk_syntax(
