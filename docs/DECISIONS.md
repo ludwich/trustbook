@@ -633,3 +633,27 @@ grounding correctness > data safety > simplicity > performance > features.
   it (web page vs. repository file). code-05 no longer needs the slot (D-057 adds its body outside the 8-chunk
   count). Over-citation of copies is a citation question and is handled after verification, where the sentence
   is known (the code-02 / docs-04 citation-collapse work in the chat pipeline).
+
+### D-059 Callee lookup follows qualified calls, keeps a constant's referrer, scans each candidate once
+- **Review findings on D-057:** (1) only bare and `self.`/`this.`/`cls.` calls were followed, so the usual call
+  shapes in other code (C# `AuthHelpers.BuildBasic(…)`, Python `utils.basic_auth(…)`, Go `pkg.Func(…)`, Java
+  static utilities) never found their helper even when it was a ranked candidate; (2) a callee body could displace
+  the chunk a D-032 constant had been added for, leaving the constant in the context with nothing referring to it;
+  (3) `defines()` re-scanned every symbol-less (fallback-chunked: Java, Go, Rust, PHP, AL, …) candidate with six
+  regexes for every call, measured at 1.87 s (8 × 32 Java chunks of 3.7 KB) and 7.58 s (heavier) per question.
+- **Decision:**
+  - Qualified calls `Q.name(` (last qualifier of a chain) resolve to a function or method whose symbol is `Q.name`
+    (a static or class method), or a module-level `name` whose file is `Q.*` or lies in a folder `Q` (Python module,
+    Java class file, Go package, `Q/__init__.py`). Symbol-less fallback chunks need that file/folder match too, so
+    `obj.method(` on an arbitrary object never matches a same-named function elsewhere. `super.`/`base.` and calls on
+    expressions (`x[0].f(`, `f().g(`) are not followed. All other D-057 gates are unchanged: same source, ranked
+    candidate (fused top 40), not a test file, not in the context, at most 2.
+  - `RetrievedChunk.referrer` records the context chunk an added chunk was found for; `with_callees` protects the
+    referrers of constants as well as the constants (the D-032 / `fit_extras` guarantee across both steps).
+  - Candidates are indexed by (source, function name) once per question; a symbol-less candidate's definitions are
+    computed once and reused. Same 8 × 32 Java benchmark: 0.01 s.
+- **Measured on the Smoke space (45 questions, branch retrieval, no LLM calls):** the callees chosen are identical
+  to the D-057 rule on all 45 (requests calls its helpers bare), so nothing measured before changes. Tests cover the
+  C# static helper, the Python module function (a same-named function in another module is not taken), Java/Go
+  fallback files, the orphaned-constant reproducer and the one-scan-per-candidate bound.
+- **Grounding:** unchanged; no threshold, verification or refusal rule is touched.

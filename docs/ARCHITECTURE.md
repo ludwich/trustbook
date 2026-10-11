@@ -488,17 +488,23 @@ same dtype) gives the same candidates, fused order and context:
 - `Fused` gains `key`; RRF sorts by `(-score, best_rank, key, chunk_id)`.
 - Rerank ties keep the fused order (itself fixed by scores and keys).
 
-### Callee definitions (D-057; D-032 generalised to functions)
+### Callee definitions (D-057, D-059; D-032 generalised to functions)
 After the context is chosen (agreement guard, D-032 constants), `app/retrieval/callees.py` collects the calls in
-the context's **code** chunks (first line `File: … (lines a-b)`; document files such as `.rst` don't count):
-bare `name(` and `self.` / `this.` / `cls.name(`. A callee is a code chunk of the same source whose
-`locator.symbol` is `name` or `<CallerClass>.name` and which is a function or method (`locator.kind` in
-`function`/`method` when present; otherwise a definition line for the name in its text — `def`, `function`,
-`const f = (…) =>`, a C#/TS method signature, AL `procedure`). Symbol-less chunks qualify only from the fallback
-chunker. The callee must be among the question's reranked candidates (fused top 40), outside test files and the
-context. Most callers first, then rerank position; at most 2, added through `fit_extras` within the 6,000-token
-budget, never displacing the top chunk, any calling chunk or a constants extra (`fit_extras(..., protect=)`). They
-are ordinary numbered chunks with their rerank score; `RetrievedChunk.definition_of` holds the called name. The
+the context's **code** chunks (first line `File: … (lines a-b)`; document files such as `.rst` don't count) as
+`Call(name, symbols, qualifier)`: bare `name(` → symbols `name`, `<CallerClass>.name`; `self.` / `this.` /
+`cls.name(` → `<CallerClass>.name`; qualified `Q.name(` (also `a.b.Q.name(`; not `super.`/`base.`, not
+`x[0].f(` / `f().g(`) → `Q.name` with qualifier `Q`. A callee is a code chunk of the same source that is a
+function or method (`locator.kind` in `function`/`method` when present; otherwise a definition line for the
+name in its text — `def`, `function`, `const f = (…) =>`, a C#/TS/Java method signature, AL `procedure`) and
+whose `locator.symbol` is one of the call's symbols or, for a qualified call, the module-level `name` in module
+`Q` (file `Q.*` or a folder `Q`). Symbol-less chunks qualify only from the fallback chunker, matched by their
+text, and for a qualified call only in module `Q`. The callee must be among the question's reranked candidates
+(fused top 40), outside test files and the context. Candidates are indexed by (source, name) once per question:
+each symbol-less candidate's text is scanned for definitions once. Most callers first, then rerank position; at
+most 2, added through `fit_extras` within the 6,000-token budget, never displacing the top chunk, any calling
+chunk, a constants extra or the chunk that constant was added for (`fit_extras(..., protect=)`). They are
+ordinary numbered chunks with their rerank score; `RetrievedChunk.definition_of` holds the called name and
+`RetrievedChunk.referrer` the id of the context chunk an added chunk (constant or callee) was found for. The
 refusal threshold still reads only `ranked`.
 
 ### Code chunking (SPEC §7.2) and commits (SPEC §7.5)

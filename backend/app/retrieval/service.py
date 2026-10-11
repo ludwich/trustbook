@@ -51,10 +51,17 @@ class RetrievedChunk:
     # Set when the chunk was added because it defines this constant (D-032) or this function the
     # context's code calls (D-057), not because it was ranked into the context.
     definition_of: str | None = None
+    # The id of the context chunk such an added chunk was found for (it refers to or calls it).
+    referrer: str | None = None
 
     @classmethod
     def from_row(
-        cls, row: ChunkRow, score: float, *, definition_of: str | None = None
+        cls,
+        row: ChunkRow,
+        score: float,
+        *,
+        definition_of: str | None = None,
+        referrer: str | None = None,
     ) -> RetrievedChunk:
         return cls(
             chunk_id=row.chunk_id,
@@ -65,6 +72,7 @@ class RetrievedChunk:
             token_count=row.token_count,
             score=score,
             definition_of=definition_of,
+            referrer=referrer,
         )
 
 
@@ -141,7 +149,9 @@ def with_definitions(
     scores = {c.chunk_id: c.score for c in ranked}
     chunks = [
         (
-            RetrievedChunk.from_row(e.row, scores.get(e.row.chunk_id, 0.0), definition_of=e.name),
+            RetrievedChunk.from_row(
+                e.row, scores.get(e.row.chunk_id, 0.0), definition_of=e.name, referrer=e.referrer
+            ),
             e.referrer,
         )
         for e in extras
@@ -158,8 +168,8 @@ def with_callees(
     """``selected`` plus the reranked chunks defining functions its code calls (D-057).
 
     See :mod:`app.retrieval.callees`. At most two, within ``max_tokens``; the top chunk, the
-    calling chunks and the constants added before are never displaced. Each keeps its rerank
-    score.
+    calling chunks, the constants added before and the chunks those constants were added for are
+    never displaced. Each keeps its rerank score.
     """
     try:
         extras = callee_extras(selected, ranked)
@@ -175,9 +185,14 @@ def with_callees(
             chunk.chunk_id,
             len(callers),
         )
-    chunks = [(replace(chunk, definition_of=name), callers[0]) for chunk, name, callers in extras]
-    # Constants added before and every calling chunk stay: a body is read through its call site.
-    keep = [c.chunk_id for c in selected if c.definition_of is not None]
+    chunks = [
+        (replace(chunk, definition_of=name, referrer=callers[0]), callers[0])
+        for chunk, name, callers in extras
+    ]
+    # Constants added before, the chunks they were added for (D-032: an extra is never left
+    # without its referrer) and every calling chunk stay: a body is read through its call site.
+    added = [c for c in selected if c.definition_of is not None]
+    keep = [c.chunk_id for c in added] + [c.referrer for c in added if c.referrer is not None]
     keep += [cid for _, _, callers in extras for cid in callers]
     return fit_extras(selected, chunks, max_tokens=max_tokens, protect=keep)
 

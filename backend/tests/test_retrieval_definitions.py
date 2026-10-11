@@ -102,6 +102,7 @@ def test_definition_chunk_is_added_from_the_same_file_first(engine: Engine) -> N
     assert [c.chunk_id for c in chunks] == ["top", wanted]
     extra = chunks[1]
     assert extra.definition_of == "DEFAULT_POOLSIZE" and extra.score == 0.0
+    assert extra.referrer == "top"  # with_callees must keep the chunk it was added for
     assert "DEFAULT_POOLSIZE = 10" in extra.text and extra.source_id == source
 
 

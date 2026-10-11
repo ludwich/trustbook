@@ -6,16 +6,22 @@ test), while the logic that answers it sits in the helper they call. Without the
 model can only answer with its name, cite a call site, or find nothing to say.
 
 After the context is chosen (and the D-032 constants are added), the calls in each code chunk are
-collected: bare calls ``name(`` and ``self.name(`` / ``this.name(`` / ``cls.name(``. Only chunks
+collected: bare calls ``name(``, calls on the enclosing class's receiver ``self.name(`` /
+``this.name(`` / ``cls.name(``, and qualified calls ``Q.name(`` (``AuthHelpers.BuildBasic(``,
+``utils.basic_auth(``, ``pkg.Func(``, ``a.b.Q.name(``; ``Q`` is the last qualifier). Only chunks
 made by a code chunker count (their first line is ``File: … (lines a-b)``); examples in a
 document file are not the source's code. A callee is added when a code chunk of the **same
 source**
 
-- has the called name as its ``locator.symbol`` (``name``, or ``Class.name`` for the caller's
-  class) and is a function or method: ``locator.kind`` when the chunker records it, otherwise a
-  ``def`` / ``function`` / method-signature / ``procedure`` line for that name in its text. A
-  chunk without a symbol counts only if the fallback chunker made it (no grammar for the file);
-  the syntax chunker's symbol-less chunks are module-level code;
+- is a function or method: ``locator.kind`` when the chunker records it, otherwise a ``def`` /
+  ``function`` / method-signature / ``procedure`` line for that name in its text;
+- is the one the call names: its ``locator.symbol`` is ``name`` (bare call), ``Class.name`` for
+  the caller's class (receiver or bare call), or ``Q.name`` (qualified call). A qualified call
+  also names a module-level ``name`` (no class in the symbol) whose file is ``Q`` (``Q.py``,
+  ``Q.java``) or lies in a folder ``Q`` (a Go package, ``Q/__init__.py``). A chunk without a
+  symbol counts only if the fallback chunker made it (no grammar for the file): the syntax
+  chunker's symbol-less chunks are module-level code. It is then matched by the definition line
+  in its text, and for a qualified call its file or folder must also be ``Q``;
 - is among this question's reranked candidates (the fused top 40): the relevance gate. Without it
   about half of all questions got unrelated helpers (fixtures, class bodies) in the measurement;
 - is not in a test file, and is not already in the context.
@@ -34,7 +40,8 @@ from __future__ import annotations
 import builtins
 import keyword
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from typing import NamedTuple
 
 from app.chunking.syntax import language_for_path
 from app.retrieval.definitions import ContextChunk, code_body, code_file
@@ -43,9 +50,12 @@ MAX_CALLEES = 2
 FUNCTION_KINDS = frozenset({"function", "method"})
 CONTAINER_KINDS = frozenset({"class"})
 
-# ``name(`` not preceded by a word character or a dot (``obj.name(`` is someone else's method),
-# optionally qualified by the receiver of the enclosing class.
-_CALL = re.compile(r"(?<![\w.$@])(?:(self|this|cls)\.)?([A-Za-z_]\w*)\s*\(")
+# ``name(`` with an optional chain of qualifiers ``a.b.name(``. The chain must start a name (not
+# ``x[0].name(`` or ``f().name(``: the receiver is a value whose type is unknown).
+_CALL = re.compile(r"(?<![\w.$@])((?:[A-Za-z_]\w*[ \t]*\.[ \t]*)*)([A-Za-z_]\w*)\s*\(")
+_RECEIVERS = frozenset({"self", "this", "cls"})
+# Qualifiers that name the parent class or an instance of it, never a file or a class symbol.
+_NOT_QUALIFIERS = frozenset({"super", "base"})
 _NEW = re.compile(r"\bnew\s*$")
 # The first line of a code chunk (both code chunkers); a document file's chunks have no line range.
 _CODE_HEADER = re.compile(r"File: [^\n]*\(lines \d+-\d+\)(?:\n|$)")
@@ -159,53 +169,94 @@ def enclosing_class(locator: dict[str, object]) -> str:
     return symbol.rpartition(".")[0]
 
 
-def called_names(chunk: ContextChunk) -> list[tuple[str, ...]]:
-    """The calls in a code chunk, each as the symbols it may refer to, in order, unique.
+class Call(NamedTuple):
+    """A call in a code chunk.
+
+    ``name``: the called function's name. ``symbols``: the ``locator.symbol`` values it may refer
+    to. ``qualifier``: ``Q`` of a qualified call ``Q.name(``, else ``None``; the module or package a
+    module-level function must be in (its file ``Q.*`` or a folder ``Q``).
+    """
+
+    name: str
+    symbols: tuple[str, ...]
+    qualifier: str | None = None
+
+
+def called_names(chunk: ContextChunk) -> list[Call]:
+    """The calls in a code chunk, in order, unique.
 
     ``self.f(`` in a method of ``A`` may only be ``A.f``; a bare ``f(`` may be ``f`` or, in
-    languages with an implicit receiver (C#, Java), ``A.f``. Calls to names the chunk defines
-    itself, constructors (``new X(``) and language keywords are left out.
+    languages with an implicit receiver (C#, Java), ``A.f``; ``Q.f(`` may be ``Q.f`` or a function
+    ``f`` of module ``Q``. Calls to names the chunk defines itself, constructors (``new X(``) and
+    language keywords are left out.
     """
     body = code_body(chunk.text)
-    own = defined_functions(body) | {_symbol(chunk.locator).rpartition(".")[2]}
+    symbol = _symbol(chunk.locator)
+    own = defined_functions(body) | {symbol.rpartition(".")[2]}
     owner = enclosing_class(chunk.locator)
-    found: dict[tuple[str, ...], None] = {}
+    found: dict[Call, None] = {}
     for match in _CALL.finditer(body):
-        receiver, name = match.group(1), match.group(2)
-        if name in _NOT_CALLS or name in own:
+        chain, name = match.group(1), match.group(2)
+        if name in _NOT_CALLS:
             continue
         line_start = body.rfind("\n", 0, match.start()) + 1
         if _NEW.search(body, line_start, match.start()):
             continue
-        if receiver:
-            if owner:
-                found.setdefault((f"{owner}.{name}",), None)
+        qualifiers = [part.strip() for part in chain.split(".") if part.strip()]
+        if not qualifiers:
+            if name not in own:
+                symbols = (name, f"{owner}.{name}") if owner else (name,)
+                found.setdefault(Call(name, symbols), None)
+        elif qualifiers == [qualifiers[0]] and qualifiers[0] in _RECEIVERS:
+            if owner and name not in own:
+                found.setdefault(Call(name, (f"{owner}.{name}",)), None)
         else:
-            found.setdefault((name, f"{owner}.{name}") if owner else (name,), None)
+            qualifier = qualifiers[-1]
+            if qualifier in _NOT_QUALIFIERS or qualifier in _RECEIVERS:
+                continue
+            if f"{qualifier}.{name}" == symbol:
+                continue
+            found.setdefault(Call(name, (f"{qualifier}.{name}",), qualifier), None)
     return list(found)
 
 
-def defines(chunk: ContextChunk, symbols: tuple[str, ...]) -> bool:
-    """Whether code chunk ``chunk`` is the definition of a function or method named by ``symbols``.
+def in_module(path: str, qualifier: str) -> bool:
+    """Whether file ``path`` is module ``qualifier``: named ``qualifier.*`` or in a folder of it."""
+    folder, _, name = path.rpartition("/")
+    return name.partition(".")[0] == qualifier or folder.rpartition("/")[2] == qualifier
+
+
+def defines(chunk: ContextChunk, call: Call, defined: Collection[str] | None = None) -> bool:
+    """Whether code chunk ``chunk`` is the definition of the function or method ``call`` names.
 
     With a ``locator.kind`` it must be a function or method; with a ``locator.symbol`` that must be
-    one of ``symbols``. A chunk without a symbol counts only when the fallback chunker made it (no
-    grammar for the file): the syntax chunker gives every function its own symbol, so its
-    symbol-less chunks are module-level code (imports, conditional stubs). The text must define
-    the name unless the chunker recorded the kind.
+    one of ``call.symbols``, or, for a qualified call, ``call.name`` in module ``call.qualifier``.
+    A chunk without a symbol counts only when the fallback chunker made it (no grammar for the
+    file): the syntax chunker gives every function its own symbol, so its symbol-less chunks are
+    module-level code (imports, conditional stubs); for a qualified call its file must be the
+    module. The text must define the name unless the chunker recorded the kind. ``defined``: the
+    function names the chunk's text defines, when already known (computed here otherwise).
     """
     symbol = _symbol(chunk.locator)
     kind = _kind(chunk.locator)
+    file = code_file(chunk.locator) or ""
     if kind is not None and kind not in FUNCTION_KINDS:
         return False
     if symbol:
-        if symbol not in symbols:
+        in_its_module = (
+            call.qualifier is not None and symbol == call.name and in_module(file, call.qualifier)
+        )
+        if symbol not in call.symbols and not in_its_module:
             return False
         if kind is not None:
             return True
-    elif kind is None and language_for_path(code_file(chunk.locator) or "") is not None:
+    elif kind is None and language_for_path(file) is not None:
         return False
-    return symbols[0].rpartition(".")[2] in defined_functions(code_body(chunk.text))
+    elif call.qualifier is not None and not in_module(file, call.qualifier):
+        return False
+    if defined is None:
+        defined = defined_functions(code_body(chunk.text))
+    return call.name in defined
 
 
 def callee_extras[C: ContextChunk](
@@ -215,31 +266,47 @@ def callee_extras[C: ContextChunk](
 
     Callees come from ``ranked`` only (the relevance gate), from the caller's source, outside test
     files and the context. Most context callers first, then the best rerank position; a name
-    defined in several files prefers the caller's file.
+    defined in several files prefers the caller's file. Each candidate's text is scanned for
+    definitions once, and calls are looked up by name, so the cost grows with the context and the
+    candidates, not with their product.
     """
     taken = {c.chunk_id for c in selected}
     position = {c.chunk_id: i for i, c in enumerate(ranked)}
-    pool = [
-        c
-        for c in ranked
-        if c.chunk_id not in taken and (file := code_path(c)) is not None and not is_test_file(file)
-    ]
-    if not pool:
+    # Candidates by (source, function name): a chunk with a symbol under its last part, a
+    # symbol-less one under every function its text defines (scanned once, kept for ``defines``).
+    by_name: dict[tuple[str, str], list[C]] = {}
+    defined: dict[str, set[str]] = {}
+    for c in ranked:
+        file = code_path(c)
+        if c.chunk_id in taken or file is None or is_test_file(file):
+            continue
+        symbol = _symbol(c.locator)
+        if symbol:
+            names = {symbol.rpartition(".")[2]}
+        else:
+            names = defined[c.chunk_id] = defined_functions(code_body(c.text))
+        for name in names:
+            by_name.setdefault((c.source_id, name), []).append(c)
+    if not by_name:
         return []
     by_callee: dict[str, tuple[C, str, dict[str, None]]] = {}
     for chunk in selected:
         if code_path(chunk) is None:
             continue
         own_file = code_file(chunk.locator)
-        for symbols in called_names(chunk):
-            matches = [c for c in pool if c.source_id == chunk.source_id and defines(c, symbols)]
+        for call in called_names(chunk):
+            matches = [
+                c
+                for c in by_name.get((chunk.source_id, call.name), ())
+                if defines(c, call, defined.get(c.chunk_id))
+            ]
             if not matches:
                 continue
             best = min(
                 matches,
                 key=lambda c: (code_file(c.locator) != own_file, position[c.chunk_id]),
             )
-            entry = by_callee.setdefault(best.chunk_id, (best, symbols[0], {}))
+            entry = by_callee.setdefault(best.chunk_id, (best, call.symbols[0], {}))
             entry[2].setdefault(chunk.chunk_id, None)
     order = sorted(by_callee.values(), key=lambda item: (-len(item[2]), position[item[0].chunk_id]))
     return [(chunk, name, tuple(ids)) for chunk, name, ids in order[:max_callees]]

@@ -12,12 +12,14 @@ from app.db.migrate import migrate
 from app.index.memory import InMemorySpaceIndex
 from app.retrieval.callees import (
     MAX_CALLEES,
+    Call,
     called_names,
     callee_extras,
     code_path,
     defined_functions,
     defines,
     enclosing_class,
+    in_module,
     is_test_file,
 )
 from app.retrieval.fusion import CONTEXT_CHUNKS
@@ -175,11 +177,45 @@ def test_called_names_resolve_receivers_and_skip_noise() -> None:
         symbol="HTTPBasicAuth.handle",
     )
     assert called_names(chunk) == [
-        ("HTTPBasicAuth.reset",),
-        ("_basic_auth_str", "HTTPBasicAuth._basic_auth_str"),
+        Call("reset", ("HTTPBasicAuth.reset",)),
+        Call("_basic_auth_str", ("_basic_auth_str", "HTTPBasicAuth._basic_auth_str")),
+        Call("prepare_auth", ("r.prepare_auth",), "r"),
     ]
     module = code_chunk("m", AUTH, 1, 3, "x = build(1)\ny = self.other()")
-    assert called_names(module) == [("build",)]  # no class: self.other cannot be resolved
+    assert called_names(module) == [Call("build", ("build",))]  # self.other: no class to resolve
+
+
+def test_called_names_qualified_calls() -> None:
+    chunk = code_chunk(
+        "c",
+        "src/Client.cs",
+        1,
+        9,
+        """        var h = AuthHelpers.BuildBasic(user, pass);
+        var j = Contoso.Json.Encoder.Encode(h);
+        var k = items[0].Render(x) + Make().Then(y);
+        base.Send(request);
+        var w = new Contoso.Widget(3);
+        Client.Send(other);
+        Log(utils . Quote(h));""",
+        symbol="Client.Send",
+    )
+    assert called_names(chunk) == [
+        Call("BuildBasic", ("AuthHelpers.BuildBasic",), "AuthHelpers"),
+        Call("Encode", ("Encoder.Encode",), "Encoder"),
+        Call("Make", ("Make", "Client.Make")),  # x[0].Render( and f().Then( have no known type
+        Call("Log", ("Log", "Client.Log")),
+        Call("Quote", ("utils.Quote",), "utils"),
+    ]  # base.Send( is the parent's, new X.Y( a constructor, Client.Send( the chunk itself
+
+
+def test_in_module() -> None:
+    assert in_module("pkg/utils.py", "utils")
+    assert in_module("src/main/java/com/acme/AuthUtil.java", "AuthUtil")
+    assert in_module("internal/auth/basic.go", "auth")
+    assert in_module("pkg/__init__.py", "pkg")
+    assert not in_module("pkg/client.py", "utils")
+    assert not in_module("utils_extra.py", "utils")
 
 
 def test_enclosing_class_uses_kind_when_present() -> None:
@@ -212,27 +248,60 @@ def test_only_chunks_from_a_code_chunker_are_code() -> None:
     assert code_path(web) is None
 
 
+def bare(name: str) -> Call:
+    return Call(name, (name,))
+
+
 def test_defines_by_symbol_kind_or_text() -> None:
-    names = ("_basic_auth_str",)
-    assert defines(body_chunk(), names)
-    assert defines(body_chunk(kind="function"), names)
-    assert not defines(body_chunk(kind="class"), names)
-    assert not defines(body_chunk(), ("other",))
+    call = bare("_basic_auth_str")
+    assert defines(body_chunk(), call)
+    assert defines(body_chunk(kind="function"), call)
+    assert not defines(body_chunk(kind="class"), call)
+    assert not defines(body_chunk(), bare("other"))
     # Symbol matches but the text is a class, not a function (no kind recorded).
     cls = code_chunk("k", AUTH, 1, 9, "class Auth(AuthBase):\n    pass", symbol="Auth")
-    assert not defines(cls, ("Auth",))
+    assert not defines(cls, bare("Auth"))
     # Recorded as a method: the kind is enough.
     method = code_chunk("m", AUTH, 1, 3, "    @property\n    def x(self): ...", symbol="A.x")
-    assert defines(code_chunk("m2", AUTH, 1, 2, "...", symbol="A.x", kind="method"), ("A.x",))
-    assert defines(method, ("A.x",))
+    a_x = Call("x", ("A.x",))
+    assert defines(code_chunk("m2", AUTH, 1, 2, "...", symbol="A.x", kind="method"), a_x)
+    assert defines(method, a_x)
     # Module-level code of a parsed file (no symbol) is not a definition, even with a stub inside.
     stub = code_chunk(
         "st", AUTH, 1, 9, "try:\n    pass\nexcept ImportError:\n    def socks(*a): ..."
     )
-    assert not defines(stub, ("socks",))
+    assert not defines(stub, bare("socks"))
     # A fallback-chunked file (no grammar) is matched by its text.
     al = code_chunk("al", "src/Invoice.al", 1, 9, "procedure PostInvoice(DocNo: Code[20])\nbegin")
-    assert defines(al, ("PostInvoice",))
+    assert defines(al, bare("PostInvoice"))
+    assert defines(al, bare("PostInvoice"), {"PostInvoice"})  # names already scanned
+    assert not defines(al, bare("PostInvoice"), set())
+
+
+def test_defines_qualified_calls() -> None:
+    static = code_chunk(
+        "s", "src/AuthHelpers.cs", 1, 9, "    public static string BuildBasic(string u)",
+        symbol="AuthHelpers.BuildBasic", kind="method",
+    )  # fmt: skip
+    assert defines(static, Call("BuildBasic", ("AuthHelpers.BuildBasic",), "AuthHelpers"))
+    assert not defines(static, Call("BuildBasic", ("Other.BuildBasic",), "Other"))
+    # A module-level function of module Q (its file or folder), not one of the same name elsewhere.
+    fn = code_chunk("f", "pkg/utils.py", 1, 3, "def basic_auth(u, p): ...", symbol="basic_auth")
+    assert defines(fn, Call("basic_auth", ("utils.basic_auth",), "utils"))
+    assert not defines(fn, Call("basic_auth", ("client.basic_auth",), "client"))
+    # A method of another class is not a module function.
+    meth = code_chunk(
+        "m", "pkg/utils.py", 1, 3, "    def basic_auth(self): ...", symbol="Auth.basic_auth"
+    )
+    assert not defines(meth, Call("basic_auth", ("utils.basic_auth",), "utils"))
+    # Fallback chunks (no symbol): the file or package folder must be Q.
+    java = code_chunk(
+        "j", "src/com/acme/AuthUtil.java", 1, 9, "    public static String encode(String u) {"
+    )
+    assert defines(java, Call("encode", ("AuthUtil.encode",), "AuthUtil"))
+    assert not defines(java, Call("encode", ("other.encode",), "other"))
+    go = code_chunk("g", "internal/auth/basic.go", 1, 9, "public String Basic(String u) {")
+    assert defines(go, Call("Basic", ("auth.Basic",), "auth"))
 
 
 # --- choosing callees ------------------------------------------------------------------------
@@ -323,6 +392,57 @@ def test_self_calls_and_implicit_receivers_find_methods() -> None:
     assert ids == {"e", "f"}
 
 
+def test_qualified_calls_find_static_helpers_and_module_functions() -> None:
+    caller = code_chunk(
+        "c", "src/Client.cs", 1, 5, "        var h = AuthHelpers.BuildBasic(user, pass);",
+        symbol="Client.Send", kind="method",
+    )  # fmt: skip
+    helper = code_chunk(
+        "h", "src/AuthHelpers.cs", 1, 9, "    public static string BuildBasic(string u, string p)",
+        symbol="AuthHelpers.BuildBasic", kind="method", score=0.2,
+    )  # fmt: skip
+    extras = callee_extras([caller], [caller, helper])
+    assert [(c.chunk_id, name, ids) for c, name, ids in extras] == [
+        ("h", "AuthHelpers.BuildBasic", ("c",))
+    ]
+    py_caller = code_chunk(
+        "pc", "pkg/client.py", 1, 3, "def send(u, p):\n    return utils.basic_auth(u, p)",
+        symbol="send", kind="function",
+    )  # fmt: skip
+    py_fn = code_chunk(
+        "pf", "pkg/utils.py", 1, 3, "def basic_auth(u, p):\n    return u", symbol="basic_auth",
+        kind="function",
+    )  # fmt: skip
+    same_name_elsewhere = code_chunk(
+        "pe", "pkg/other.py", 1, 3, "def basic_auth(u, p):\n    return p", symbol="basic_auth",
+        kind="function", score=0.9,
+    )  # fmt: skip
+    found = callee_extras([py_caller], [py_caller, same_name_elsewhere, py_fn])
+    assert [c.chunk_id for c, _, _ in found] == ["pf"]
+
+
+def test_callee_lookup_scans_each_candidate_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.retrieval.callees as callees
+
+    scans: list[str] = []
+    real = callees.defined_functions
+
+    def counting(code: str) -> set[str]:
+        scans.append(code)
+        return real(code)
+
+    monkeypatch.setattr(callees, "defined_functions", counting)
+    calls = "\n".join(f"    v{i} = helper{i}(x);" for i in range(50))
+    selected = [code_chunk(f"s{i}", f"src/S{i}.java", 1, 60, calls) for i in range(8)]
+    pool = [
+        code_chunk(f"p{i}", f"src/P{i}.java", 1, 60, calls + "\n    int helper7(int x) {")
+        for i in range(32)
+    ]
+    extras = callee_extras(selected, [*selected, *pool])
+    assert [c.chunk_id for c, _, _ in extras] == ["p0"]
+    assert len(scans) == len(selected) + len(pool)  # callers once each, candidates once each
+
+
 # --- fitting into the context ----------------------------------------------------------------
 
 
@@ -348,6 +468,24 @@ def test_with_callees_never_displaces_constants_added_before() -> None:
     body = body_chunk(tokens=200)
     result = with_callees([top, call, constant], [top, call, body], max_tokens=500)
     assert [c.chunk_id for c in result] == ["test", "call", "const"]
+
+
+def test_with_callees_never_displaces_the_chunk_a_constant_was_added_for() -> None:
+    top = unit_test_chunk()
+    call = call_chunk()
+    ref = code_chunk(
+        "ref", AUTH, 200, 205, "    def send(self, r, retries=MAX_RETRIES):\n        return r",
+        symbol="Adapter.send", tokens=150,
+    )  # fmt: skip
+    const = code_chunk("const", AUTH, 1, 1, "MAX_RETRIES = 3", tokens=50)
+    const = RetrievedChunk(**{**const.__dict__, "definition_of": "MAX_RETRIES", "referrer": "ref"})
+    body = body_chunk(tokens=200)
+    result = with_callees([top, call, ref, const], [top, call, ref, body], max_tokens=500)
+    # The body would only fit by dropping "ref", which would orphan its constant: left out.
+    assert [c.chunk_id for c in result] == ["test", "call", "ref", "const"]
+    roomy = with_callees([top, call, ref, const], [top, call, ref, body], max_tokens=700)
+    assert [c.chunk_id for c in roomy] == ["test", "call", "ref", "const", "body"]
+    assert roomy[-1].referrer == "test"  # the first context chunk that calls it
 
 
 @pytest.fixture
