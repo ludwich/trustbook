@@ -199,8 +199,9 @@ def test_files_snapshot_uses_code_and_document_chunkers() -> None:
         "end_line": 2,
         "symbol": None,
         "kind": None,
+        "heading": None,
     }
-    assert readme.text.startswith("File: README.md\n")
+    assert readme.text.startswith("File: README.md (lines 1-2)\n")
 
 
 # --- file documents end on whole lines (ref-near-07, D-056) ------------------------------------

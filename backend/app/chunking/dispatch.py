@@ -5,7 +5,9 @@ from __future__ import annotations
 import bisect
 from typing import Any
 
-from app.chunking.document import ChunkDraft, Locate, chunk_document
+from app.chunking.document import ChunkDraft, Header, Locate, chunk_document
+from app.chunking.header import document_header
+from app.chunking.headings import HeadingPaths, find_headings, path_text
 from app.chunking.syntax import chunk_source_code
 from app.chunking.tokens import TokenCounter
 from app.chunking.transcript import chunk_transcript
@@ -56,30 +58,69 @@ class _LineIndex:
         return bisect.bisect_left(self._newlines, offset) + 1
 
 
-def _file_document_locator(text: str, entry: FileEntry, segments: list[Segment]) -> Locate:
+# Text documents written in Markdown; other text files (.rst, .txt, …) get reStructuredText
+# heading rules. Documents parsed from other formats (PDF, Word, …) are Markdown too.
+MARKDOWN_EXTENSIONS = frozenset({"md", "markdown"})
+
+
+def _markdown_file(path: str, parsed: bool) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    return parsed or extension in MARKDOWN_EXTENSIONS
+
+
+def _file_document_locator(
+    text: str, entry: FileEntry, segments: list[Segment], sections: HeadingPaths
+) -> Locate:
     pages = [s for s in segments if s.file == entry.path and s.page is not None]
     lines = _LineIndex(text, entry.start, entry.end)
 
     def locate(start: int, end: int) -> dict[str, Any]:
+        # Named like a web chunk (D-053): the innermost heading of the section holding most of
+        # the chunk, and every section it spans when there are several (D-068).
+        spans = sections.sections(start, end)
+        titles = list(dict.fromkeys(h.title for _, h in spans if h is not None))
+        biggest = max(spans, key=lambda item: item[0])[1] if spans else None
+        located: dict[str, Any]
         if pages:
             numbers = sorted({s.page for s in _overlapping(pages, start, end) if s.page})
-            return {"file": entry.path, "pages": numbers}
-        return {
-            "file": entry.path,
-            "start_line": lines.line(start),
-            "end_line": lines.line(max(start, end - 1)),
-            "symbol": None,
-            "kind": None,
-        }
+            located = {"file": entry.path, "pages": numbers}
+        else:
+            located = {
+                "file": entry.path,
+                "start_line": lines.line(start),
+                "end_line": lines.line(max(start, end - 1)),
+                "symbol": None,
+                "kind": None,
+            }
+        located["heading"] = biggest.title if biggest is not None else None
+        if len(titles) > 1:
+            located["headings"] = titles
+        return located
 
     return locate
+
+
+def _file_document_header(
+    text: str, entry: FileEntry, sections: HeadingPaths, paged: bool
+) -> Header:
+    lines = _LineIndex(text, entry.start, entry.end)
+
+    def header(start: int, end: int) -> str:
+        where = path_text(sections.at(start))
+        span = None if paged else (lines.line(start), lines.line(max(start, end - 1)))
+        return document_header(entry.path, where, span)
+
+    return header
 
 
 # Changes whenever chunking a file gives different chunks; a refresh re-chunks files indexed with
 # another version instead of keeping their chunks (incremental refresh, SPEC §7.5).
 # 2: FTS without header line numbers; 3: section = majority; 4: data literals split by element,
-# locator.kind, document files chunked on whole lines (D-056)
-CHUNKER_VERSION = "p3-treesitter-4"
+# locator kind, document files chunked on whole lines (D-056); 5: document files carry their
+# heading path in the header and locator, headings found in Markdown, setext and
+# reStructuredText form (D-068)
+CHUNKER_VERSION = "p3-treesitter-5"
 
 
 def chunk_file(snapshot: Snapshot, entry: FileEntry, counter: TokenCounter) -> list[ChunkDraft]:
@@ -87,17 +128,22 @@ def chunk_file(snapshot: Snapshot, entry: FileEntry, counter: TokenCounter) -> l
     text = snapshot.markdown
     if entry.kind == "code":
         return chunk_source_code(text, entry.start, entry.end, entry.path, counter)
-    locate = _file_document_locator(text, entry, snapshot.segments)
     # A file's chunks are located by line (unless it has pages): they end on whole lines, so the
     # cited lines hold nothing the chunk does not (ref-near-07).
     paged = any(s.file == entry.path and s.page is not None for s in snapshot.segments)
+    parsed = any(s.file == entry.path and s.start_line is None for s in snapshot.segments)
+    headings = find_headings(
+        text, entry.start, entry.end, markdown=_markdown_file(entry.path, parsed)
+    )
+    sections = HeadingPaths(headings)
     return chunk_document(
         text,
         entry.start,
         entry.end,
         counter,
-        locate,
-        prefix=f"File: {entry.path}\n",
+        _file_document_locator(text, entry, snapshot.segments, sections),
+        header=_file_document_header(text, entry, sections, paged),
+        headings=headings,
         align_lines=not paged,
     )
 
