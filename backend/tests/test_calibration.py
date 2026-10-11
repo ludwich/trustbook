@@ -327,10 +327,15 @@ def test_calibration_picks_streams_and_measures_code_with_them(
     assert (result.runtime.embedding_streams, result.runtime.stream_threads) == (4, 2)
     assert result.notes[0].startswith("Indexing uses 4 parallel streams × 2 threads")
     assert result.embedding_chunks_per_s_code == 128.0  # 32 chunks / 0.25 s (fake clock)
-    # The shared embedder (prose speed) plus 4 replicas with 2 threads each, one thread apiece.
-    assert [r.threads_option for r in loads] == [8, 2, 2, 2, 2]
+    # The shared embedder (prose speed) plus up to 4 replicas with 2 threads each, one thread
+    # apiece. Streams load their replica lazily and pull batches from a shared list, so a stream
+    # that gets no batch never loads one: assert the invariants, not an exact count (it raced).
+    assert loads[0].threads_option == 8
+    replicas = loads[1:]
+    assert 1 <= len(replicas) <= 4
+    assert all(r.threads_option == 2 for r in replicas)
     stream_threads = {name for number, names in threads.items() if number > 0 for name in names}
-    assert stream_threads == {f"embed-stream-{i}" for i in range(4)}
+    assert stream_threads and stream_threads <= {f"embed-stream-{i}" for i in range(4)}
     assert all(len(names) == 1 for number, names in threads.items() if number > 0)
     saved = json.loads(paths.calibration_file.read_text())
     assert saved["runtime"]["embedding_streams"] == 4
