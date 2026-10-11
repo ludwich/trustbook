@@ -34,12 +34,16 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [~] F3 code-05 answers again; split oversized table chunks (ref-near-10); ref-near-07
   - [x] chunking (D-056): data literals split by element into named ~150-token parts; `locator.kind`;
     document files chunked on whole lines (line locators claim only lines the chunk holds); `CHUNKER_VERSION` 4
+  - [x] retrieval (D-059–062): content-ordered ties, callee definitions, agreement guard; chat (D-063/064): judge confirms checker passes
+  - [x] attempt-2 measurement: run 1 passed; run 2 (2 code FR), real-use (p95 66 s) and Qwen3.8 reference failed
+  - [ ] round 2: section heading path in document chunk headers (ref-near-03), anchor matching (dotted names,
+    plural acronyms, inline markup), confirmation veto checks the full cited chunks, targeted retry, failed_sentences diagnostics
 - [ ] F4 Run the full gate command 3× on the workbench; all 3 must pass; report all 3 in GATES.md
-- [ ] F5 Eval runs use temperature 0 + fixed seed (per-request generation override used only by the runner; SPEC's 0.2 default unchanged)
-- [ ] F6 Runner `--chat-endpoint` / `--chat-model` overrides; model name in the report header; gate run with a stronger reference model (Qwen3.8-27B-UD-Q4_K_XL, chosen by Ludwig) alongside Qwen3.6, both in GATES.md
+- [x] F5 Eval runs use temperature 0 + fixed seed (per-request generation override used only by the runner; SPEC's 0.2 default unchanged)
+- [~] F6 Runner `--chat-endpoint` / `--chat-model` overrides (done); model name in the report header (done); gate run with a stronger reference model (Qwen3.8-27B-UD-Q4_K_XL, chosen by Ludwig) alongside Qwen3.6, both in GATES.md
 
-- [ ] A One of the 3 workbench gate runs uses the app default (temperature 0.2, no seed), labelled "real-use" in GATES.md
-- [ ] B e2e + eval assert JOB status (done/failed) and the Queue UI state for every source type (paste, upload, URL, YouTube, search, folder)
+- [~] A (runner `--app-default` done) One of the 3 workbench gate runs uses the app default (temperature 0.2, no seed), labelled "real-use" in GATES.md
+- [x] B e2e + eval assert JOB status (done/failed) and the Queue UI state for every source type (paste, upload, URL, YouTube, search, folder); URL/YouTube success opt-in via `E2E_INTERNET=1` (D-067)
 - [x] C Calibration version bumped now (v6) and tied to CHUNKER_VERSION + embedding revision so chunking/embedding changes always re-calibrate (D-057, `Calibration.pipeline`)
 - [ ] D docs/MODELS.md (per-model Gate 3 results + recommended minimum chat model); README memory note (Docker Desktop/WSL memory, Trustbook's use while indexing)
 
