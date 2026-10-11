@@ -599,8 +599,10 @@ grounding correctness > data safety > simplicity > performance > features.
   Session.__init__]` → `[SSL web]`. No answer changed outcome because of the choice.
 
 ### D-056 Gate 3 rework: the judge for every citation, confirmation, citation completion, regeneration, eval generation
-- **Judge for every citation type (rescue).** The D-045 judge now rescues any sentence that fails only the checker,
-  whatever it cites. **Why:** HHEM fails correct paraphrases of technical prose (ref-near-07: "resolve hostnames on
+(Review corrections in D-060: the prose rescue and citation completion below were withdrawn, rescues are asked
+again alone, and digit-term abbreviations are one-letter initials only.)
+- **Judge for every citation type (rescue; withdrawn by D-060).** The D-045 judge now rescues any sentence that
+  fails only the checker, whatever it cites. **Why:** HHEM fails correct paraphrases of technical prose (ref-near-07: "resolve hostnames on
   the proxy server instead of your own machine" vs the source's "resolve the domains on the proxy server", 0.34–0.36),
   and whether a sentence got the judge depended on provenance (the same text as `.rst` was judged, as a web page not).
   Prose chunks are numbered from 1, a line per sentence (lines over 160 characters split at sentence ends), headed by
@@ -625,8 +627,8 @@ grounding correctness > data safety > simplicity > performance > features.
   replies, the live false pass (c2 role swap) was removed; no answer was refused that was answered before.
   **Latency:** one judge call per answer that has sentences: 1.4–8.4 s (mean 3.4 s over 25 answers, Qwen3.6-35B-A3B
   on Ludwig's shared server, no thinking), plus ~1–1.5 s per vetoed sentence for the repeat.
-- **Grounding:** stronger. Rescue still needs judge support + anchoring + layer 5; confirmation can only fail
-  sentences. Judge failures keep the checker's result (as D-045).
+- **Grounding:** confirmation can only fail sentences (stronger). The prose rescue made checker failures on prose
+  weaker, which D-060 corrects. Judge failures keep the checker's result (as D-045).
 - **Digit-bearing names (judge vocabulary).** `b64` ↔ base64, `sha256` ↔ SHA-256, `utf8` ↔ UTF-8 match in both
   directions: equal keys after dropping case, `-` and `_`, or a letter-prefix abbreviation with the same digits and
   suffix (a one-letter abbreviation needs a word of ≥ 4 letters). sha1/sha256, utf8/utf16, md4/md5, base32/b64,
@@ -635,7 +637,7 @@ grounding correctness > data safety > simplicity > performance > features.
 - **Two exact-match fixes found while measuring (both stricter or neutral):** a backticked span no longer matches
   inside a longer name (`socks5` is not in `socks5h`), in layer 5 and in anchoring; Markdown escapes are removed
   before matching (web pages store `trust\_env`; a true sentence naming trust_env was vetoed).
-- **Citation completion (ref-near-10).** Before verification, a sentence whose backticked name is missing from its
+- **Citation completion (ref-near-10; withdrawn by D-060).** Before verification, a sentence whose backticked name is missing from its
   cited chunks but present in another context chunk also cites it (same file first, then context order, at most 2;
   nothing when a name is in no context chunk). Every layer then runs on the new set. Measured on current chunks
   (ref-near-10's table chunk 40-91 added to the context by hand, since retrieval misses it until the chunker fix):
@@ -654,3 +656,34 @@ grounding correctness > data safety > simplicity > performance > features.
   citations `Response.ok`), docs-04 2/2 answered with correct citations only (one run regenerated after its first
   sentence listed `~/.netrc` twice and was vetoed), ref-near-05 verified 2/2 citing the SSL section, ref-near-07
   verified 2/2 (the question-worded paraphrase rescued by the judge in both), ref-near-10 `not_in_sources` 2/2 (retrieval).
+
+### D-060 Review corrections to D-056: no prose rescue, no citation completion, rescues asked twice, initials only
+Four review findings on D-056, each checked with a reproducer and fixed, never by loosening a threshold:
+- **Prose rescue withdrawn.** Rescue is back to the D-045 scope: only sentences citing code, judged on their cited
+  code chunks only. **Why:** for prose the deterministic rescue gates do almost nothing. Prose has no anchors, so
+  the only gate left is "half the content words are in the evidence line", and negations and direction words
+  are stopwords. Reproduced: with a judge "supported", `assess()` accepted "With socks5h, DNS resolution happens
+  on the client instead of the proxy server" (a role swap), "Requests does not resolve DNS on the proxy server
+  when socks5h is used" (content share 0.75, no anchors) and, for a PDF page saying "The budget was not approved,
+  so the meeting was moved to Friday", "The meeting was moved to Friday because the budget was approved". So a
+  checker failure on prose (HHEM's home domain) came down to one verdict from the model that wrote the answer.
+  The 0/18 safety figure came from 71 statements on one English corpus. A negation/direction-word gate would be
+  language-specific (Swedish "inte" is not English "not"), so it is not a general fix; prose stays checker-only
+  for rescue. Confirmation (vetoes) still covers prose; it can only fail sentences.
+- **Rescues are asked again alone.** A rescue from the batch now needs the same "accepted" when the sentence is
+  judged alone, symmetric with the veto (D-056 measured batch noise; a judge-only pass is the riskiest path).
+- **Citation completion withdrawn.** It rewrote the model's citations before layer 5, so a sentence citing the
+  wrong chunk for a backticked name passed layer 5 when any context chunk held the name (the added chunk was
+  chosen because it holds the name, not because it supports the claim; reproduced with "Set `max_redirects` to 0
+  to stop Requests from reading netrc." citing a netrc chunk, completed with `sessions.py`). SPEC §8 layer 5 says
+  such a sentence fails. Completion also did not fix ref-near-10 (D-056: still `not_in_sources`).
+  `citation_changes` loses `added`.
+- **Digit-term abbreviations: one-letter initials only.** `terms_match` accepted any letter prefix, so `sha256`
+  matched `shake_256` and `py3` matched `pypy3` (a judge anchor for SHA256 was "found" in `hashlib.shake_256`).
+  Now only a one-letter initial of a word of ≥ 4 letters abbreviates (`b64` ↔ base64, `h2` ↔ http2); equal keys
+  (`SHA-256` ↔ `sha256`) are unchanged.
+- **Measured** (live Smoke space, real HHEM and judge, the 10 recorded replies of the D-056 before/after run
+  replayed): every outcome, method and citation unchanged. The 3 rescues (code-02 run 2 s4, ref-near-07 both runs,
+  which cite `docs/user/advanced.rst` from the folder source) were accepted again alone; judge time per answer
+  1.5–6.1 s (ref-near-07 run 2: 3.2 → 6.0 s, one extra call per rescue). ref-near-07 still depends on the folder
+  source's `.rst` chunk being cited; a sentence citing only the web page would now fail on the checker.

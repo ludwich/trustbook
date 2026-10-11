@@ -474,25 +474,28 @@ with the chat model"). Off → checker only (Phase 2 behaviour). `diagnostics.se
 returned, removed ones included; `null` for failed ones). The judge call is logged in the request log like every
 chat call.
 
-### Gate 3 rework: the judge, citations and eval generation (D-056)
-**The judge covers every citation type and confirms checker passes.** In the one judge call per check:
-- **Rescue:** every sentence that fails the grounding checker without layer 5 problems is judged, whatever it
-  cites (code, documents, web pages, transcripts), and passes under rules 1–4 above. Code chunks keep their real
-  line numbers; prose chunks are numbered from 1, a line per sentence (lines over 160 characters are split at
-  sentence ends), headed by the source title and section/page/time.
-- **Confirmation:** every sentence the checker passed is judged too, and fails (a veto) when the verdict says it is
-  not supported, names evidence outside the sentence's cited chunks, or names evidence lines missing one of its
-  anchors. A veto from the batch is asked again with the sentence judged alone (one more call) and stands
-  only if that verdict contradicts it too. A missing or malformed verdict, a judge error or a timeout is no veto.
+### Gate 3 rework: the judge, citations and eval generation (D-056, D-060)
+**The judge rescues sentences about code and confirms every checker pass.** In the one judge call per check:
+- **Rescue (scope as D-045):** a sentence that fails the grounding checker without layer 5 problems and cites at
+  least one code chunk (locator has `file`) is judged on its cited code chunks only, and passes under rules 1–4
+  above **and** when asked again with the sentence judged alone (one more call). Sentences citing only prose
+  (web pages, documents, transcripts) are never rescued: their checker failure stands (D-060).
+- **Confirmation:** every sentence the checker passed is judged too, with all its cited chunks, and fails (a veto)
+  when the verdict says it is not supported, names evidence outside the sentence's cited chunks, or names evidence
+  lines missing one of its anchors. A veto from the batch is asked again with the sentence judged alone (one more
+  call) and stands only if that verdict contradicts it too. A missing or malformed verdict, a judge error or a
+  timeout is no veto. Code chunks keep their real line numbers; prose chunks are numbered from 1, a line per
+  sentence (lines over 160 characters are split at sentence ends), headed by the source title and
+  section/page/time.
 - Anchors gain `term` (hyphenated digit-bearing prose terms such as SHA-256, UTF-8). Digit-bearing names match in
-  any spelling of the same term (`sha256` ↔ SHA-256, `utf8` ↔ UTF-8, `b64` ↔ base64; equal digits required). A
-  named character in prose evidence may match the word itself. A backticked span never matches inside a longer
+  any spelling of the same term (`sha256` ↔ SHA-256, `utf8` ↔ UTF-8, `b64` ↔ base64; equal digits required; only
+  a one-letter initial abbreviates, so `sha256` is not `shake_256`, D-060). A named character in prose evidence may match the word itself. A backticked span never matches inside a longer
   name (`socks5` is not in `socks5h`), in layer 5 as well.
 - The setting `grounding.code_judge` switches rescue and confirmation together.
 
-**Citations.** Before verification, a sentence whose backticked name is missing from its cited chunks but present
-in another context chunk also cites that chunk (same file first, at most 2; nothing when a name is in no context
-chunk); every layer then runs on the new set. After verification, for checker-passed sentences: D-052 pruning; then
+**Citations.** The model's citations are verified as given: they are never completed before verification, so a
+backticked name missing from the cited chunks fails layer 5 (D-060). After verification, for checker-passed
+sentences: D-052 pruning; then
 of the chunks that support the sentence alone, near-copies (best-matching units ≥ 90 % word-3-gram contained in a
 kept chunk's) are dropped, keeping first the chunk whose `locator.symbol` the sentence names, then the one the
 question names, then the higher rerank score; then a kept citation may be swapped for a better-ranked context chunk
@@ -511,12 +514,12 @@ adapters send `seed` (dropped and retried if the endpoint rejects it); Anthropic
 ```
 "judge_vetoed": [int],                 // sentence indices (sentence_scores order) the confirmation failed; their score is 0.0
 "judge_seconds": float|null,           // time spent waiting for the judge; null when it was not called
-"citation_changes": [{"sentence": int, "added": [chunk_id], "dropped": [chunk_id], "swapped": [[from_id, to_id]]}],
+"citation_changes": [{"sentence": int, "dropped": [chunk_id], "swapped": [[from_id, to_id]]}],
 "retrieval_fingerprint": str|null,     // first 16 hex of SHA-256 over the ordered context chunk ids
 "generation": {"temperature": float, "seed": int|null}|null   // what the answer call used; null without one
 ```
-`sentence_methods` keeps `"checker" | "code_judge" | null`; `code_judge` now means "rescued by the judge" for any
-citation type.
+`sentence_methods` keeps `"checker" | "code_judge" | null`; `code_judge` means "rescued by the judge" (sentences
+citing code only).
 
 ### Retrieval agreement guard (D-046)
 After reranking, a chunk ranked in the top 3 of **both** the vector and the full-text lists is kept in the
