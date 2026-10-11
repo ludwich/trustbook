@@ -30,7 +30,8 @@ from app.retrieval.fusion import (
     reciprocal_rank_fusion,
     select_within_budget,
 )
-from app.retrieval.store import ChunkRow, load_chunks, usable_sources
+from app.retrieval.parents import Expansion, OutlineBlock, expand
+from app.retrieval.store import ChunkRow, FileRows, load_chunks, usable_sources
 
 logger = logging.getLogger("trustbook.retrieval")
 
@@ -57,6 +58,11 @@ class RetrievedChunk:
     # The chunk's parent (D-077), from its row; navigation only, never part of ``text``.
     parent_key: str | None = None
     structure: Structure | None = None
+    # The chunk's position in its source (-1: unknown), for the parent lookups (D-077).
+    ordinal: int = -1
+    # Set only on a chunk promoted as parent context for ``referrer`` (D-077):
+    # ``section_previous`` or ``class_head``. Never read by a grounding layer.
+    expansion: str | None = None
 
     @classmethod
     def from_row(
@@ -66,6 +72,7 @@ class RetrievedChunk:
         *,
         definition_of: str | None = None,
         referrer: str | None = None,
+        expansion: str | None = None,
     ) -> RetrievedChunk:
         return cls(
             chunk_id=row.chunk_id,
@@ -79,6 +86,8 @@ class RetrievedChunk:
             referrer=referrer,
             parent_key=row.parent_key,
             structure=row.structure,
+            ordinal=row.ordinal,
+            expansion=expansion,
         )
 
 
@@ -86,13 +95,22 @@ class RetrievedChunk:
 class Retrieval:
     """Result of one retrieval.
 
-    ``chunks``: the context for the prompt (top 8 within the token budget).
-    ``ranked``: every reranked candidate, best first. ``source_ids``: the sources searched.
+    ``chunks``: the context for the prompt (top 8 within the token budget), then the D-032 and
+    D-060 extras, then the chunks promoted as parent context (D-077).
+    ``ranked``: every reranked candidate, best first (promoted chunks never enter it).
+    ``source_ids``: the sources searched. ``outline``: the non-citable code outline (D-077,
+    D-079); never a chunk, never a premise, judge item or anchor.
     """
 
     chunks: list[RetrievedChunk]
     ranked: list[RetrievedChunk] = field(default_factory=list)
     source_ids: list[str] = field(default_factory=list)
+    outline: tuple[OutlineBlock, ...] = ()
+
+    @property
+    def promoted(self) -> list[RetrievedChunk]:
+        """The context chunks promoted as parent context, in child rank order."""
+        return [c for c in self.chunks if c.expansion is not None]
 
     @property
     def top_score(self) -> float | None:
@@ -139,6 +157,7 @@ def with_definitions(
     ranked: Sequence[RetrievedChunk] = (),
     *,
     max_tokens: int = CONTEXT_TOKENS,
+    file_rows: FileRows | None = None,
 ) -> list[RetrievedChunk]:
     """``selected`` plus the chunks defining the module-level constants its code refers to.
 
@@ -147,7 +166,7 @@ def with_definitions(
     """
     scores = {c.chunk_id: c.score for c in ranked}
     try:
-        extras = definition_extras(engine, selected, scores=scores)
+        extras = definition_extras(engine, selected, scores=scores, file_rows=file_rows)
     except Exception:
         logger.warning("Looking up constant definitions failed; context unchanged", exc_info=True)
         return list(selected)
@@ -170,6 +189,7 @@ def with_callees(
     ranked: Sequence[RetrievedChunk],
     *,
     max_tokens: int = CONTEXT_TOKENS,
+    file_rows: FileRows | None = None,
 ) -> list[RetrievedChunk]:
     """``selected`` plus the reranked chunks defining functions its code calls (D-060).
 
@@ -178,7 +198,7 @@ def with_callees(
     never displaced. Each keeps its rerank score.
     """
     try:
-        extras = callee_extras(selected, ranked)
+        extras = callee_extras(selected, ranked, file_rows=file_rows)
     except Exception:
         logger.warning("Looking up called functions failed; context unchanged", exc_info=True)
         return list(selected)
@@ -320,6 +340,55 @@ def keep_agreed(
     return result
 
 
+def with_parents(
+    engine: Engine,
+    chunks: Sequence[RetrievedChunk],
+    ranked: Sequence[RetrievedChunk],
+    *,
+    file_rows: FileRows,
+    allowed_source_ids: Sequence[str],
+    outline: bool = True,
+    max_tokens: int = CONTEXT_TOKENS,
+) -> tuple[list[RetrievedChunk], tuple[OutlineBlock, ...]]:
+    """``chunks`` plus the chunks promoted as parent context, and the code outline (D-077).
+
+    See :mod:`app.retrieval.parents`. Promoted chunks go after every other chunk, in the order of
+    the children they were promoted for, and only into the free part of ``max_tokens``. Any
+    error gives no expansion: the context stays as it was.
+    """
+    try:
+        found = expand(
+            engine,
+            chunks,
+            ranked,
+            file_rows=file_rows,
+            allowed_source_ids=allowed_source_ids,
+            outline_on=outline,
+            max_tokens=max_tokens,
+        )
+    except Exception:
+        logger.warning("Expanding parent context failed; context unchanged", exc_info=True)
+        found = Expansion()
+    promoted = [
+        RetrievedChunk.from_row(p.row, p.score, referrer=p.referrer, expansion=p.kind)
+        for p in found.promoted
+    ]
+    for chunk in promoted:
+        logger.info(
+            "Parent context: promoted chunk %s (%s) for chunk %s",
+            chunk.chunk_id,
+            chunk.expansion,
+            chunk.referrer,
+        )
+    if found.outline:
+        logger.info(
+            "Parent context: outline of %d file(s), %d tokens",
+            len(found.outline),
+            found.outline_tokens,
+        )
+    return [*chunks, *promoted], found.outline
+
+
 def retrieve(
     engine: Engine,
     index: SpaceIndex,
@@ -328,13 +397,30 @@ def retrieve(
     query: str,
     *,
     source_ids: Sequence[str] | None = None,
+    parent_context: bool = True,
+    outline: bool = True,
 ) -> Retrieval:
-    """Run the full retrieval for ``query`` over the enabled, ready sources of a space."""
+    """Run the full retrieval for ``query`` over the enabled, ready sources of a space.
+
+    ``parent_context`` / ``outline``: the D-077 kill switches (``retrieval`` in settings). Off,
+    no chunk is promoted and no outline is built; ``outline`` off keeps the promotions.
+    """
     allowed = list(source_ids) if source_ids is not None else usable_source_ids(engine)
     if not allowed:
         return Retrieval(chunks=[], ranked=[], source_ids=[])
     found = search(engine, index, embedder, query, allowed)
     ranked = rerank(query, found.rows, reranker)
     chosen = keep_agreed(select_context(ranked), ranked, found.agreed)
-    chunks = with_callees(with_definitions(engine, chosen, ranked), ranked)
-    return Retrieval(chunks=chunks, ranked=ranked, source_ids=allowed)
+    # One per-file row cache for the lookups and the expansion (D-077).
+    file_rows = FileRows(engine, allowed)
+    chunks = with_callees(
+        with_definitions(engine, chosen, ranked, file_rows=file_rows),
+        ranked,
+        file_rows=file_rows,
+    )
+    blocks: tuple[OutlineBlock, ...] = ()
+    if parent_context:
+        chunks, blocks = with_parents(
+            engine, chunks, ranked, file_rows=file_rows, allowed_source_ids=allowed, outline=outline
+        )
+    return Retrieval(chunks=chunks, ranked=ranked, source_ids=allowed, outline=blocks)

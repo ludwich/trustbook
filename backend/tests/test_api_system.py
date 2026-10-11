@@ -44,6 +44,7 @@ def test_settings_get_and_put(client: TestClient) -> None:
         "workers": 2,
         "thresholds": {"refuse": 0.15, "verify": 0.5},
         "hints_dismissed": [],
+        "retrieval": {"parent_context": True, "outline": True},
     }
     body = client.put("/api/settings", json={"power": "low"}).json()
     assert (body["power"], body["workers"]) == ("low", 1)
@@ -51,6 +52,16 @@ def test_settings_get_and_put(client: TestClient) -> None:
     assert client.put("/api/settings", json={"power": "turbo"}).status_code == 422
     assert client.put("/api/settings", json={"setup_completed": True}).status_code == 422
     assert client.put("/api/settings", json={}).json()["power"] == "low"
+
+
+def test_retrieval_switches_are_saved_one_at_a_time(make_client: AppFactory) -> None:
+    client = make_client()
+    body = client.put("/api/settings", json={"retrieval": {"outline": False}}).json()
+    assert body["retrieval"] == {"parent_context": True, "outline": False}
+    body = client.put("/api/settings", json={"retrieval": {"parent_context": False}}).json()
+    assert body["retrieval"] == {"parent_context": False, "outline": False}
+    assert client.put("/api/settings", json={"retrieval": {"x": True}}).status_code == 422
+    assert make_client().get("/api/settings").json()["retrieval"]["parent_context"] is False
 
 
 def test_settings_persist_across_restart(make_client: AppFactory) -> None:

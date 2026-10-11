@@ -115,11 +115,20 @@ def chat_service(
     engine = get_engine(space.db_path)
     seed = generation.seed if generation is not None else None
     index = services.indexes.for_space(space.id)
+    settings = services.settings.load()
 
     def run_retrieval(question: str) -> Retrieval:
         providers = services.providers
         with providers.use.shared():  # waits while calibration measures
-            return retrieve(engine, index, providers.embedder(), providers.reranker(), question)
+            return retrieve(
+                engine,
+                index,
+                providers.embedder(),
+                providers.reranker(),
+                question,
+                parent_context=settings.retrieval.parent_context,
+                outline=settings.retrieval.outline,
+            )
 
     def verifier() -> Verifier:
         return build_verifier(
@@ -133,7 +142,7 @@ def chat_service(
         ChatStore(engine),
         retrieve=run_retrieval,
         chat_adapter=services.chat_adapter,
-        refuse_threshold=services.settings.load().thresholds.refuse,
+        refuse_threshold=settings.thresholds.refuse,
         verifier=verifier,
         gate=Gate(GateLogStore(engine), adapter=gate_adapter(services), seed=seed),
         generation=generation,
