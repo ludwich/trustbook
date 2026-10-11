@@ -214,7 +214,7 @@ Calibration = {"version":int,"measured_at":str,"cpu_count":int,      // version 
 | `parse/` | Docling (PDF, DOCX, PPTX, XLSX) with pypdf fallback, plain text/Markdown, Trafilatura + headless-browser fallback, yt-dlp captions, audio → STT (with a voice-activity check) |
 | `chunking/` | Document/web chunker (heading-aware, target 500, max 800, overlap 80 tokens), transcript chunker, fallback code chunker (SPEC §7.3) |
 | `index/` | `SpaceIndex`: LanceDB dataset in `<space>/vectors/`, table `chunks` (chunk_id, source_id, text, vector), vector + FTS search filtered by source ids |
-| `retrieval/` | Enabled-source filter → vector top 40 + FTS top 40 → RRF (k = 60) → rerank top 40 → top 8 within ~6,000 tokens |
+| `retrieval/` | Enabled-source filter → vector top 40 + FTS top 40 → RRF (k = 60) → rerank top 40 → top 8 within ~6,000 tokens (+ guarded chunks, constants and callee definitions; ties ordered by content, D-056) |
 | `chat/` | Conversations, prompt, forced-citation JSON (layer 3), refusal before generation (layer 2), SSE streaming, overview + suggested questions |
 | `security/` | gitleaks scan of linked folders before indexing (pulled forward from Phase 3, DECISIONS D-024) |
 
@@ -477,6 +477,29 @@ chat call.
 After reranking, a chunk ranked in the top 3 of **both** the vector and the full-text lists is kept in the
 context even if the reranker dropped it. It replaces the lowest-ranked kept chunk and still respects the
 token budget. The refusal threshold still uses rerank scores.
+
+### Deterministic ordering (D-056)
+Equal scores never fall back to write order or uuids, so a re-indexed space (or another machine with the
+same dtype) gives the same candidates, fused order and context:
+- `Hit` gains `key: str` (default `""`): `tie_key(text)` = SHA-256 hex of the indexed (full-text) text.
+  `LanceSpaceIndex.vector_search` / `text_search` select `text` with each hit and use `stable_top`: fetch
+  2× the limit, doubling while the tie group at the cut is still open, then sort by
+  `(-score, key, chunk_id)` and cut. The in-memory test index sorts the same way.
+- `Fused` gains `key`; RRF sorts by `(-score, best_rank, key, chunk_id)`.
+- Rerank ties keep the fused order (itself fixed by scores and keys).
+
+### Callee definitions (D-057; D-032 generalised to functions)
+After the context is chosen (agreement guard, D-032 constants), `app/retrieval/callees.py` collects the calls in
+the context's **code** chunks (first line `File: … (lines a-b)`; document files such as `.rst` don't count):
+bare `name(` and `self.` / `this.` / `cls.name(`. A callee is a code chunk of the same source whose
+`locator.symbol` is `name` or `<CallerClass>.name` and which is a function or method (`locator.kind` in
+`function`/`method` when present; otherwise a definition line for the name in its text — `def`, `function`,
+`const f = (…) =>`, a C#/TS method signature, AL `procedure`). Symbol-less chunks qualify only from the fallback
+chunker. The callee must be among the question's reranked candidates (fused top 40), outside test files and the
+context. Most callers first, then rerank position; at most 2, added through `fit_extras` within the 6,000-token
+budget, never displacing the top chunk, any calling chunk or a constants extra (`fit_extras(..., protect=)`). They
+are ordinary numbered chunks with their rerank score; `RetrievedChunk.definition_of` holds the called name. The
+refusal threshold still reads only `ranked`.
 
 ### Code chunking (SPEC §7.2) and commits (SPEC §7.5)
 - tree-sitter for C#, TypeScript/TSX, JavaScript/JSX and Python: one chunk per function, method or class

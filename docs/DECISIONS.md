@@ -570,3 +570,66 @@ grounding correctness > data safety > simplicity > performance > features.
   tied to `CHUNKER_VERSION` and the embedding model revision so it cannot be forgotten (the Phase 3 chunker left
   the Phase 2 "Indexing code" rate in place).
 - **Scope:** Phase 3b (agent CLI + Claude Code skill) is queued after Gate 3 passes, not mixed into the fixes.
+
+### D-056 Retrieval ties are ordered by content, never by write order or uuid
+- **Finding (variance diagnosis):** LanceDB returns full-text hits with equal BM25 scores in an order that depends
+  on the order rows were written, and cuts a tie group anywhere; RRF broke ties by chunk id, a new uuid4 on every
+  index. Measured on the Smoke space (live table searched twice + 4 tables rebuilt in other write orders, 45
+  questions): the full-text top 40 differed for 10/45 questions and the fused top 40 for 6/45. Repeating the same
+  search 7 times on the live table changed the full-text and fused top 40 for 1/45 (ref-near-10).
+- **Decision:**
+  - Every `Hit` carries `key` = SHA-256 of the indexed text. Vector and full-text search fetch twice the limit,
+    doubling while the tie group at the cut is still open, then sort by (score, key, chunk id) and cut.
+  - RRF sorts by (score, best single rank, key, chunk id). Chunk ids only decide between identical texts.
+  - Rerank ties keep the fused order, which is now fixed; the fused rank is evidence, a hash is not.
+- **Measured after:** 0/45 differences in the vector, full-text and fused top 40 across the same 6 tables, and 0/45
+  over 7 repeated searches. Only the order among exactly equal scores changes: no threshold, guard or grounding
+  layer is touched, and refusals still read the top rerank score. Test: indexes rebuilt in three write orders under
+  fresh uuids give identical top-40 lists (LanceDB and the in-memory index), and so does the full `retrieve`.
+
+### D-057 Callee definitions: the context gets the bodies of the functions its code calls
+- **Finding (code-05):** for "How does requests encode the username and password when it builds an HTTP Basic
+  Authorization header?" the chunks matching the wording are call sites (`HTTPBasicAuth.__call__`, the proxy
+  headers, a test), all `headers[...] = _basic_auth_str(user, password)`. The body that answers it (auth.py 34-75)
+  is rerank #10 and never reached the context (8 chunks, 2,252 of 6,000 tokens). The model answered from the call
+  site and cited the test, or said nothing (refused `not_in_sources`). The prose reranker moves that body between
+  #1 and outside the top 40 depending on wording, so no rank cut-off fixes it. D-032 already solved the same shape
+  for constants.
+- **Decision (generalises D-032 to functions):** after the guards and the constants step, calls in the context's
+  code chunks (`name(`, `self.`/`this.`/`cls.name(`) are resolved to code chunks of the same source whose
+  `locator.symbol` is the name (or `Class.name` for the caller's class) and that are a function or method
+  (`locator.kind` when the chunker records it; else a definition line in the text: `def`, `function`, arrow
+  `const`, C#/TS method signature, AL `procedure`). Symbol-less chunks qualify only from the fallback chunker
+  (the syntax chunker's symbol-less chunks are module-level code). The callee must be one of the question's
+  reranked candidates (fused top 40), outside test files and the context. Most callers first, then rerank
+  position; at most 2, within the token budget, never displacing the top chunk, a calling chunk or a constant.
+  Only chunks made by a code chunker count as callers or callees (code examples in `.rst`/Markdown files do not).
+- **Why the candidate gate:** without it the prototype added unrelated helpers (fixtures, class bodies) to 21/45
+  questions; with it 9/45 get 1-2 extra chunks (code-05, ref-near-01/07/10, ref-unans-12/15/17/19), all real
+  callees.
+- **Grounding:** unchanged. Added chunks are ordinary numbered chunks with their rerank score; the model must cite
+  them and every layer applies. The refusal threshold still reads only the ranked list.
+- **Measured (live Smoke space, Qwen3.6-35B-A3B, code judge on):** the body enters the context for the eval
+  wording and for paraphrases that ranked it #27 and #9.
+  - code-05 eval wording, 2 runs: verified (5 sentences) and partially_verified (4 kept, one true "base64 encoded"
+    sentence removed by the code judge's word-share rule, a separate verification issue). latin1, colon, base64
+    and "Basic " in both; all 9 kept citations are auth.py 34-75. Before: answer from the call site citing
+    tests/test_requests.py 554-570, or `not_in_sources`.
+  - Paraphrase "How is the HTTP Basic auth header value constructed from the credentials": verified, 4/4
+    sentences, all citing auth.py 34-75.
+- **Known limit:** a callee outside the fused top 40 is not added (e.g. "When I pass auth=('user','pass') ...").
+  One level only.
+
+### D-058 Exact-copy dedup of the context: measured, not adopted
+- **Proposal (code-02 diagnosis, optional):** while filling the 8-chunk context, skip a chunk whose body is ≥ 0.95
+  word-3-gram contained in an already selected chunk (never the top or a guarded chunk) and take the next one.
+- **Measured** on the Smoke space with D-056/D-057 retrieval, 45 questions: 5 contexts change. The skipped copies
+  are the web "Basic Authentication" section (1.00 inside authentication.rst 1-65; code-05, ref-unans-19), the web
+  "Transport Adapters" section (0.99; ref-near-09) and `Response.__nonzero__` (0.97 inside `__bool__`; code-02,
+  ref-near-10). None of the dropped or the newly added chunks is an expected locator; the added ones score
+  0.06-0.33 (a proxies section, two tests, two small code fragments).
+- **Decision:** not adopted. It brings no expected evidence into any context, adds low-ranked noise, and removes
+  one source's copy before generation, so a space loses that source's citation even where the user or a key wants
+  it (web page vs. repository file). code-05 no longer needs the slot (D-057 adds its body outside the 8-chunk
+  count). Over-citation of copies is a citation question and is handled after verification, where the sentence
+  is known (the code-02 / docs-04 citation-collapse work in the chat pipeline).
