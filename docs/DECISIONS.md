@@ -556,3 +556,17 @@ grounding correctness > data safety > simplicity > performance > features.
     for the next indexing job; chat never uses them.
   - The grounding checker scores in length-sorted batches of 4, with premises capped at 6,000 characters
     (~1,500 tokens; HHEM was trained on 512, and focused windows are 1,200 characters).
+
+### D-055 Gate 3 rework: process decisions (Ludwig, 2026-10-11)
+- **Comparable runs:** eval runs use temperature 0 and a fixed seed through a per-request generation override
+  that only the eval runner sends. The app's SPEC default (temperature 0.2) is unchanged. One of the three
+  workbench gate runs deliberately uses that default, labelled "real-use", to show behaviour in normal use.
+- **Model comparison:** the runner takes `--chat-endpoint` / `--chat-model`, and the report header names the model.
+  Gate 3 is also run with a stronger reference model (`Qwen3.5-122B-A10B` on Ludwig's server) so failures can be
+  attributed to the pipeline or to the model. Results go to `docs/MODELS.md` with a recommended minimum model.
+- **Job status, not only source status:** e2e and eval assert the ingest **job** status and the Queue UI state for
+  every source type. A bare `raise` once failed every job while every source looked ready.
+- **Calibration follows the pipeline:** the calibration version is bumped whenever chunking or embedding changes,
+  tied to `CHUNKER_VERSION` and the embedding model revision so it cannot be forgotten (the Phase 3 chunker left
+  the Phase 2 "Indexing code" rate in place).
+- **Scope:** Phase 3b (agent CLI + Claude Code skill) is queued after Gate 3 passes, not mixed into the fixes.

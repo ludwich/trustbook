@@ -26,3 +26,12 @@ Options to evaluate in Phase 3:
 - a code-tuned entailment model with a permissive license;
 - an optional "verify with the chat model" setting for code citations, off by default and badged
   differently, sending only the cited chunks.
+
+## From Gate 3 (2026-10-11)
+
+### Phase 3b: CLI for agents (scheduled right after Gate 3; details in docs/TASKS.md)
+A `trustbook` CLI over the local HTTP API with `--json` output and stable exit codes, plus a Claude Code
+skill, so agents can add sources and ask grounded questions. It goes through the same grounding as the UI.
+
+### MCP server
+An MCP server wrapping the same client as the CLI (after Phase 3b).

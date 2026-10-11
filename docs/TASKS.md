@@ -36,10 +36,25 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] F5 Eval runs use temperature 0 + fixed seed (per-request generation override used only by the runner; SPEC's 0.2 default unchanged)
 - [ ] F6 Runner `--chat-endpoint` / `--chat-model` overrides; model name in the report header; gate run with a stronger reference model (Qwen3.5-122B-A10B) alongside Qwen3.6, both in GATES.md
 
+- [ ] A One of the 3 workbench gate runs uses the app default (temperature 0.2, no seed), labelled "real-use" in GATES.md
+- [ ] B e2e + eval assert JOB status (done/failed) and the Queue UI state for every source type (paste, upload, URL, YouTube, search, folder)
+- [ ] C Calibration version bumped now (v6) and tied to CHUNKER_VERSION + embedding revision so chunking/embedding changes always re-calibrate
+- [ ] D docs/MODELS.md (per-model Gate 3 results + recommended minimum chat model); README memory note (Docker Desktop/WSL memory, Trustbook's use while indexing)
+
 ## 4. Gate
 - [x] CI green, PR `phase-3 → main` (#4), `:phase-3-rc` published from `92a8b12` (e2e gate passes)
 - [x] GATES.md Gate 3 checklist incl. per-category false refusals and p95 latency
 - [ ] `docker image prune -f`; stop and summarise (Gate 3 attempt 1 failed; fixing)
+
+## Queued AFTER Gate 3 passes — Phase 3b: CLI for agents (do not mix into Gate 3 fixes)
+- `trustbook` CLI (in the image: `docker compose exec app trustbook …`; pip-installable from the repo), talks to the HTTP API (default http://127.0.0.1:8484, `--base-url`), reuses the eval runner's client
+- Commands: spaces list|create|delete; sources add folder|url|file|paste|search; sources list|status|refresh|remove; ask "<q>" --space X; queue; gate-log; eval
+- `--json` everywhere with a stable documented schema (ask: answer, verdict, citations with source/file/lines/text, removed statements); exit codes 0 ok · 2 refused · 3 failed source · 1 error; `--wait` on adds (progress on stderr)
+- Same grounding as the UI (cannot bypass the six layers or refusal); never prints API keys
+- docs/cli.md + Claude Code skill skills/trustbook/SKILL.md (refusal = "not in sources", never retry around it)
+- Tests: integration per command (mock LLM); e2e add folder → ask → cited JSON
+- Gate 3b: Windows PowerShell CLI add folder + ask → cited JSON; Claude Code on Ludwig's laptop uses the skill
+- Backlog: MCP server wrapping the same client
 
 ## Notes for a restarted session
 - Quality bar script (stops on first failure): scratchpad `qbar.sh`; never chain checks through `| tail`.
