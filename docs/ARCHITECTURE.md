@@ -479,9 +479,12 @@ only if **all** of the following hold:
    Anchors are backticked spans, identifiers (snake_case, camelCase, UPPER_CASE, dotted), numbers, quoted
    strings, and `True`/`False`/`None` in value claims. A sentence without anchors needs at least half of its
    content words in the evidence lines, with identifiers split into words (`b64encode` → b64, encode).
-   For a document file's chunk, a name, number or term may also be in the **section of the evidence lines**:
-   the header's heading path, or the title of a heading inside the chunk above them (D-069). Strings, value
-   constants and named characters must be in the lines.
+   For a document file's chunk, a name or term may also be in the **section of the evidence lines**: the
+   header's heading path, or the title of a heading inside the chunk above them (D-069); a range in which a
+   heading inside the chunk starts after its first line has no section (D-071). A number counts from the
+   section only when the sentence writes it exactly as the section does (`2.32.0`, `2024-05-20`; not "2.32",
+   "2025" or "20"), and a heading's numbering (`4.2` of `4.2 Timeouts`) never counts (D-071). Strings, value
+   constants, named characters and every other number must be in the lines.
 4. Layer 5 checks still pass.
 
 The setting `grounding.code_judge` (default on) lives in the grounding capability card ("Check code claims
@@ -611,14 +614,19 @@ refusal threshold still reads only `ranked`.
   (lines 159-199)`; before the first heading `File: <path> (lines a-b)`; a paged document leaves out
   `(lines a-b)`. The heading path (outermost first, ` › `, outer headings dropped past 200 characters) is the
   section of the chunk's **first** line; headings further down are in the body. `(lines a-b)` are the body's
-  lines, which hold exactly the file's lines a–b (indentation of the first line included). Headings: ATX
-  (`#`…`######`), underlined titles (setext; reStructuredText, any adornment character, levels by first
-  appearance) and over- and underlined titles (reStructuredText), outside fenced code; Markdown files
-  (`.md`, `.markdown`, parsed documents) underline only with `=` (level 1) and `-` (level 2). A heading starts a
+  lines, which hold exactly the file's lines a–b (indentation of the first line included). Headings follow the
+  file's format (D-071): Markdown (`.md`, `.markdown`, parsed documents): ATX (`#`…`######`) and setext (`=`
+  level 1, `-` level 2), outside ```/`~~~` fences; reStructuredText rules (`.rst`, `.txt`): ATX, underlined and
+  over- and underlined titles (any adornment character, levels by first appearance), only ``` fences;
+  AsciiDoc (`.adoc`, `.asciidoc`): `=`…`======`/`#` titles, none inside delimited blocks; Org (`.org`): `*`
+  headlines, none inside `#+BEGIN_…` blocks. A heading starts a
   new chunk once the current one has 100 tokens; a smaller section that starts at its heading joins the chunk
   before it when that stays within the 500-token target (otherwise the next one, as before). Full-text search
   indexes the header without `(lines a-b)` (D-051), so the heading path is searchable. Web pages, pasted and
   uploaded documents are unchanged (no `File:` line; the prompt names their section from the locator).
+  What a header **states** to the grounding checks (layer 5, the code judge) is its path and section or symbol,
+  without `(part N)`, `(lines a-b)` and the headings' numbering; its numbers vouch for a sentence's number only
+  as written in full (D-071).
 - `Source` gains `"ahead": {"indexed_commit": str, "head_commit": str, "commits_ahead": int|null}|null`, filled when
   the linked folder's HEAD differs from the indexed commit. Commits are counted from the commit graph with a
   permissively licensed library (no GPL `git` binary). The UI shows "Indexed at <short>, folder is N commits

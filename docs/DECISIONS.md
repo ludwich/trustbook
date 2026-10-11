@@ -947,7 +947,8 @@ under test. Choices under §15:
     underline only with `=` (level 1) and `-` (level 2) as CommonMark defines, and skip YAML front matter; other
     text files (`.rst`, `.txt`, …) accept every reStructuredText adornment, levels in order of first appearance
     (docutils' rule). An adornment other than `=`/`-` must be as long as its title; bullet items, table rows,
-    quotes, directives and field lists are never titles.
+    quotes, directives and field lists are never titles. *(Corrected by D-071: AsciiDoc and Org files get
+    their own heading syntax, and reStructuredText/plain text has no `~~~` fences.)*
   - Header: `File: <path> · <heading path> (lines a-b)`, the heading path of the chunk's first line, outermost
     first (` › `; outer headings dropped past 200 characters); `File: <path> (lines a-b)` before the first heading;
     paged documents without `(lines a-b)`. The `File: … (lines a-b)` convention of code chunks is kept, so full-text
@@ -997,7 +998,9 @@ under test. Choices under §15:
 - **No prompt change:** a judge rule "a section heading applies to the lines under it" was measured and dropped:
   with and without it the live reply and all 8 recorded claims below had the same verdicts and evidence.
 - Layer 5 and the checker are unchanged: the premise has always been the chunk text with its header, so "2.32.0" in
-  the header passes the literal check exactly like a symbol in a code chunk's header did.
+  the header passes the literal check exactly like a symbol in a code chunk's header did. *(Corrected by D-071: a
+  header number counts only as written in full, never a heading's numbering or the header's line numbers, and an
+  evidence range across a later heading gets no section.)*
 - **Measured live** (trustbook-g3, Qwen3.6-35B-A3B on Ludwig's server, temperature 0, seed 42, real HHEM and judge;
   the Smoke space only read, nothing re-indexed; script `r2chunk/live_history.py` in the session scratchpad): the new
   HISTORY.md chunks for lines 159-213 (159-199, 193-202, 205-229) with the answer prompt, 5 runs:
@@ -1028,7 +1031,9 @@ behaviour is new):
 - `app/index/base.py` `search_text`: drops ` (lines a-b)` only; the heading path is indexed (full-text search finds
   "2.32.0" in every chunk of that release). Unchanged code.
 - `app/grounding/code_checks.py` (layer 5, focus window, code facts): the header has always been part of the
-  searched text and skipped as a unit, for documents too (`File: <path>` before). Unchanged.
+  searched text and skipped as a unit, for documents too (`File: <path>` before). *Changed by D-071*: layer 5
+  reads only what the header states (no line numbers, no heading numbering) and its numbers only as written in
+  full.
 - `app/grounding/code_judge.py`: excerpt title and anchors as D-069; the header line is still not numbered.
 - `app/retrieval/callees.py`: **changed.** A code chunk was recognised by `File: … (lines a-b)`; document chunks now
   match that too, so `code_path` also requires no `heading` in the locator. Without it, code examples in `.rst`
@@ -1041,3 +1046,44 @@ behaviour is new):
 - `app/ingest/incremental.py` and the viewer's offset check compare the body (`endswith`), so reused file records
   still match; a record from another `CHUNKER_VERSION` is re-chunked.
 - Frontend: `Locator.heading` already exists; no change.
+
+### D-071 Section context is checked strictly: what a header states, ranges across headings, heading syntax per format
+Review of D-068..D-070 found five ways the section context loosened grounding or named wrong sections; all fixed
+(`app/chunking/headings.py`, `header.py`, `app/grounding/code_checks.py`, `code_judge.py`):
+- **An evidence range across a heading had the header's section.** D-069 took the section from the range's start
+  line only, so evidence 187-194 of the HISTORY chunk (header section 2.32.0, heading "2.31.0" at line 190)
+  accepted "Requests 2.32.0 fixed versions up to v2.30.0" (the 2.31.0 entry). Now `section_of(start, end)`: a
+  range in which a heading inside the chunk starts after its first line has **no** section (the lines are in
+  more than one section and none speaks for all); otherwise the section of its first line as before.
+- **Every number of a heading path counted as stated.** Layer 5 searched the whole header and the judge's anchor
+  check matched numbers anywhere in the section, so "4 Limits › 4.2 Timeouts" let "defaults to 4 seconds" and
+  "4.2 seconds" pass, and "3.0.0 (2025-01-20)" let "keeps 2025 connections", "keeps 3 connections" and "20
+  connections" pass. Now, in both guards:
+  - What a header states (`header_content`) is its path and section or symbol, without `(part N)`, `(lines a-b)`
+    and each heading's **numbering** (a leading `4`, `4.2`, `4.2.` followed by a word: a location like a line
+    number; "2.32.0 (2024-05-20)" has no numbering, no word follows the number).
+  - A number of the header or section vouches for a sentence's number only **as written in full**
+    (`complete_numbers`, `stated_in_full`): `2.32.0` for "2.32.0" (or "v2.32.0"), `2024-05-20` for that date;
+    never "2.32", "3.0", "3", "2025" or "20", and not when the sentence also writes the same literal elsewhere.
+    Every other number must be in the chunk body (layer 5) or the evidence lines (judge). `True`/`False`/`None`
+    and the digits of a hyphenated term are never taken from a header. Names and terms of a section still count
+    (D-069), with its numbers blanked out.
+- **Line numbers of the header counted as stated.** `missing_literals` dropped only `(part N)`, so "The history
+  lists 38 fixes." passed against `File: HISTORY.md · Release History (lines 1-38)`. Layer 5 now drops `(lines
+  a-b)` too, for code headers as well (stricter than phase-3, where a code chunk's line numbers counted the
+  same way); `missing_identifiers` and the judge's header names likewise.
+- **AsciiDoc and Org files got reStructuredText rules.** `[source,yaml]` over `----` and `[NOTE]` over `====`
+  became level-1/2 headings, the real `== Section` and `* Heading` lines none. Now the heading syntax follows
+  the file (`heading_syntax`): Markdown (`.md`, `.markdown`, parsed documents); reStructuredText rules for
+  `.rst`/`.txt`; **AsciiDoc** (`.adoc`, `.asciidoc`): `=`…`======` and `#` titles at column 0, no headings in
+  delimited blocks (`----`, `....`, `====`, `****`, `____`, `++++`, `////`, ```), block attributes never titles;
+  deprecated two-line titles are not recognised (a missed heading only drops context; a wrong one misattributes);
+  **Org** (`.org`): `*` headlines at column 0 (tags dropped), no headings in `#+BEGIN_…`/`#+END_…` blocks. The
+  units chunker uses the same per-syntax block lines (`FENCES`).
+- **A `~~~~` line in a reStructuredText file opened a code fence** (a transition, or a tilde underline shorter
+  than its title) and hid every later heading, so the rest of the file kept a stale section. reStructuredText and
+  plain text now fence only with ```; a tilde line is an adornment or a transition.
+- **Measured:** the 30 text document files of `requests` chunk exactly as before (174 chunks with the character
+  estimate, every header identical; `r3fix/cmp.py` in the session scratchpad), so D-068's corpus measurements
+  stand. Unit tests hold every reviewer reproducer (false claims fail, the HISTORY.md true claim passes).
+- `CHUNKER_VERSION` stays `p3-treesitter-5` (never released; `requests` chunks are unchanged).
