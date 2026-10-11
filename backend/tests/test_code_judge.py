@@ -288,8 +288,11 @@ SWAPPED = "With socks5h, DNS resolution happens on the client."
 RIGHT = "With socks5h, the domains are resolved on the proxy server."
 
 
-def confirmed(reply: str, score: float, confirm_below: float = 0.8) -> tuple[bool, bool, int]:
-    chat = ScriptedChat(reply)
+def confirmed(
+    reply: str, score: float, confirm_below: float = 0.8, alone: str | None = None
+) -> tuple[bool, bool, int]:
+    """Check SWAPPED; ``alone`` is the judge's second reply (the veto asked again alone)."""
+    chat = ScriptedChat(reply, *([alone] if alone is not None else []))
     verifier = Verifier(
         lambda pairs: [score for _ in pairs],
         threshold=0.5,
@@ -300,13 +303,21 @@ def confirmed(reply: str, score: float, confirm_below: float = 0.8) -> tuple[boo
     return check.passed, check.vetoed, len(chat.calls)
 
 
-def test_a_borderline_pass_the_judge_contradicts_fails() -> None:
-    passed, vetoed, calls = confirmed(verdicts((1, False, [])), 0.6)
-    assert (passed, vetoed, calls) == (False, True, 1)
+def test_a_pass_the_judge_contradicts_twice_fails() -> None:
+    no = verdicts((1, False, []))
+    passed, vetoed, calls = confirmed(no, 0.6, alone=no)
+    assert (passed, vetoed, calls) == (False, True, 2)
 
 
-def test_a_borderline_pass_with_evidence_outside_its_citations_fails() -> None:
-    passed, vetoed, _ = confirmed(verdicts((1, True, [("c2", 1, 1)])), 0.6)
+def test_a_veto_not_repeated_alone_keeps_the_pass() -> None:
+    supported = verdicts((1, True, [("c1", 1, 1)]))
+    assert confirmed(verdicts((1, False, [])), 0.6, alone=supported) == (True, False, 2)
+    assert confirmed(verdicts((1, False, [])), 0.6, alone="not json") == (True, False, 2)
+
+
+def test_a_pass_with_evidence_outside_its_citations_fails() -> None:
+    outside = verdicts((1, True, [("c2", 1, 1)]))
+    passed, vetoed, _ = confirmed(outside, 0.6, alone=outside)
     assert (passed, vetoed) == (False, True)
 
 
@@ -321,7 +332,7 @@ def test_passes_at_or_above_the_bound_are_not_sent() -> None:
 
 
 def test_vetoed_sentences_score_zero_for_the_threshold_sweep() -> None:
-    chat = ScriptedChat(verdicts((1, False, [])))
+    chat = ScriptedChat(verdicts((1, False, [])), verdicts((1, False, [])))
     verifier = Verifier(
         lambda pairs: [0.6 for _ in pairs],
         threshold=0.5,

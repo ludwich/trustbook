@@ -205,10 +205,12 @@ class Verifier:
         sentences: Sequence[tuple[str, Sequence[RetrievedChunk]]],
         checks: list[SentenceCheck],
     ) -> list[SentenceCheck]:
-        """Rescue failed sentences and confirm borderline passes in one judge call (D-045, D-056).
+        """Rescue failed sentences and confirm checker passes in one judge call (D-045, D-056).
 
         Rescue: failed only the checker (no layer 5 problems). Confirmation: passed on the checker
-        with a score below the confirmation bound.
+        with a score below the confirmation bound. A veto from the batch is asked again with the
+        sentence alone and stands only if that verdict contradicts it too: in a batch of similar
+        statements the judge sometimes rejected true ones it accepts alone (D-056).
         """
         if self._code_judge is None or not self.enabled:
             return checks
@@ -229,10 +231,7 @@ class Verifier:
         if not pending:
             return checks
         items = [(sentences[i][0], list(sentences[i][1])) for i in pending]
-        started = time.perf_counter()
-        outcomes = self._code_judge(items)
-        self.judge_seconds += time.perf_counter() - started
-        self.judge_calls += 1
+        outcomes = self._ask_judge(items)
         if outcomes is None or len(outcomes) != len(items):
             if outcomes is not None:
                 logger.warning("The judge returned the wrong number of verdicts; ignored")
@@ -244,9 +243,13 @@ class Verifier:
                 result[i] = replace(result[i], passed=True, method="code_judge")
                 rescued += 1
             elif i not in rescue and outcome.vetoed:
+                again = self._ask_judge([items[pending.index(i)]])
+                if again is None or len(again) != 1 or not again[0].vetoed:
+                    logger.info("Judge veto of sentence %d not repeated alone; kept", i + 1)
+                    continue
                 result[i] = replace(result[i], passed=False, method=None, vetoed=True)
                 vetoed += 1
-                logger.info("Judge vetoed sentence %d (%s)", i + 1, outcome.reason)
+                logger.info("Judge vetoed sentence %d (%s)", i + 1, again[0].reason)
         logger.info(
             "Judge: %d of %d failed sentence(s) rescued, %d of %d confirmation(s) vetoed",
             rescued,
@@ -255,6 +258,15 @@ class Verifier:
             len(confirm),
         )
         return result
+
+    def _ask_judge(self, items: Sequence[JudgeItem]) -> list[JudgeOutcome] | None:
+        assert self._code_judge is not None
+        started = time.perf_counter()
+        try:
+            return self._code_judge(items)
+        finally:
+            self.judge_seconds += time.perf_counter() - started
+            self.judge_calls += 1
 
     def _scores(
         self, sentences: Sequence[tuple[str, Sequence[RetrievedChunk]]]
