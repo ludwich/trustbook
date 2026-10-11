@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass, replace
 
 from app.chunking.tokens import TokenCounter
 
 _PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
 _HEADING_LINE = re.compile(r"#{1,6}[ \t]+(.+?)[ \t#]*$")
 _SENTENCE_END = re.compile(r"[.!?…][\"'”’)\]]*(?=\s)")
+# A unit ending like this ends a sentence (or introduces a list): a clean place to cut after it.
+_CLEAN_END = re.compile(r"[.!?…:][\"'”’)\]]*$")
 _STRUCTURED = re.compile(r"^(\s*[|>]|```|~~~| {4}|\t|\s*[-*+] |\s*\d+[.)] )")
 _ABBREVIATIONS = frozenset(
     "e.g i.e etc vs mr mrs ms dr prof sr jr st no fig eq approx inc ltd co cf al".split()
@@ -28,6 +30,11 @@ class Unit:
     end: int
     tokens: int
     heading: str | None = None  # set when the unit is a heading line
+    # Only set by ``split_units(lines=True)``: the unit starts a line (a chunk may start here and
+    # the chunk before it then ends at a line end), and "clean" if a sentence or paragraph also
+    # ends right before it (the preferred place to cut).
+    line_start: bool = False
+    clean_start: bool = False
 
 
 def _trimmed(text: str, start: int, end: int) -> tuple[int, int]:
@@ -99,11 +106,52 @@ def _hard_split(
     return units
 
 
+def _starts_line(text: str, start: int, offset: int) -> bool:
+    line = text.rfind("\n", start, offset) + 1 or start
+    return not text[line:offset].strip()
+
+
+def _mark_lines(text: str, start: int, units: list[Unit], rows: set[int]) -> list[Unit]:
+    """Set ``line_start`` / ``clean_start`` on ``units`` (already split at line ends).
+
+    ``rows``: starts of table rows, list items and code lines, each a clean place to cut.
+    """
+    marked: list[Unit] = []
+    previous: Unit | None = None
+    for unit in units:
+        line_start = _starts_line(text, start, unit.start)
+        clean = line_start and (
+            previous is None
+            or unit.heading is not None
+            or unit.start in rows
+            or text.count("\n", previous.end, unit.start) > 1  # a new paragraph
+            or bool(_CLEAN_END.search(text, previous.start, previous.end))
+        )
+        # The line break before a unit is a token too (as in the code chunkers), so chunks of
+        # line-split text do not grow past their target.
+        tokens = unit.tokens + (1 if line_start and previous is not None else 0)
+        marked.append(replace(unit, tokens=tokens, line_start=line_start, clean_start=clean))
+        previous = unit
+    return marked
+
+
 def split_units(
-    text: str, start: int, end: int, counter: TokenCounter, *, max_tokens: int
+    text: str,
+    start: int,
+    end: int,
+    counter: TokenCounter,
+    *,
+    max_tokens: int,
+    lines: bool = False,
 ) -> list[Unit]:
-    """Units covering the non-blank text of ``text[start:end]`` in order."""
+    """Units covering the non-blank text of ``text[start:end]`` in order.
+
+    ``lines``: prose is also split at line ends and every unit says whether it starts a line, so
+    chunks of a file can end on whole lines (a line locator then names only lines the chunk holds
+    in full, D-056).
+    """
     units: list[Unit] = []
+    rows: set[int] = set()
     in_fence = False
     for p_start, p_end in _paragraphs(text, start, end):
         p_start, p_end = _trimmed(text, p_start, p_end)
@@ -123,11 +171,15 @@ def split_units(
                 tokens = counter.count(text[p_start:first_end])
                 units.append(Unit(p_start, first_end, tokens, heading=heading.group(1).strip()))
                 body_start = first_end
-        pieces = (
+        pieces: Iterable[tuple[int, int]] = (
             _lines(text, body_start, p_end) if structured else _sentences(text, body_start, p_end)
         )
+        if lines and not structured:
+            pieces = [line for s, e in pieces for line in _lines(text, s, e)]
         for s_start, s_end in pieces:
             s_start, s_end = _trimmed(text, s_start, s_end)
             if s_end > s_start:
+                if structured:
+                    rows.add(s_start)
                 units.extend(_hard_split(text, s_start, s_end, counter, max_tokens))
-    return units
+    return _mark_lines(text, start, units, rows) if lines else units

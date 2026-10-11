@@ -69,6 +69,7 @@ def _file_document_locator(text: str, entry: FileEntry, segments: list[Segment])
             "start_line": lines.line(start),
             "end_line": lines.line(max(start, end - 1)),
             "symbol": None,
+            "kind": None,
         }
 
     return locate
@@ -76,7 +77,9 @@ def _file_document_locator(text: str, entry: FileEntry, segments: list[Segment])
 
 # Changes whenever chunking a file gives different chunks; a refresh re-chunks files indexed with
 # another version instead of keeping their chunks (incremental refresh, SPEC §7.5).
-CHUNKER_VERSION = "p3-treesitter-3"  # 2: FTS without header line numbers; 3: section = majority
+# 2: FTS without header line numbers; 3: section = majority; 4: data literals split by element,
+# locator.kind, document files chunked on whole lines (D-056)
+CHUNKER_VERSION = "p3-treesitter-4"
 
 
 def chunk_file(snapshot: Snapshot, entry: FileEntry, counter: TokenCounter) -> list[ChunkDraft]:
@@ -85,8 +88,17 @@ def chunk_file(snapshot: Snapshot, entry: FileEntry, counter: TokenCounter) -> l
     if entry.kind == "code":
         return chunk_source_code(text, entry.start, entry.end, entry.path, counter)
     locate = _file_document_locator(text, entry, snapshot.segments)
+    # A file's chunks are located by line (unless it has pages): they end on whole lines, so the
+    # cited lines hold nothing the chunk does not (ref-near-07).
+    paged = any(s.file == entry.path and s.page is not None for s in snapshot.segments)
     return chunk_document(
-        text, entry.start, entry.end, counter, locate, prefix=f"File: {entry.path}\n"
+        text,
+        entry.start,
+        entry.end,
+        counter,
+        locate,
+        prefix=f"File: {entry.path}\n",
+        align_lines=not paged,
     )
 
 

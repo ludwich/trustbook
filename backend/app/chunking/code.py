@@ -110,6 +110,13 @@ def chunk_code(
         c_start, c_end = lines[first][0], lines[last][1]
         prefix = f"File: {path} (lines {first + 1}-{last + 1})\n"
         body = prefix + text[c_start:c_end]
-        locator = {"file": path, "start_line": first + 1, "end_line": last + 1, "symbol": None}
+        # No syntax tree: what the lines hold is unknown (``kind`` null, D-056).
+        locator = {
+            "file": path,
+            "start_line": first + 1,
+            "end_line": last + 1,
+            "symbol": None,
+            "kind": None,
+        }
         drafts.append(ChunkDraft(body, c_start, c_end, locator, counter.count(body)))
     return drafts
