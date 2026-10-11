@@ -18,8 +18,17 @@ top reranker score, sentence verifier scores (from the answer's ``diagnostics``)
 sweep (see ``eval/format.md``, "Threshold sweep"). Nothing is written anywhere else, so a private
 question set never ends up in the repository unless the report path is inside it.
 
-Exit codes: 0 = report written; 1 = a ``--min-*`` / ``--max-*`` target was not met; 2 = the API
-is unreachable or the input (questions, corpus, space, code root) is invalid.
+Exit codes: 0 = report written; 1 = a ``--min-*`` / ``--max-*`` target was not met, or (with
+``--setup``) an ingest job did not end as expected; 2 = the API is unreachable or the input
+(questions, corpus, space, code root, chat override) is invalid; 130 = interrupted. A job that
+ended before the run is noted, not judged; ``--refresh`` re-ingests the sources already in the
+space so that their jobs run on, and are checked against, the running image.
+
+Generation: every question is sent with ``"generation": {"temperature": 0, "seed": 42}`` so runs
+are comparable (``--temperature``, ``--seed``); ``--app-default`` sends nothing (a real-use run with
+the app's own settings). ``--chat-endpoint`` / ``--chat-model`` switch the chat capability for the
+run and restore it afterwards, also on an error or Ctrl-C. ``--compare A.json B.json`` lists the
+per-question differences between two sidecars and exits.
 
 Only ``httpx`` and ``PyYAML`` are used. The runner talks to the API contract in
 ``docs/ARCHITECTURE.md`` ("Phase 1: sources, index, retrieval and chat").
@@ -32,13 +41,15 @@ import html
 import json
 import math
 import re
+import signal
 import sys
 import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FrameType
 from typing import Any, TextIO
 from urllib.parse import urlsplit, urlunsplit
 
@@ -55,9 +66,19 @@ DOC_EXTENSIONS = frozenset(
     "md markdown mdx rst txt text adoc asciidoc html htm pdf docx pptx xlsx odt rtf".split()
 )
 SOURCE_DONE = ("ready", "failed")
+JOB_DONE = ("done", "failed", "cancelled")
+# Eval runs ask with a fixed generation override so runs can be compared (D-055). The app's own
+# default (SPEC: temperature 0.2, no seed) applies only with --app-default.
+DEFAULT_TEMPERATURE = 0.0
+DEFAULT_SEED = 42
+SEED_CAVEAT = (
+    "Some endpoints do not honour a seed (llama-server with several parallel slots or speculative "
+    "decoding, most hosted APIs), so answers can still differ between runs."
+)
 EXIT_OK = 0
 EXIT_THRESHOLD = 1
 EXIT_UNAVAILABLE = 2
+EXIT_INTERRUPTED = 130
 
 
 class EvalError(Exception):
@@ -66,6 +87,10 @@ class EvalError(Exception):
 
 class ApiUnreachableError(EvalError):
     """The Trustbook API cannot be reached."""
+
+
+class GenerationUnsupportedError(EvalError):
+    """The API rejected the per-request ``generation`` override (an image without it)."""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -322,6 +347,7 @@ class SourceInfo:
     status: str
     failure_reason: str | None = None
     progress: float | None = None
+    job_id: str | None = None  # the source's latest ingest job
 
     @staticmethod
     def from_api(raw: dict[str, Any]) -> SourceInfo:
@@ -335,6 +361,7 @@ class SourceInfo:
             if isinstance(raw.get("failure_reason"), str)
             else None,
             progress=raw.get("progress") if isinstance(raw.get("progress"), int | float) else None,
+            job_id=raw["job_id"] if isinstance(raw.get("job_id"), str) and raw["job_id"] else None,
         )
 
 
@@ -574,6 +601,10 @@ class QuestionResult:
     regenerated: bool | None = None
     removed_sentences: int = 0
     sentence_citations: list[list[Citation]] = field(default_factory=list)  # kept sentences
+    # Which chunks the answer was generated from, and the generation settings the app used
+    # (``diagnostics.retrieval_fingerprint`` / ``diagnostics.generation``); None when not sent.
+    retrieval_fingerprint: str | None = None
+    generation: dict[str, Any] | None = None
 
     @property
     def answer_text(self) -> str:
@@ -798,23 +829,57 @@ def _ratio_json(r: Ratio) -> dict[str, Any]:
     return {"num": r.num, "den": r.den, "value": r.value}
 
 
+SIDECAR_VERSION = 2
+
+
 def sidecar(
-    info: RunInfo, results: Sequence[QuestionResult], rows: Sequence[SweepRow]
+    info: RunInfo,
+    results: Sequence[QuestionResult],
+    rows: Sequence[SweepRow],
+    setup: SetupReport | None = None,
 ) -> dict[str, Any]:
     """The JSON written next to the report: scores per question and the sweep.
 
-    Only ids, types and numbers: no question or answer text.
+    Only ids, types, settings and numbers: no question or answer text.
     """
     thresholds = info.thresholds
     metrics = compute_metrics(results)
+    chat = info.chat
     return {
-        "version": 1,
+        "version": SIDECAR_VERSION,
         "date": info.started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "api_version": info.api_version,
         "space_id": info.space_id,
         "thresholds": None
         if thresholds is None
         else {"refuse": thresholds.refuse, "verify": thresholds.verify},
+        "generation_requested": info.generation,
+        "chat": None
+        if chat is None
+        else {
+            "model": chat.model,
+            "endpoint_host": chat.endpoint_host,
+            "preset": chat.preset,
+            "overridden": chat.overridden,
+        },
+        "setup": None
+        if setup is None
+        else {
+            "jobs_ok": not setup.job_problems,
+            "refreshed": len(setup.refreshed),
+            "jobs": [
+                {
+                    "source_id": j.source_id,
+                    "job_id": j.job_id,
+                    "source_status": j.source_status,
+                    "job_status": j.job_status,
+                    "expect": j.expect,
+                    "ok": j.ok,
+                    "earlier": j.earlier,
+                }
+                for j in setup.jobs
+            ],
+        },
         "questions": [
             {
                 "id": r.question.id,
@@ -830,7 +895,11 @@ def sidecar(
                 "removed_sentences": r.removed_sentences,
                 "citations": len(r.citations),
                 "citations_correct": r.n_correct if r.question.answerable else None,
+                "must_contain_found": len(r.must_found) if r.question.must_contain else None,
+                "must_contain_total": len(r.question.must_contain) or None,
                 "latency_s": r.latency_s,
+                "retrieval_fingerprint": r.retrieval_fingerprint,
+                "generation": r.generation,
             }
             for r in results
         ],
@@ -951,6 +1020,48 @@ class Api:
             raise EvalError(f"add {kind} source: unexpected response")
         return SourceInfo.from_api(data)
 
+    def refresh_source(self, space_id: str, source_id: str) -> SourceInfo:
+        """Re-ingest a source (a new ingest job with the running image's pipeline)."""
+        data = self._request(
+            "POST",
+            f"/api/spaces/{space_id}/sources/{source_id}/refresh",
+            f"refresh source {source_id}",
+        )
+        if not isinstance(data, dict):
+            raise EvalError(f"refresh source {source_id}: unexpected response")
+        return SourceInfo.from_api(data)
+
+    def jobs(self) -> dict[str, JobInfo]:
+        """Unfinished jobs and the last 50 finished ones, by id."""
+        data = self._request("GET", "/api/jobs", "list jobs")
+        raw = data.get("jobs") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            raise EvalError("list jobs: expected {'jobs': [...]}")
+        jobs = [JobInfo.from_api(j) for j in raw if isinstance(j, dict)]
+        return {j.id: j for j in jobs if j.id}
+
+    def capability(self, cap_id: str) -> dict[str, Any]:
+        data = self._request("GET", f"/api/capabilities/{cap_id}", f"read {cap_id} settings")
+        if not isinstance(data, dict) or not isinstance(data.get("config"), dict):
+            raise EvalError(f"read {cap_id} settings: unexpected response")
+        return data
+
+    def update_capability(self, cap_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        data = self._request(
+            "PUT", f"/api/capabilities/{cap_id}", f"save {cap_id} settings", json=body
+        )
+        if not isinstance(data, dict):
+            raise EvalError(f"save {cap_id} settings: unexpected response")
+        return data
+
+    def test_capability(self, cap_id: str) -> dict[str, Any]:
+        data = self._request(
+            "POST", f"/api/capabilities/{cap_id}/test", f"test {cap_id} endpoint", json={}
+        )
+        if not isinstance(data, dict):
+            raise EvalError(f"test {cap_id} endpoint: unexpected response")
+        return data
+
     def create_conversation(self, space_id: str, title: str) -> str:
         data = self._request(
             "POST",
@@ -982,8 +1093,13 @@ def ask(
     question: Question,
     *,
     clock: Callable[[], float] = time.perf_counter,
+    generation: dict[str, Any] | None = None,
 ) -> QuestionResult:
-    """Ask one question in a fresh conversation and consume the SSE stream."""
+    """Ask one question in a fresh conversation and consume the SSE stream.
+
+    ``generation`` is sent as the message's per-request override (None: the app's default).
+    An API that rejects it raises :class:`GenerationUnsupportedError`.
+    """
     result = QuestionResult(question=question)
     api = Api(client)
     try:
@@ -998,16 +1114,24 @@ def ask(
     streamed: list[tuple[str, list[Citation]]] = []
     final: list[tuple[str, list[Citation]]] | None = None
     terminal = False
+    body: dict[str, Any] = {"content": question.question}
+    if generation is not None:
+        body["generation"] = generation
     start = clock()
     try:
         with client.stream(
             "POST",
             url,
-            json={"content": question.question},
+            json=body,
             headers={"Accept": "text/event-stream"},
         ) as resp:
             if resp.status_code >= 400:
                 resp.read()
+                if resp.status_code == 422 and generation is not None and "generation" in resp.text:
+                    raise GenerationUnsupportedError(
+                        "this Trustbook does not accept the eval generation override "
+                        "(temperature/seed); update the image, or run with --app-default"
+                    )
                 result.error = f"HTTP {resp.status_code}: {resp.text[:300]}"
                 return result
             for ev in iter_sse(resp.iter_lines()):
@@ -1067,6 +1191,8 @@ def ask(
             result.outcome = "error"
             result.error = f"{type(exc).__name__}: {exc}"
         return result
+    except GenerationUnsupportedError:
+        raise
     except EvalError as exc:
         result.outcome, result.error = "error", str(exc)
         return result
@@ -1109,6 +1235,13 @@ def read_message_extras(result: QuestionResult, message: dict[str, Any]) -> None
         result.sentence_methods = [m if isinstance(m, str) else None for m in methods]
     regenerated = diagnostics.get("regenerated")
     result.regenerated = regenerated if isinstance(regenerated, bool) else None
+    fingerprint = diagnostics.get("retrieval_fingerprint")
+    if isinstance(fingerprint, str) and fingerprint:
+        result.retrieval_fingerprint = fingerprint
+    elif isinstance(fingerprint, list | dict) and fingerprint:
+        result.retrieval_fingerprint = json.dumps(fingerprint, sort_keys=True)
+    generation = diagnostics.get("generation")
+    result.generation = generation if isinstance(generation, dict) else None
 
 
 def _sentence(data: dict[str, Any]) -> tuple[str, list[Citation]]:
@@ -1122,10 +1255,14 @@ def _sentence(data: dict[str, Any]) -> tuple[str, list[Citation]]:
 # ---------------------------------------------------------------------------------------------
 
 
+CORPUS_EXPECT = ("ready", "failed")
+
+
 @dataclass(frozen=True)
 class CorpusEntry:
     kind: str  # folder | url
     value: str
+    expect: str = "ready"  # ready | failed (a source that must fail, e.g. a blocked page)
 
 
 @dataclass(frozen=True)
@@ -1145,13 +1282,21 @@ def load_corpus(path: str) -> Corpus:
     for i, raw in enumerate(data["sources"]):
         if not isinstance(raw, dict) or len({"folder", "url"} & set(raw)) != 1:
             raise EvalError(f"{path}: sources[{i}] needs exactly one of 'folder' or 'url'")
+        unknown = set(raw) - {"folder", "url", "expect"}
+        if unknown:
+            raise EvalError(f"{path}: sources[{i}]: unknown keys {sorted(unknown)}")
         kind = "folder" if "folder" in raw else "url"
         value = raw[kind]
         if not isinstance(value, str) or not value.strip():
             raise EvalError(f"{path}: sources[{i}].{kind} must be a non-empty string")
         if kind == "url" and not is_url(value):
             raise EvalError(f"{path}: sources[{i}].url is not a URL: {value}")
-        entries.append(CorpusEntry(kind, value.strip()))
+        expect = raw.get("expect", "ready")
+        if expect not in CORPUS_EXPECT:
+            raise EvalError(
+                f"{path}: sources[{i}].expect must be one of {', '.join(CORPUS_EXPECT)}"
+            )
+        entries.append(CorpusEntry(kind, value.strip(), expect))
     description = data.get("space_description", "")
     return Corpus(description=str(description or ""), entries=tuple(entries))
 
@@ -1164,16 +1309,147 @@ def entry_present(entry: CorpusEntry, source: SourceInfo) -> bool:
     return source.type == "folder" and paths_match(entry.value, source.origin)
 
 
+@dataclass(frozen=True)
+class JobInfo:
+    """One entry of ``GET /api/jobs``."""
+
+    id: str
+    kind: str
+    status: str
+    error: str | None = None
+
+    @staticmethod
+    def from_api(raw: dict[str, Any]) -> JobInfo:
+        error = raw.get("error")
+        return JobInfo(
+            id=str(raw.get("id", "")),
+            kind=str(raw.get("kind", "")),
+            status=str(raw.get("status", "")),
+            error=error if isinstance(error, str) and error else None,
+        )
+
+
+@dataclass(frozen=True)
+class JobCheck:
+    """A corpus source's ingest job against the source's own status (D-055).
+
+    ``problem`` is set when the job did not end as expected: ``done`` for a ready source, ``failed``
+    for a source the corpus expects to fail. A ready source whose job failed (or the reverse) is a
+    job/source mismatch. ``note`` explains a job that could not be checked but is not an error.
+    ``earlier``: the job had already ended before this run started, so it may have run on another
+    image; only the source's current status is judged (``--refresh`` re-ingests and checks it).
+    """
+
+    source_id: str
+    label: str
+    source_status: str
+    job_id: str | None
+    job_status: str | None
+    expect: str = "ready"
+    problem: str | None = None
+    note: str | None = None
+    earlier: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.problem is None
+
+
+def check_job(
+    source: SourceInfo,
+    job: JobInfo | None,
+    expect: str,
+    *,
+    added: bool,
+    listed: bool = True,
+    earlier: bool = False,
+) -> JobCheck:
+    """Judge one source's ingest job. ``added``: this run started the job (it added or refreshed
+    the source), so the job must be listed; ``listed``: ``GET /api/jobs`` answered at all;
+    ``earlier``: the job had already ended when this run started (see :class:`JobCheck`)."""
+    base = JobCheck(
+        source_id=source.id,
+        label=source.title or str(source.origin),
+        source_status=source.status,
+        job_id=source.job_id,
+        job_status=job.status if job else None,
+        expect=expect,
+        earlier=earlier and job is not None and not added,
+    )
+    if not listed:
+        return replace(base, problem="job statuses unavailable (GET /api/jobs failed)")
+    if job is None:
+        if source.job_id is None:
+            return replace(base, problem="source has no ingest job") if added else base
+        if added:
+            return replace(base, problem="ingest job not listed in GET /api/jobs")
+        return replace(base, note="older job, no longer listed")
+    reason = f": {job.error}" if job.error else ""
+    if base.earlier:
+        return _check_earlier(base, source, job, reason)
+    if job.status not in JOB_DONE:
+        return replace(base, problem=f"job still {job.status}")
+    if job.status == "cancelled":
+        return replace(base, problem="job cancelled")
+    if source.status == "ready" and job.status == "failed":
+        return replace(base, problem=f"job/source mismatch: source ready, job failed{reason}")
+    if source.status == "failed" and job.status == "done":
+        return replace(base, problem="job/source mismatch: source failed, job done")
+    if source.status not in SOURCE_DONE:
+        return replace(base, problem=f"job {job.status}, source still {source.status}")
+    if expect == "ready" and job.status == "failed":
+        why = source.failure_reason or job.error
+        return replace(base, problem="source and job failed" + (f": {why}" if why else ""))
+    if expect == "failed" and job.status == "done":
+        return replace(base, problem="expected to fail, but the job is done and the source ready")
+    return base
+
+
+def _check_earlier(base: JobCheck, source: SourceInfo, job: JobInfo, reason: str) -> JobCheck:
+    """A job that ended before this run: it says nothing about the image under test (Gate 3 F1
+    failed every job of the phase-3-rc image while each source was indexed correctly), so it is
+    noted, and only the source's current status, which this run's answers depend on, is judged."""
+    if base.expect == "ready" and source.status != "ready":
+        why = source.failure_reason or job.error
+        return replace(base, problem=f"source {source.status}" + (f": {why}" if why else ""))
+    if base.expect == "failed" and source.status == "ready":
+        return replace(base, problem="expected to fail, but the source is ready")
+    mismatch = (source.status == "ready" and job.status == "failed") or (
+        source.status == "failed" and job.status == "done"
+    )
+    what = "job/source mismatch from an earlier ingest" if mismatch else "earlier job"
+    return replace(
+        base,
+        note=f"{what} (job {job.status}{reason}), ended before this run: not re-checked, "
+        "--refresh re-ingests and checks it",
+    )
+
+
 @dataclass
 class SetupReport:
     space_created: bool = False
     added: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    refreshed: list[str] = field(default_factory=list)
     add_failed: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     not_ready: list[str] = field(default_factory=list)
     timed_out: bool = False
     seconds: float = 0.0
+    jobs: list[JobCheck] = field(default_factory=list)
+
+    @property
+    def job_problems(self) -> list[JobCheck]:
+        return [j for j in self.jobs if not j.ok]
+
+    @property
+    def jobs_ratio(self) -> Ratio:
+        return Ratio(sum(j.ok for j in self.jobs), len(self.jobs))
+
+    @property
+    def earlier_jobs(self) -> int:
+        """Jobs that ended before this run and were therefore not re-checked."""
+        return sum(j.earlier for j in self.jobs)
 
 
 def _progress_line(elapsed: float, tracked: Sequence[SourceInfo]) -> str:
@@ -1195,14 +1471,19 @@ def setup_corpus(
     corpus: Corpus,
     *,
     timeout_s: float,
+    refresh: bool = False,
     poll_s: float = 5.0,
     log: TextIO = sys.stderr,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> tuple[dict[str, Any], SetupReport]:
-    """Create the space if missing, add missing sources, wait until all are ready or failed.
+    """Create the space if missing, add missing sources, wait until all are ready or failed,
+    then wait for their ingest jobs and check each job's status against its source (D-055).
 
-    Idempotent: a corpus entry whose origin already exists in the space is skipped.
+    Idempotent: a corpus entry whose origin already exists in the space is skipped, or with
+    ``refresh`` re-ingested, so that its job runs (and is checked) on the image under test. The
+    job of a skipped source that had already ended when the run started is an earlier job: it
+    is noted, not judged (see :func:`check_job`).
     """
     report = SetupReport()
     space = find_space(api.spaces(), space_key)
@@ -1211,12 +1492,31 @@ def setup_corpus(
         report.space_created = True
         print(f"created space {space.get('name')} ({space['id']})", file=log)
     sid = str(space["id"])
+    ended_before = _ended_jobs(api)
     existing = api.sources(sid)
-    tracked: set[str] = set()
+    tracked: dict[str, CorpusEntry] = {}
+    added_ids: set[str] = set()  # sources whose current job this run started
+    earlier: dict[str, str] = {}  # source id -> its job id, for jobs that ended before the run
+    refresh_failed: dict[str, str] = {}
     for entry in corpus.entries:
         match = next((s for s in existing if entry_present(entry, s)), None)
         if match is not None:
-            tracked.add(match.id)
+            tracked[match.id] = entry
+            if refresh:
+                try:
+                    api.refresh_source(sid, match.id)
+                except ApiUnreachableError:
+                    raise
+                except EvalError as exc:
+                    refresh_failed[match.id] = str(exc)
+                    print(f"could not refresh {entry.kind} {entry.value}: {exc}", file=log)
+                else:
+                    added_ids.add(match.id)
+                    report.refreshed.append(entry.value)
+                    print(f"refreshed {entry.kind} {entry.value}", file=log)
+                    continue
+            if match.job_id is not None and match.job_id in ended_before:
+                earlier[match.id] = match.job_id
             report.skipped.append(f"{entry.value} (already present: {match.status})")
             print(f"skip {entry.kind} {entry.value}: already present ({match.status})", file=log)
             continue
@@ -1228,7 +1528,8 @@ def setup_corpus(
             report.add_failed.append(f"{entry.value}: {exc}")
             print(f"could not add {entry.kind} {entry.value}: {exc}", file=log)
             continue
-        tracked.add(created.id)
+        tracked[created.id] = entry
+        added_ids.add(created.id)
         existing.append(created)
         report.added.append(entry.value)
         print(f"added {entry.kind} {entry.value}", file=log)
@@ -1259,8 +1560,259 @@ def setup_corpus(
         for s in current
         if s.status == "failed"
     ]
+    report.jobs = wait_for_jobs(
+        api,
+        current,
+        {source_id: e.expect for source_id, e in tracked.items()},
+        added_ids,
+        earlier=earlier,
+        deadline=start + timeout_s,
+        poll_s=poll_s,
+        log=log,
+        sleep=sleep,
+        clock=clock,
+    )
+    report.jobs = [
+        replace(j, problem=f"refresh failed: {refresh_failed[j.source_id]}", note=None)
+        if j.source_id in refresh_failed
+        else j
+        for j in report.jobs
+    ]
     report.seconds = clock() - start
     return space, report
+
+
+def _ended_jobs(api: Api) -> set[str]:
+    """Ids of the jobs that had already ended when the run started (empty if unknown: then no
+    job counts as earlier, and a failing ``GET /api/jobs`` is reported by the job checks)."""
+    try:
+        jobs = api.jobs()
+    except ApiUnreachableError:
+        raise
+    except EvalError:
+        return set()
+    return {j.id for j in jobs.values() if j.status in JOB_DONE}
+
+
+def wait_for_jobs(
+    api: Api,
+    sources: Sequence[SourceInfo],
+    expect: dict[str, str],
+    added: set[str],
+    *,
+    earlier: dict[str, str] | None = None,
+    deadline: float,
+    poll_s: float,
+    log: TextIO,
+    sleep: Callable[[float], None],
+    clock: Callable[[], float],
+) -> list[JobCheck]:
+    """Poll ``GET /api/jobs`` until every finished source's job has ended (or ``deadline``), then
+    check each one. A source can look ready while its job still fails in a later step (Gate 3,
+    F1): that is the job/source mismatch this catches."""
+    jobs: dict[str, JobInfo] = {}
+    listed = True
+    while True:
+        try:
+            jobs = api.jobs()
+        except ApiUnreachableError:
+            raise
+        except EvalError as exc:
+            print(f"could not read ingest jobs: {exc}", file=log)
+            listed = False
+            break
+        running = [
+            s
+            for s in sources
+            if s.status in SOURCE_DONE
+            and s.job_id in jobs
+            and jobs[s.job_id].status not in JOB_DONE
+        ]
+        if not running or clock() >= deadline:
+            break
+        sleep(poll_s)
+    checks = [
+        check_job(
+            s,
+            jobs.get(s.job_id) if s.job_id else None,
+            expect.get(s.id, "ready"),
+            added=s.id in added,
+            listed=listed,
+            earlier=earlier is not None and s.job_id is not None and earlier.get(s.id) == s.job_id,
+        )
+        for s in sources
+    ]
+    for c in checks:
+        tail = f": {c.problem}" if c.problem else (f" ({c.note})" if c.note else "")
+        print(
+            f"job for {c.label}: {c.job_status or 'not listed'}, source {c.source_status}{tail}",
+            file=log,
+        )
+    return checks
+
+
+# ---------------------------------------------------------------------------------------------
+# Chat model for the run (--chat-endpoint / --chat-model; D-055)
+# ---------------------------------------------------------------------------------------------
+
+# The fields the runner saves and puts back. The API key is never read (the API only returns
+# whether one is set) and never sent, so it stays exactly as the user saved it.
+CHAT_RESTORE_FIELDS = ("preset", "base_url", "model", "api_version")
+
+
+@dataclass(frozen=True)
+class ChatConfig:
+    """The saved chat capability config, as far as the runner needs it."""
+
+    preset: str | None
+    base_url: str | None
+    model: str | None
+    api_version: str | None
+    api_key_set: bool = False
+
+    @staticmethod
+    def from_capability(cap: dict[str, Any]) -> ChatConfig:
+        cfg = cap.get("config")
+        cfg = cfg if isinstance(cfg, dict) else {}
+
+        def text(name: str) -> str | None:
+            value = cfg.get(name)
+            return value if isinstance(value, str) and value else None
+
+        return ChatConfig(
+            preset=text("preset"),
+            base_url=text("base_url"),
+            model=text("model"),
+            api_version=text("api_version"),
+            api_key_set=cfg.get("api_key_set") is True,
+        )
+
+    def restore_body(self) -> dict[str, Any]:
+        return {name: getattr(self, name) for name in CHAT_RESTORE_FIELDS}
+
+    def describe(self) -> str:
+        return (
+            f"preset {self.preset or '-'}, base URL {self.base_url or '-'}, "
+            f"model {self.model or '-'}, API version {self.api_version or '-'}"
+        )
+
+
+@dataclass(frozen=True)
+class ChatInfo:
+    """The chat model and endpoint the run used (read back from the API)."""
+
+    model: str | None
+    endpoint_host: str | None
+    preset: str | None
+    overridden: bool = False
+
+
+def endpoint_host(url: str | None) -> str | None:
+    """``host:port`` of a base URL (no path, no credentials)."""
+    if not url:
+        return None
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return (f"{host}:{port}" if port else host) or None
+
+
+def url_origin(url: str | None) -> tuple[str, str, int | None] | None:
+    """Scheme, host and port: the parts that decide where a saved API key is sent (the same
+    comparison the backend uses to drop a key when the chat server changes)."""
+    if not url:
+        return None
+    parts = urlsplit(url.strip())
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return (parts.scheme.lower(), (parts.hostname or "").lower(), port)
+
+
+def chat_override_body(
+    original: ChatConfig, endpoint: str | None, model: str | None
+) -> dict[str, Any]:
+    """The ``PUT /api/capabilities/chat`` body for the override.
+
+    An endpoint switches to the ``custom`` preset (any OpenAI-compatible server, such as
+    llama-server). Trustbook drops a saved API key when the chat server changes, so that the key
+    never reaches another host; the runner cannot put it back afterwards (it never sees keys).
+    Such an override is refused instead.
+    """
+    body: dict[str, Any] = {}
+    if endpoint is not None:
+        if not is_url(endpoint):
+            raise EvalError(f"--chat-endpoint is not a URL: {endpoint}")
+        if original.api_key_set and url_origin(endpoint) != url_origin(original.base_url):
+            raise EvalError(
+                "the saved chat settings have an API key, and Trustbook deletes a saved key when "
+                "the chat server changes; --chat-endpoint would lose it. Use an endpoint on the "
+                "same server, or change the chat endpoint in Settings yourself."
+            )
+        body["preset"] = "custom"
+        body["base_url"] = endpoint.strip()
+    if model is not None:
+        if not model.strip():
+            raise EvalError("--chat-model must not be empty")
+        body["model"] = model.strip()
+    return body
+
+
+def read_chat_info(api: Api, *, overridden: bool = False) -> ChatInfo | None:
+    """The chat model and endpoint host as the API reports them; None if it cannot say."""
+    try:
+        config = ChatConfig.from_capability(api.capability("chat"))
+    except ApiUnreachableError:
+        raise
+    except EvalError:
+        return None
+    return ChatInfo(
+        model=config.model,
+        endpoint_host=endpoint_host(config.base_url),
+        preset=config.preset,
+        overridden=overridden,
+    )
+
+
+def apply_chat_override(api: Api, body: dict[str, Any], log: TextIO) -> None:
+    """Save the override, then test the endpoint once so a typo fails before the run."""
+    api.update_capability("chat", body)
+    result = api.test_capability("chat")
+    if result.get("ok") is not True:
+        message = str(result.get("message") or "no reason given")
+        raise EvalError(f"the chat endpoint from --chat-endpoint/--chat-model failed: {message}")
+    print("chat override saved and tested", file=log)
+
+
+def restore_chat(api: Api, original: ChatConfig, log: TextIO) -> bool:
+    """Put the saved chat settings back. Never raises: on failure it prints what to restore."""
+    try:
+        api.update_capability("chat", original.restore_body())
+        now = ChatConfig.from_capability(api.capability("chat"))
+    except (EvalError, httpx.HTTPError) as exc:
+        print(
+            f"WARNING: could not restore the chat settings ({exc}). Restore them in Settings: "
+            f"{original.describe()}",
+            file=log,
+        )
+        return False
+    if (now.preset, now.model, now.api_version) != (
+        original.preset,
+        original.model,
+        original.api_version,
+    ) or url_origin(now.base_url) != url_origin(original.base_url):
+        print(
+            "WARNING: the chat settings read back differ from the saved ones. Check Settings: "
+            f"expected {original.describe()}, found {now.describe()}",
+            file=log,
+        )
+        return False
+    print("chat settings restored", file=log)
+    return True
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1392,6 +1944,58 @@ class RunInfo:
     max_false_refusals_code: int | None = None
     max_p95: float | None = None
     min_ranges_valid: float | None = None
+    # The per-request override sent with every question; None = the app's own default.
+    generation: dict[str, Any] | None = None
+    chat: ChatInfo | None = None  # None when the API did not report it
+
+
+def describe_generation(generation: dict[str, Any]) -> str:
+    """``temperature 0, seed 42`` (keys in a fixed order, others sorted after them)."""
+    order = ["temperature", "seed"]
+    keys = [k for k in order if k in generation] + sorted(k for k in generation if k not in order)
+    parts = []
+    for k in keys:
+        v = generation[k]
+        value = f"{v:g}" if isinstance(v, float) else ("none" if v is None else str(v))
+        parts.append(f"{k} {value}")
+    return ", ".join(parts) or "nothing"
+
+
+def generation_lines(info: RunInfo, results: Sequence[QuestionResult]) -> list[str]:
+    """Header lines: what the runner asked for and what the app reports it used."""
+    if info.generation is None:
+        lines = [
+            "- Generation: **real-use run**, app default (the runner sends no override; the app "
+            "uses temperature 0.2 without a seed)"
+        ]
+    else:
+        lines = [
+            f"- Generation: {describe_generation(info.generation)} (eval override sent with every "
+            f"question; the app default is temperature 0.2 without a seed). {SEED_CAVEAT}"
+        ]
+    seen: dict[str, int] = {}
+    for r in results:
+        if r.generation is not None:
+            key = describe_generation(r.generation)
+            seen[key] = seen.get(key, 0) + 1
+    if seen:
+        reported = "; ".join(f"{k} ({n}/{len(results)} answers)" for k, n in sorted(seen.items()))
+        lines.append(f"- Generation reported by the app: {reported}")
+    return lines
+
+
+def chat_line(chat: ChatInfo | None) -> str:
+    if chat is None:
+        return "- Chat model: not reported by the API"
+    how = (
+        "set for this run by --chat-endpoint/--chat-model, restored afterwards"
+        if chat.overridden
+        else "saved settings"
+    )
+    return (
+        f"- Chat model: `{chat.model or 'unknown'}` at `{chat.endpoint_host or 'unknown'}` "
+        f"(preset {chat.preset or '-'}; {how})"
+    )
 
 
 def render_report(
@@ -1415,6 +2019,8 @@ def render_report(
         f"- Questions: {files}: {len(results)} "
         f"({n_ans} answerable, {len(results) - n_ans} unanswerable)"
     )
+    out.append(chat_line(info.chat))
+    out.extend(generation_lines(info, results))
     out.append("")
     p_target, p_res = _verdict(m.precision.value, info.min_precision)
     r_target, r_res = _verdict(m.correct_refusal.value, info.min_refusal)
@@ -1463,6 +2069,14 @@ def render_report(
             f"| Cited ranges valid (file and lines exist in the checkout) | {_pct(valid)} "
             f"| {v_target} | {v_res} |"
         )
+    if setup is not None:
+        jobs = setup.jobs_ratio
+        j_res = "pass" if not setup.job_problems else "**FAIL**"
+        n_earlier = setup.earlier_jobs
+        j_val = f"{jobs.num}/{jobs.den}" + (
+            f" ({n_earlier} ended before this run, not re-checked)" if n_earlier else ""
+        )
+        out.append(f"| Ingest jobs ended as expected (setup) | {j_val} | all | {j_res} |")
     out.append("")
     out.append(
         "| ID | Type | Category | Outcome | Citations correct/total "
@@ -1530,6 +2144,19 @@ def render_report(
         if ranges.bad:
             out.append("")
 
+    if setup is not None and setup.jobs:
+        out.append("#### Ingest jobs")
+        out.append("")
+        out.append("| Source | Source status | Job status | Expected | Check |")
+        out.append("|---|---|---|---|---|")
+        for j in setup.jobs:
+            check = f"**{j.problem}**" if j.problem else ("ok" + (f" ({j.note})" if j.note else ""))
+            out.append(
+                f"| {_cell(j.label)} | {j.source_status} | {j.job_status or 'not listed'} "
+                f"| {j.expect} | {_cell(check)} |"
+            )
+        out.append("")
+
     errors = [r for r in results if r.outcome == "error"]
     if errors:
         out.append("#### Errors")
@@ -1557,8 +2184,15 @@ def render_report(
             notes.append("failed sources: " + "; ".join(setup.failed))
         if setup.add_failed:
             notes.append("sources that could not be added: " + "; ".join(setup.add_failed))
+        if setup.earlier_jobs:
+            notes.append(
+                f"{setup.earlier_jobs} ingest jobs ended before this run (possibly on another "
+                "image) and were not re-checked; `--refresh` re-ingests every corpus source and "
+                "checks its job"
+            )
+        refreshed = f"{len(setup.refreshed)} refreshed, " if setup.refreshed else ""
         notes.append(
-            f"setup: {len(setup.added)} added, {len(setup.skipped)} already present, "
+            f"setup: {len(setup.added)} added, {refreshed}{len(setup.skipped)} already present, "
             f"waited {setup.seconds:.0f} s"
         )
     if notes:
@@ -1635,6 +2269,141 @@ def thresholds_met(
 
 
 # ---------------------------------------------------------------------------------------------
+# Comparing two runs (--compare A.json B.json)
+# ---------------------------------------------------------------------------------------------
+
+# Two top rerank scores closer than this count as the same retrieval when no fingerprint exists.
+SAME_SCORE = 1e-5
+
+
+def load_sidecar(path: str) -> dict[str, Any]:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise EvalError(f"{path}: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("questions"), list):
+        raise EvalError(f"{path}: not a runner sidecar (no 'questions' list)")
+    return data
+
+
+def _question_rows(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(q["id"]): q
+        for q in data["questions"]
+        if isinstance(q, dict) and q.get("id") is not None
+    }
+
+
+def outcome_cell(q: dict[str, Any]) -> str:
+    """``answered 2/3`` (correct/total citations), ``refused (unsupported)``, ``error``."""
+    outcome = str(q.get("outcome") or "?")
+    if outcome == "refused":
+        return f"refused ({q.get('refusal_reason') or '-'})"
+    if outcome == "answered":
+        cits, correct = q.get("citations"), q.get("citations_correct")
+        if q.get("type") == "unanswerable":
+            return "answered (should refuse)"
+        text = f"answered {correct}/{cits}" if correct is not None else "answered"
+        found, total = q.get("must_contain_found"), q.get("must_contain_total")
+        if total:
+            text += f", must_contain {found}/{total}"
+        return text
+    return outcome
+
+
+def retrieval_same(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
+    """Same context? By ``retrieval_fingerprint`` when both runs have one, else by the top rerank
+    score (weaker: the same top chunk, not necessarily the same context). None = unknown."""
+    fa, fb = a.get("retrieval_fingerprint"), b.get("retrieval_fingerprint")
+    if fa is not None and fb is not None:
+        return bool(fa == fb)
+    ta, tb = _num(a.get("top_rerank")), _num(b.get("top_rerank"))
+    if ta is not None and tb is not None:
+        return abs(ta - tb) <= SAME_SCORE
+    return None
+
+
+def _run_label(data: dict[str, Any]) -> str:
+    chat = data.get("chat") if isinstance(data.get("chat"), dict) else None
+    model = f"`{chat.get('model')}` at `{chat.get('endpoint_host')}`" if chat else "chat unknown"
+    gen = data.get("generation_requested")
+    if isinstance(gen, dict):
+        generation = describe_generation(gen)
+    elif "generation_requested" in data:
+        generation = "app default (real-use)"
+    else:
+        generation = "generation unknown"
+    return f"{data.get('date') or '?'}, {model}, {generation}"
+
+
+def _precision(rows: Iterable[dict[str, Any]]) -> str:
+    num = den = 0
+    for q in rows:
+        if q.get("type") == "answerable" and isinstance(q.get("citations"), int):
+            den += q["citations"]
+            num += q.get("citations_correct") or 0
+    return _pct(Ratio(num, den))
+
+
+def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -> str:
+    """Markdown: the questions whose outcome differs between two runs, and whether their
+    retrieval was the same (then the model or its sampling made the difference) or not (then the
+    pipeline or the index did)."""
+    qa, qb = _question_rows(a), _question_rows(b)
+    out = ["### Run comparison", ""]
+    out.append(f"- A: `{names[0]}`: {_run_label(a)}; citation precision {_precision(qa.values())}")
+    out.append(f"- B: `{names[1]}`: {_run_label(b)}; citation precision {_precision(qb.values())}")
+    out.append("")
+    common = [qid for qid in qa if qid in qb]
+    changed = [qid for qid in common if outcome_cell(qa[qid]) != outcome_cell(qb[qid])]
+    retrieval_moved = [qid for qid in common if retrieval_same(qa[qid], qb[qid]) is False]
+    causes = {"model": 0, "retrieval": 0, "unknown": 0}
+    if changed:
+        out.append("| ID | A | B | Retrieval | Likely cause |")
+        out.append("|---|---|---|---|---|")
+        for qid in changed:
+            same = retrieval_same(qa[qid], qb[qid])
+            fingerprinted = all(
+                q.get("retrieval_fingerprint") is not None for q in (qa[qid], qb[qid])
+            )
+            if same is True:
+                where = "same" if fingerprinted else "same top score"
+                cause = "model"
+            elif same is False:
+                where, cause = "different", "retrieval"
+            else:
+                where, cause = "unknown", "unknown"
+            causes[cause] += 1
+            label = {
+                "model": "model / sampling",
+                "retrieval": "pipeline / index",
+                "unknown": "unknown",
+            }[cause]
+            out.append(
+                f"| {_cell(qid)} | {_cell(outcome_cell(qa[qid]))} | {_cell(outcome_cell(qb[qid]))} "
+                f"| {where} | {label} |"
+            )
+        out.append("")
+    else:
+        out += ["No outcome differences.", ""]
+    out.append(
+        f"{len(changed)} of {len(common)} questions differ: {causes['model']} with the same "
+        f"retrieval (model / sampling), {causes['retrieval']} with different retrieval "
+        f"(pipeline / index), {causes['unknown']} unknown (no fingerprint or scores). "
+        f"Retrieval differs on {len(retrieval_moved)} question(s) in all"
+        + (": " + ", ".join(f"`{q}`" for q in retrieval_moved) if retrieval_moved else "")
+        + "."
+    )
+    only_a = [qid for qid in qa if qid not in qb]
+    only_b = [qid for qid in qb if qid not in qa]
+    if only_a:
+        out.append(f"Only in A: {', '.join(f'`{q}`' for q in only_a)}.")
+    if only_b:
+        out.append(f"Only in B: {', '.join(f'`{q}`' for q in only_b)}.")
+    return "\n".join(out).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------------------------
 
@@ -1662,18 +2431,24 @@ def _seconds(value: str) -> float:
     return v
 
 
+def _temperature(value: str) -> float:
+    v = float(value)
+    if not math.isfinite(v) or not 0 <= v <= 2:
+        raise argparse.ArgumentTypeError("must be between 0 and 2")
+    return v
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="eval/runner.py",
         description="Run Trustbook evaluation questions against a space and write a report.",
     )
     p.add_argument("--base-url", default="http://localhost:8484", help="Trustbook URL")
-    p.add_argument("--space", required=True, help="space id, slug or name")
+    p.add_argument("--space", help="space id, slug or name (required unless --compare)")
     p.add_argument(
         "--questions",
         action="append",
-        required=True,
-        help="question YAML file or directory (repeatable)",
+        help="question YAML file or directory (repeatable; required unless --compare)",
     )
     p.add_argument(
         "--report",
@@ -1681,6 +2456,12 @@ def build_parser() -> argparse.ArgumentParser:
         "with .json",
     )
     p.add_argument("--setup", help="corpus YAML to ingest into the space before asking")
+    p.add_argument(
+        "--refresh",
+        action="store_true",
+        help="with --setup: also re-ingest every corpus source already in the space, so that "
+        "all are indexed and their jobs checked on the running image",
+    )
     p.add_argument("--setup-timeout", type=float, default=3600.0, help="seconds (default 3600)")
     p.add_argument("--poll-interval", type=float, default=5.0, help=argparse.SUPPRESS)
     p.add_argument("--timeout", type=float, default=300.0, help="seconds per answer (default 300)")
@@ -1713,7 +2494,65 @@ def build_parser() -> argparse.ArgumentParser:
         type=_fraction,
         help="exit 1 if the share of valid cited ranges is lower (needs --code-root)",
     )
+    gen = p.add_argument_group(
+        "generation",
+        "Every question is sent with a generation override (default temperature "
+        f"{DEFAULT_TEMPERATURE:g}, seed {DEFAULT_SEED}) so runs can be compared. {SEED_CAVEAT}",
+    )
+    gen.add_argument(
+        "--temperature",
+        type=_temperature,
+        help=f"temperature for the eval override (default {DEFAULT_TEMPERATURE:g})",
+    )
+    gen.add_argument(
+        "--seed", type=int, help=f"seed for the eval override (default {DEFAULT_SEED})"
+    )
+    gen.add_argument(
+        "--app-default",
+        action="store_true",
+        help="send no override: a real-use run with the app's own settings "
+        "(temperature 0.2, no seed)",
+    )
+    chat = p.add_argument_group(
+        "chat model",
+        "Switch the chat capability for this run; the saved settings are restored afterwards, "
+        "also on an error or Ctrl-C. API keys are never read, sent or printed.",
+    )
+    chat.add_argument(
+        "--chat-endpoint",
+        metavar="URL",
+        help="OpenAI-compatible base URL (saved as the 'custom' preset for the run)",
+    )
+    chat.add_argument("--chat-model", metavar="NAME", help="chat model name for the run")
+    p.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("A.json", "B.json"),
+        help="print the per-question outcome differences between two runs' sidecars and exit",
+    )
     return p
+
+
+def generation_override(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.app_default:
+        return None
+    temperature = DEFAULT_TEMPERATURE if args.temperature is None else args.temperature
+    seed = DEFAULT_SEED if args.seed is None else args.seed
+    return {"temperature": temperature, "seed": seed}
+
+
+def _interrupt(signum: int, frame: FrameType | None) -> None:
+    raise KeyboardInterrupt
+
+
+def run_compare(paths: Sequence[str], out: TextIO, log: TextIO) -> int:
+    try:
+        a, b = load_sidecar(paths[0]), load_sidecar(paths[1])
+    except EvalError as exc:
+        print(f"error: {exc}", file=log)
+        return EXIT_UNAVAILABLE
+    out.write(compare_runs(a, b, (paths[0], paths[1])))
+    return EXIT_OK
 
 
 def main(
@@ -1727,10 +2566,19 @@ def main(
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.min_ranges_valid is not None and not args.code_root:
-        parser.error("--min-ranges-valid needs --code-root")
     out = out or sys.stdout
     log = log or sys.stderr
+    if args.compare:
+        return run_compare(args.compare, out, log)
+    if not args.space or not args.questions:
+        parser.error("--space and --questions are required (unless --compare)")
+    if args.min_ranges_valid is not None and not args.code_root:
+        parser.error("--min-ranges-valid needs --code-root")
+    if args.refresh and not args.setup:
+        parser.error("--refresh needs --setup")
+    if args.app_default and (args.temperature is not None or args.seed is not None):
+        parser.error("--app-default sends no override; drop --temperature/--seed")
+    generation = generation_override(args)
     started = datetime.now(UTC)
     try:
         questions = load_questions(args.questions)
@@ -1742,10 +2590,28 @@ def main(
         return EXIT_UNAVAILABLE
 
     timeout = httpx.Timeout(args.timeout, connect=10.0)
+    overriding = args.chat_endpoint is not None or args.chat_model is not None
     with httpx.Client(base_url=args.base_url, timeout=timeout, transport=transport) as client:
         api = Api(client)
+        original_chat: ChatConfig | None = None
         try:
             health = api.health()
+            if overriding:
+                saved = ChatConfig.from_capability(api.capability("chat"))
+                body = chat_override_body(saved, args.chat_endpoint, args.chat_model)
+                original_chat = saved
+                apply_chat_override(api, body, log)
+            chat = read_chat_info(api, overridden=overriding)
+            if chat is not None:
+                print(
+                    f"chat model {chat.model or 'unknown'} at {chat.endpoint_host or 'unknown'}; "
+                    + (
+                        f"generation {describe_generation(generation)}"
+                        if generation is not None
+                        else "generation: app default (real-use run)"
+                    ),
+                    file=log,
+                )
             setup: SetupReport | None = None
             if corpus is not None:
                 space, setup = setup_corpus(
@@ -1753,6 +2619,7 @@ def main(
                     args.space,
                     corpus,
                     timeout_s=args.setup_timeout,
+                    refresh=args.refresh,
                     poll_s=args.poll_interval,
                     log=log,
                     sleep=sleep,
@@ -1768,7 +2635,7 @@ def main(
             run_thresholds = api.thresholds()
             results: list[QuestionResult] = []
             for i, q in enumerate(questions, 1):
-                r = ask(client, sid, q, clock=clock)
+                r = ask(client, sid, q, clock=clock, generation=generation)
                 score(r, sources)
                 results.append(r)
                 print(
@@ -1782,6 +2649,12 @@ def main(
         except EvalError as exc:
             print(f"error: {exc}", file=log)
             return EXIT_UNAVAILABLE
+        except KeyboardInterrupt:
+            print("interrupted", file=log)
+            return EXIT_INTERRUPTED
+        finally:
+            if original_chat is not None:
+                restore_chat(api, original_chat, log)
 
     info = RunInfo(
         base_url=args.base_url,
@@ -1797,6 +2670,8 @@ def main(
         max_false_refusals_code=args.max_false_refusals_code,
         max_p95=args.max_p95,
         min_ranges_valid=args.min_ranges_valid,
+        generation=generation,
+        chat=chat,
     )
     ranges = check_ranges(results, args.code_root) if args.code_root else None
     report = render_report(info, results, sources, setup, ranges)
@@ -1804,13 +2679,15 @@ def main(
     if args.report:
         Path(args.report).write_text(report, encoding="utf-8")
         print(f"report written to {args.report}", file=log)
-        data = sidecar(info, results, sweep(results, sources, run_thresholds or Thresholds()))
+        data = sidecar(
+            info, results, sweep(results, sources, run_thresholds or Thresholds()), setup
+        )
         if ranges is not None:
             data["cited_ranges"] = _ratio_json(ranges.valid)
         json_path = sidecar_path(args.report)
         json_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         print(f"scores written to {json_path}", file=log)
-    if not thresholds_met(
+    met = thresholds_met(
         compute_metrics(results),
         args.min_precision,
         args.min_refusal,
@@ -1819,11 +2696,16 @@ def main(
         max_p95=args.max_p95,
         min_ranges_valid=args.min_ranges_valid,
         ranges=ranges,
-    ):
+    )
+    if setup is not None and setup.job_problems:
+        print(f"ingest jobs not as expected: {len(setup.job_problems)}", file=log)
+        met = False
+    if not met:
         print("thresholds not met", file=log)
         return EXIT_THRESHOLD
     return EXIT_OK
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _interrupt)  # restore the chat settings on `kill` too
     sys.exit(main())

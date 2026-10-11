@@ -122,8 +122,9 @@ Use the report's "Threshold sweep" table to pick the thresholds; for a full swee
 
 ## Gate 3: code questions, cited ranges and latency
 
-Gate 3 runs the same two files against the same space, after Trustbook has re-indexed the folder with
-the Phase 3 code chunker (refresh the `requests` source, or start from a new space). The corpus
+Gate 3 runs the same two files against the same space, after Trustbook has re-indexed the corpus with
+the Phase 3 code chunker: add `--refresh` to the first run on a new image (it re-ingests every corpus
+source already in the space and checks each new ingest job), or start from a new space. The corpus
 folder from step 1 is also the checkout the cited ranges are checked against (`--code-root`):
 
 ```sh
@@ -156,3 +157,43 @@ The report adds:
   `--max-p95` if latency is only tracked, not gated.
 
 Gate 3 also keeps Gate 2's correct refusals ≥ 95% and citation precision ≥ 90%.
+
+## Gate 3 rework: comparable runs, real-use run, reference model
+
+Since the Gate 3 rework (D-055), every run sends `temperature 0, seed 42` with each question so that
+runs can be compared. The report header says so, and also notes that some endpoints, such as
+llama-server with several parallel slots, do not honour a seed. `--setup` also checks every source's
+**ingest job**: a source that is ready while its job failed is reported as a "job/source mismatch",
+and the run exits 1 (see `eval/format.md`, "Corpus file").
+
+Jobs that ended before the run started are only noted, because they may come from an older image.
+A space indexed by `phase-3-rc` has a failed job on every source (F1), even though each source was
+indexed correctly. So the first run after pulling a new `-rc` image takes `--refresh`. It re-ingests
+all five corpus sources (the four URLs are fetched again) and checks every new job on that image.
+Later runs on the same image can leave `--refresh` out. Their report then says "N ended before this
+run, not re-checked", and those jobs were already checked by the first run.
+
+```sh
+# The Gate 3 command above, three times (F4); keep each report and its .json sidecar.
+# The first run re-ingests and checks every source on the image under test.
+uv run --project backend python eval/runner.py … --refresh --report gate-3-run1.md
+uv run --project backend python eval/runner.py … --report gate-3-run2.md
+
+# One of the three is the real-use run: the app's own temperature 0.2, no seed (A).
+uv run --project backend python eval/runner.py … --app-default --report gate-3-real-use.md
+
+# The same gate with a stronger reference model (F6); the chat settings are restored afterwards.
+uv run --project backend python eval/runner.py … \
+  --chat-endpoint http://192.168.155.52:8080/v1 --chat-model Qwen3.8-27B-UD-Q4_K_XL \
+  --report gate-3-reference.md
+
+# Which differences come from the model, and which from the pipeline?
+uv run --project backend python eval/runner.py --compare gate-3-run1.json gate-3-reference.json
+```
+
+`--chat-endpoint` takes any OpenAI-compatible base URL, saved as the `custom` preset for the run.
+`--chat-model` takes the model name. The report header names the model and endpoint host actually
+used. If your saved chat settings have an API key, an endpoint on another server is refused:
+Trustbook would delete the key (keys never travel to another host), and the runner could not restore
+it. `--compare` lists the questions whose outcome differs and whether their retrieval was the same
+(then the model made the difference) or different (then the pipeline or the index did).

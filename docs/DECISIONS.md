@@ -856,3 +856,49 @@ Four review findings on D-063, each checked with a reproducer and fixed, never b
   which cite `docs/user/advanced.rst` from the folder source) were accepted again alone; judge time per answer
   1.5–6.1 s (ref-near-07 run 2: 3.2 → 6.0 s, one extra call per rescue). ref-near-07 still depends on the folder
   source's `.rst` chunk being cited; a sentence citing only the web page would now fail on the checker.
+
+### D-065 Eval runner: generation override, chat model switch, job checks, run comparison
+SPEC §13 and D-055 do not say how the runner does these things. Choices made under §15:
+- **Generation:** the default is `{"temperature": 0, "seed": 42}`. `--temperature` and `--seed` change it, and
+  `--app-default` sends nothing (the "real-use" run). The header states the settings and that a seed is not
+  honoured by every endpoint: the variance diagnosis measured 2–3 different answers in 3 identical calls on
+  llama-server (`--parallel 2`, speculative decoding) even at temperature 0 with a seed. An API that rejects the
+  field stops the run (exit 2) rather than silently running at the app default, because a report must never
+  claim settings it did not use.
+- **Chat switch:** an endpoint is saved as the `custom` preset, which covers every OpenAI-compatible server.
+  The endpoint is tested once before the run, so a typo fails in seconds rather than after 45 refusals. The
+  original preset, base URL, model and API version are restored in a `finally` (Ctrl-C and SIGTERM included),
+  then read back and compared. Keys: the backend deletes a saved key when the chat origin changes, so that it
+  never leaks to another host. The runner never sees keys, so it could not restore one. An override to
+  another origin while a key is saved is therefore refused before anything changes. The header names the
+  model and `host:port` read back from the API after the switch, not the flag values.
+- **Job checks:** the runner waits for each finished source's ingest job and compares the two statuses, as
+  set out in `eval/format.md`. Any problem fails the run (exit 1), like a missed target, because the F1 bug
+  was invisible in source status. An entry can declare `expect: failed`. Old jobs no longer listed (only the
+  last 50 finished are kept) are noted, not failed, but only for sources this run did not add. Jobs that
+  ended before the run: D-066.
+- **Comparison:** `--compare A.json B.json` lists only questions whose outcome cell differs. Retrieval is "same"
+  by `retrieval_fingerprint`. For sidecars without one, an equal top rerank score is used instead and labelled
+  "same top score", which is weaker evidence. Repeated runs (`--repeat`) were not added: three separate runs
+  plus `--compare` cover F4 and keep the runner simple.
+- **Sidecar version 2** adds `generation_requested`, `chat`, `setup.jobs`, and per question
+  `retrieval_fingerprint`, `generation` and `must_contain_found/total`. It holds no question or answer text
+  (D-039's rule).
+
+### D-066 Eval runner: jobs that ended before the run, and `--refresh`
+Review of D-065 found a problem. A gate re-run with `--setup` on a space indexed by `phase-3-rc` always exited 1.
+That image failed every ingest job after indexing the source correctly (F1). Those failed jobs stay listed in
+`GET /api/jobs`, so every source showed as a "job/source mismatch". The cause was that image, not the one
+under test. Choices under §15:
+- **Earlier job:** the runner reads `GET /api/jobs` before it adds anything. A job of a source already in the
+  space that had ended by then may have run on another image. It is noted ("job/source mismatch from an
+  earlier ingest" when it was one), and not judged. The source's current status is still judged, because this
+  run's answers depend on it: a `failed` source that should be `ready` still fails the run. A job that was
+  running when the run started, or that the run started itself, is always checked in full. The metric names
+  how many jobs were not re-checked, so a pass on earlier jobs alone is visible as such.
+- **`--refresh`** (with `--setup`) re-ingests every corpus source already in the space through the refresh
+  route, so every job runs on the image under test and is checked in full. A refused refresh fails the run.
+  The README tells the gate's first run on a new image to use it. The check itself was not loosened: a
+  mismatch on a job of the running image still fails the run.
+- **Sidecar:** `setup.refreshed` (count) and `setup.jobs[].earlier` are added. The sidecar stays version 2,
+  because both fields are additive.

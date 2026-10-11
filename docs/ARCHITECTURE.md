@@ -609,3 +609,25 @@ refusal threshold still reads only `ranked`.
 - **Mock web search:** a `mock` web-search provider returns fixed results for any query, including bare
   homepages (`https://www.example.com/sv-se/`, `https://example.org/`) and specific pages
   (`https://docs.example.com/certificates/ab-731`, `https://learn.example.com/exams/ab-731`).
+
+### Eval runner and the API (Gate 3 rework, D-055, D-065)
+What `eval/runner.py` relies on beyond the Phase 1–2 contract (details: `eval/format.md`):
+- **Generation override:** every eval question is posted as
+  `{"content": str, "generation": {"temperature": float, "seed": int}}` (default 0 / 42). With
+  `--app-default`, the runner sends `{"content"}` only. The backend accepts `generation` on this route for the
+  eval runner only (the UI never sends it), and the SPEC default (temperature 0.2, no seed) is unchanged. An
+  API without the field answers 422, and the runner stops with exit 2.
+- **Diagnostics read:** `Message.diagnostics.retrieval_fingerprint` (a string identifying the context chunks;
+  a list or object is stored as sorted JSON) and `Message.diagnostics.generation` (the settings used, an object)
+  are copied per question into the sidecar when present.
+- **Chat override:** `GET /api/capabilities/chat` saves `preset`, `base_url`, `model` and `api_version`. Then
+  `PUT /api/capabilities/chat` `{"preset": "custom", "base_url"?, "model"?}` and
+  `POST /api/capabilities/chat/test` `{}`. A final `PUT` of the saved four fields restores them, also after an
+  error, Ctrl-C or SIGTERM. `api_key` is never sent. While `config.api_key_set` is true, an endpoint on another
+  origin is refused, because the backend drops a saved key when the chat origin changes.
+- **Job checks:** after `--setup`, the runner checks each source's `Source.job_id` against `GET /api/jobs`.
+  Each finished source's job must end `done`, or `failed` for a corpus entry with `expect: failed`. A ready
+  source with a failed job is a job/source mismatch, and the run exits 1. A job that had ended before the run
+  (per the first `GET /api/jobs`) is only noted; its source must still have the expected status. `--refresh`
+  calls `POST /api/spaces/{sid}/sources/{source_id}/refresh` for every corpus source already in the space, so
+  every job is checked on the running image (a refused refresh fails the run).
