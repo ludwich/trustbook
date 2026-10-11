@@ -12,15 +12,24 @@ the chunk text exactly as indexed, so a code chunk keeps its ``File: … (lines 
 Layer 5 (:mod:`app.grounding.code_checks`) runs whether or not the checker is on; a sentence that
 fails it fails, whatever its score.
 
-Sentences citing code that fail the checker (and pass layer 5) get one more chance from the code
-judge (:mod:`app.grounding.code_judge`, D-045), when it is on. It can only rescue a sentence,
-never fail one, and its failures leave the checker's result in place.
+With the judge on (:mod:`app.grounding.code_judge`, D-045 and D-056), one judge call per check
+covers two kinds of sentence:
+
+- **Rescue:** a sentence that fails the checker (and passes layer 5), whatever it cites, passes if
+  the judge accepts it.
+- **Confirmation:** a sentence the checker passed with a score below :data:`CONFIRM_BELOW` fails if
+  the judge's verdict contradicts it (a veto). HHEM passes role-swapped false claims on technical
+  prose at 0.58–0.96 (D-056).
+
+Any judge failure (not set up, endpoint error, unusable reply, timeout) leaves the checker's
+results in place.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -34,7 +43,7 @@ from app.grounding.code_checks import (
     missing_identifiers,
     missing_literals,
 )
-from app.grounding.code_judge import JudgeItem, is_code_chunk
+from app.grounding.code_judge import JudgeItem, JudgeOutcome
 from app.retrieval.service import RetrievedChunk
 
 logger = logging.getLogger("trustbook.grounding")
@@ -42,12 +51,15 @@ logger = logging.getLogger("trustbook.grounding")
 ScorePairs = Callable[[Sequence[tuple[str, str]]], list[float]]
 """Scores ``(premise, hypothesis)`` pairs, each in 0..1 (the grounding checker)."""
 
-JudgeCode = Callable[[Sequence[JudgeItem]], list[bool] | None]
-"""The code judge: one pass/fail per ``(sentence, cited code chunks)``, None when it failed."""
+JudgeCode = Callable[[Sequence[JudgeItem]], list[JudgeOutcome] | None]
+"""The judge: one outcome per ``(sentence, cited chunks)``, None when the call failed."""
 
 Method = Literal["checker", "code_judge"]
 
 MAX_FAILED_SHARE = 0.5  # refuse (or regenerate) when more than half of the sentences fail
+# Checker passes below this score are confirmed by the judge (D-056). HHEM passed false claims at
+# up to 0.958, so the bound is above every measured false pass; see DECISIONS.md for the data.
+CONFIRM_BELOW = 1.0
 
 
 @dataclass(frozen=True)
@@ -67,8 +79,9 @@ class SentenceCheck:
     joined (None when the checker is off).
     ``chunk_scores``: per cited chunk, in the sentence's citation order.
     ``problems``: layer 5 failures (missing identifiers, file/line ranges not in the snapshot).
-    ``method``: what passed it: ``checker``, ``code_judge`` (the checker failed it and the code
-    judge rescued it), or None (the sentence failed, or the checker is off).
+    ``method``: what passed it: ``checker``, ``code_judge`` (the checker failed it and the judge
+    rescued it), or None (the sentence failed, or the checker is off).
+    ``vetoed``: the checker passed it but the judge's confirmation contradicted it, so it failed.
     """
 
     score: float | None
@@ -76,11 +89,13 @@ class SentenceCheck:
     problems: tuple[str, ...] = ()
     passed: bool = True
     method: Method | None = None
+    vetoed: bool = False
 
     @property
     def diagnostic_score(self) -> float | None:
-        """The score the eval runner sees: 0.0 when a code check failed (fails at any threshold)."""
-        if self.problems:
+        """The score the eval runner sees: 0.0 when a code check failed or the judge vetoed it
+        (it fails at any threshold)."""
+        if self.problems or self.vetoed:
             return 0.0
         return self.score
 
@@ -113,6 +128,11 @@ class Checked:
     def methods(self) -> list[Method | None]:
         return [c.method for c in self.checks]
 
+    @property
+    def vetoed(self) -> list[int]:
+        """Indices of the sentences the judge's confirmation failed."""
+        return [i for i, c in enumerate(self.checks) if c.vetoed]
+
 
 def _clean(value: float) -> float:
     score = float(value)
@@ -125,8 +145,9 @@ class Verifier:
     """Runs layers 4 and 5 over the sentences of one reply.
 
     ``score_pairs`` None means the grounding checker is turned off: layer 4 is skipped (answers
-    are badged "unverified"), layer 5 still runs. ``code_judge`` None means sentences about code
-    are decided by the checker alone (Phase 2 behaviour).
+    are badged "unverified"), layer 5 still runs. ``code_judge`` None means every sentence is
+    decided by the checker alone (Phase 2 behaviour). ``judge_seconds`` adds up the time spent
+    waiting for the judge over every :meth:`check` of this verifier.
     """
 
     def __init__(
@@ -136,11 +157,15 @@ class Verifier:
         threshold: float,
         files: SnapshotFiles | None = None,
         code_judge: JudgeCode | None = None,
+        confirm_below: float = CONFIRM_BELOW,
     ) -> None:
         self._score_pairs = score_pairs
         self._threshold = threshold
         self._files = files or SnapshotFiles(None)
         self._code_judge = code_judge
+        self._confirm_below = confirm_below
+        self.judge_seconds = 0.0
+        self.judge_calls = 0
 
     @property
     def enabled(self) -> bool:
@@ -179,30 +204,55 @@ class Verifier:
         sentences: Sequence[tuple[str, Sequence[RetrievedChunk]]],
         checks: list[SentenceCheck],
     ) -> list[SentenceCheck]:
-        """Second chance for sentences citing code that failed only the checker (D-045)."""
+        """Rescue failed sentences and confirm borderline passes in one judge call (D-045, D-056).
+
+        Rescue: failed only the checker (no layer 5 problems). Confirmation: passed on the checker
+        with a score below the confirmation bound.
+        """
         if self._code_judge is None or not self.enabled:
             return checks
-        pending = [
+        rescue = [
             i
             for i, (check, (_, cited)) in enumerate(zip(checks, sentences, strict=True))
-            if not check.passed and not check.problems and any(is_code_chunk(c) for c in cited)
+            if not check.passed and not check.problems and cited
         ]
+        confirm = [
+            i
+            for i, check in enumerate(checks)
+            if check.passed
+            and check.method == "checker"
+            and check.score is not None
+            and check.score < self._confirm_below
+        ]
+        pending = sorted(rescue + confirm)
         if not pending:
             return checks
-        items = [
-            (sentences[i][0], [c for c in sentences[i][1] if is_code_chunk(c)]) for i in pending
-        ]
-        verdicts = self._code_judge(items)
-        if verdicts is None or len(verdicts) != len(items):
-            if verdicts is not None:
-                logger.warning("The code judge returned the wrong number of verdicts; ignored")
+        items = [(sentences[i][0], list(sentences[i][1])) for i in pending]
+        started = time.perf_counter()
+        outcomes = self._code_judge(items)
+        self.judge_seconds += time.perf_counter() - started
+        self.judge_calls += 1
+        if outcomes is None or len(outcomes) != len(items):
+            if outcomes is not None:
+                logger.warning("The judge returned the wrong number of verdicts; ignored")
             return checks
         result = list(checks)
-        for i, ok in zip(pending, verdicts, strict=True):
-            if ok:
+        rescued = vetoed = 0
+        for i, outcome in zip(pending, outcomes, strict=True):
+            if i in rescue and outcome.accepted:
                 result[i] = replace(result[i], passed=True, method="code_judge")
-        rescued = sum(verdicts)
-        logger.info("Code judge: %d of %d sentence(s) about code passed", rescued, len(items))
+                rescued += 1
+            elif i not in rescue and outcome.vetoed:
+                result[i] = replace(result[i], passed=False, method=None, vetoed=True)
+                vetoed += 1
+                logger.info("Judge vetoed sentence %d (%s)", i + 1, outcome.reason)
+        logger.info(
+            "Judge: %d of %d failed sentence(s) rescued, %d of %d confirmation(s) vetoed",
+            rescued,
+            len(rescue),
+            vetoed,
+            len(confirm),
+        )
         return result
 
     def _scores(

@@ -20,12 +20,15 @@ from app.grounding.code_judge import (
     Statement,
     accept,
     code_anchors,
+    content_share,
     content_words,
+    judge_messages,
     number_chunk,
     parse_judge_prompt,
     parse_verdicts,
     prepare,
     split_identifier,
+    terms_match,
 )
 from app.grounding.verify import GroundingSettings, Verifier, build_verifier
 from app.retrieval.service import Retrieval, RetrievedChunk
@@ -235,19 +238,26 @@ def test_unsupported_verdicts_and_missing_verdicts_fail() -> None:
 # --- what goes to the judge ------------------------------------------------------------------
 
 
-def test_only_code_sentences_that_failed_only_the_checker_are_judged() -> None:
-    chat = ScriptedChat(verdicts((1, True, [("c1", 71, 73)])))
+def test_every_sentence_that_failed_only_the_checker_is_judged() -> None:
+    # D-056: rescue no longer depends on the citation type; prose chunks are shown too.
+    chat = ScriptedChat(verdicts((1, True, [("c1", 71, 73)]), (2, False, [])))
     scores = {TRUE_CLAIM: 0.05, "Prose claim.": 0.05, "Checker passes this.": 0.9}
 
     def checker(pairs: Sequence[tuple[str, str]]) -> list[float]:
         return [scores.get(h, 0.05) for _, h in pairs]
 
-    verifier = Verifier(checker, threshold=0.5, files=SNAPSHOT, code_judge=CodeJudge(lambda: chat))
+    verifier = Verifier(
+        checker,
+        threshold=0.5,
+        files=SNAPSHOT,
+        code_judge=CodeJudge(lambda: chat),
+        confirm_below=0.8,
+    )
     checked = verifier.check(
         [
-            (TRUE_CLAIM, [code_chunk(), prose_chunk()]),  # judged; sees only the code chunk
-            ("Prose claim.", [prose_chunk()]),  # not code
-            ("Checker passes this.", [code_chunk()]),  # passed already
+            (TRUE_CLAIM, [code_chunk(), prose_chunk()]),  # judged with both chunks
+            ("Prose claim.", [prose_chunk()]),  # judged, not supported
+            ("Checker passes this.", [code_chunk()]),  # passed above the confirmation band
             ("Uses `no_such_name` here.", [code_chunk()]),  # layer 5 failure
         ]
     )
@@ -255,7 +265,102 @@ def test_only_code_sentences_that_failed_only_the_checker_are_judged() -> None:
     assert checked.methods == ["code_judge", None, "checker", None]
     assert len(chat.calls) == 1  # one call per answer
     user = chat.calls[0]["messages"][1]["content"]
-    assert user.count("(cites") == 1 and "Basic Auth sends" not in user
+    assert user.count("(cites") == 2 and "Basic Auth sends" in user
+    assert "1. (cites c1, c2)" in user and "2. (cites c2) Prose claim." in user
+    assert verifier.judge_calls == 1 and verifier.judge_seconds >= 0
+
+
+# --- confirmation of borderline checker passes (D-056) ----------------------------------------
+
+SOCKS = (
+    "Using the scheme socks5 causes the DNS resolution to happen on the client, rather than on "
+    "the proxy server. This is in line with curl, which uses the scheme to decide whether to do "
+    "the DNS resolution on the client or proxy. If you want to resolve the domains on the proxy "
+    "server, use socks5h as the scheme."
+)
+
+
+def socks_chunk() -> RetrievedChunk:
+    return RetrievedChunk("socks", "w", "Advanced Usage", SOCKS, {"heading": "SOCKS"}, 80, 0.9)
+
+
+SWAPPED = "With socks5h, DNS resolution happens on the client."
+RIGHT = "With socks5h, the domains are resolved on the proxy server."
+
+
+def confirmed(reply: str, score: float, confirm_below: float = 0.8) -> tuple[bool, bool, int]:
+    chat = ScriptedChat(reply)
+    verifier = Verifier(
+        lambda pairs: [score for _ in pairs],
+        threshold=0.5,
+        code_judge=CodeJudge(lambda: chat),
+        confirm_below=confirm_below,
+    )
+    check = verifier.check([(SWAPPED, [socks_chunk()])]).checks[0]
+    return check.passed, check.vetoed, len(chat.calls)
+
+
+def test_a_borderline_pass_the_judge_contradicts_fails() -> None:
+    passed, vetoed, calls = confirmed(verdicts((1, False, [])), 0.6)
+    assert (passed, vetoed, calls) == (False, True, 1)
+
+
+def test_a_borderline_pass_with_evidence_outside_its_citations_fails() -> None:
+    passed, vetoed, _ = confirmed(verdicts((1, True, [("c2", 1, 1)])), 0.6)
+    assert (passed, vetoed) == (False, True)
+
+
+def test_a_confirmed_pass_and_a_judge_without_an_answer_keep_the_pass() -> None:
+    assert confirmed(verdicts((1, True, [("c1", 3, 3)])), 0.6)[:2] == (True, False)
+    assert confirmed(verdicts(), 0.6)[:2] == (True, False)  # no verdict: no veto
+    assert confirmed("not json", 0.6)[:2] == (True, False)  # judge failed: checker stands
+
+
+def test_passes_at_or_above_the_bound_are_not_sent() -> None:
+    assert confirmed(verdicts((1, False, [])), 0.8) == (True, False, 0)
+
+
+def test_vetoed_sentences_score_zero_for_the_threshold_sweep() -> None:
+    chat = ScriptedChat(verdicts((1, False, [])))
+    verifier = Verifier(
+        lambda pairs: [0.6 for _ in pairs],
+        threshold=0.5,
+        code_judge=CodeJudge(lambda: chat),
+        confirm_below=0.8,
+    )
+    checked = verifier.check([(SWAPPED, [socks_chunk()])])
+    assert checked.vetoed == [0] and checked.checks[0].diagnostic_score == 0.0
+    assert checked.methods == [None] and checked.refuse
+
+
+def test_prose_is_numbered_a_sentence_per_line_under_its_title() -> None:
+    chunks, _ = prepare([(RIGHT, [socks_chunk()])])
+    numbered = chunks["c1"]
+    assert (numbered.first, numbered.last) == (1, 3)
+    assert (
+        numbered.lines[2]
+        == "If you want to resolve the domains on the proxy server, use socks5h as the scheme."
+    )
+    user = judge_messages(list(chunks.values()), [Statement(RIGHT, ("c1",))])[1]["content"]
+    assert "[c1] Advanced Usage (section “SOCKS”), lines 1-3" in user
+    assert "3 | If you want to resolve" in user
+
+
+def test_prose_claim_is_rescued_only_with_its_words_in_the_evidence_sentence() -> None:
+    chunk = socks_chunk()
+    reply = verdicts((1, True, [("c1", 3, 3)]))
+    chat = ScriptedChat(reply)
+    verifier = Verifier(low, threshold=0.5, code_judge=CodeJudge(lambda: chat))
+    assert (
+        verifier.check([("Use `socks5h` to resolve domains on the proxy.", [chunk])])
+        .checks[0]
+        .passed
+    )
+    chat = ScriptedChat(reply)
+    verifier = Verifier(low, threshold=0.5, code_judge=CodeJudge(lambda: chat))
+    # socks5 is not in line 3: anchoring rejects the judge's support.
+    check = verifier.check([("Use `socks5` to resolve domains on the proxy.", [chunk])]).checks[0]
+    assert not check.passed
 
 
 def test_judge_off_is_phase_2_behaviour(tmp_path: Path) -> None:
@@ -461,3 +566,68 @@ def test_dotted_names_need_their_last_part_in_the_evidence_and_the_rest_in_cited
     assert not accept(false, supported, chunks)[0]
     uncited = Statement("Use requests.codes.too_many_requests for HTTP 429.", ("c1",))
     assert not accept(uncited, supported, chunks)[0]  # "codes" is only in the uncited chunk
+
+
+# --- digit-bearing names (D-056) --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("b64", "base64"),
+        ("b64encode", "base64encode"),
+        ("sha256", "SHA-256"),
+        ("SHA256", "sha256"),
+        ("utf8", "UTF-8"),
+        ("UTF_8", "utf8"),
+        ("md5", "MD5"),
+        ("h2", "http2"),
+    ],
+)
+def test_digit_terms_match_in_both_directions(a: str, b: str) -> None:
+    assert terms_match(a, b) and terms_match(b, a)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("sha1", "sha256"),
+        ("SHA-1", "SHA-256"),
+        ("utf8", "utf16"),
+        ("md4", "md5"),
+        ("base32", "b64"),
+        ("base64", "base"),  # no digits on one side
+        ("e2", "ec2"),  # a one-letter abbreviation needs a word of four letters or more
+        ("s3", "sha3"),
+        ("x64", "b64"),
+        ("ipv4", "ipv6"),
+        ("b64encode", "base64decode"),
+    ],
+)
+def test_digit_terms_do_not_match_other_terms(a: str, b: str) -> None:
+    assert not terms_match(a, b) and not terms_match(b, a)
+
+
+def test_prose_terms_are_anchors_matched_in_any_spelling() -> None:
+    assert Anchor("term", "SHA-256") in code_anchors("Digest auth supports SHA-256 too.")
+    assert Anchor("term", "UTF-8") in code_anchors("Text is decoded as UTF-8 by default.")
+    evidence = "elif _algorithm == 'SHA-256':\n    hash_utf8 = hashlib.sha256"
+    from app.grounding.code_judge import anchor_found
+
+    assert anchor_found(Anchor("term", "SHA-256"), "x = hashlib.sha256(b)", [])
+    assert anchor_found(Anchor("term", "UTF-8"), "s.encode('utf8')", [])
+    assert anchor_found(Anchor("identifier", "SHA256"), evidence, [])
+    assert anchor_found(Anchor("identifier", "MD5"), "_algorithm = 'md5'", [])
+    assert not anchor_found(Anchor("term", "SHA-1"), "x = hashlib.sha256(b)", [])
+    assert not anchor_found(Anchor("identifier", "SHA512"), evidence, [])
+    assert not anchor_found(Anchor("term", "UTF-16"), "s.encode('utf8')", [])
+    # A backticked span stays exact.
+    assert not anchor_found(Anchor("code", "sha256"), "SHA-256", [])
+
+
+def test_content_words_match_digit_abbreviations_both_ways() -> None:
+    assert content_share(["base64"], "b64encode(b':'.join(x))") == 1.0
+    assert content_share(["b64"], "The value is base64 encoded.") == 1.0
+    assert content_share(["utf8"], "Bodies are decoded as UTF-8.") == 1.0
+    assert content_share(["base32"], "b64encode(x)") == 0.0
+    assert content_share(["sha1"], "hashlib.sha256(x)") == 0.0

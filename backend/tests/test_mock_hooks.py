@@ -92,7 +92,8 @@ def test_mock_judge_supports_two_shared_words_and_names_the_lines() -> None:
     }
     assert data["verdicts"][1]["supported"] is False  # no word shared
     # Through the real acceptance rules: the first passes, the second fails.
-    assert CodeJudge(MockChatAdapter)(sentences) == [True, False]
+    outcomes = CodeJudge(MockChatAdapter)(sentences)
+    assert outcomes is not None and [o.accepted for o in outcomes] == [True, False]
 
 
 def registry_for(paths: Paths) -> CapabilityRegistry:

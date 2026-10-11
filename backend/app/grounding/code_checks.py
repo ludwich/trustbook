@@ -41,6 +41,14 @@ def backticked(text: str) -> list[str]:
 _NAME_PART = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?")
 
 
+def verbatim(span: str, text: str) -> bool:
+    """``span`` occurs in ``text`` and is not part of a longer name: an edge of the span that is
+    a name character may not continue into one (`socks5` is not in ``socks5h``, D-056)."""
+    left = r"(?<![A-Za-z0-9_])" if span[:1].isalnum() or span[:1] == "_" else ""
+    right = r"(?![A-Za-z0-9_])" if span[-1:].isalnum() or span[-1:] == "_" else ""
+    return re.search(left + re.escape(span) + right, text) is not None
+
+
 def _occurs(token: str, texts: list[str]) -> bool:
     """``token`` as a whole word in any of ``texts`` (exact, case-sensitive)."""
     pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])")
@@ -50,7 +58,8 @@ def _occurs(token: str, texts: list[str]) -> bool:
 def missing_identifiers(text: str, chunk_texts: Iterable[str]) -> list[str]:
     """Backticked names of ``text`` not found in ``chunk_texts`` (exact, deterministic).
 
-    A backticked span passes if it occurs verbatim in a cited chunk, or if every identifier and
+    A backticked span passes if it occurs verbatim in a cited chunk (not inside a longer name),
+    or if every identifier and
     number inside it occurs there as a whole word: code defines ``class Response`` and
     ``def ok``, so ``Response.ok`` never appears verbatim (D-042). A span without identifiers
     (e.g. a quoted literal) must occur verbatim.
@@ -58,7 +67,7 @@ def missing_identifiers(text: str, chunk_texts: Iterable[str]) -> list[str]:
     texts = list(chunk_texts)
     missing: list[str] = []
     for token in backticked(text):
-        if any(token in t for t in texts):
+        if any(verbatim(token, t) for t in texts):
             continue
         parts = _NAME_PART.findall(token)
         if not parts or not all(_occurs(part, texts) for part in parts):
@@ -207,6 +216,30 @@ def code_facts(chunk_texts: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(facts))
 
 
+def text_units(text: str) -> list[str]:
+    """A chunk's units: its lines for code (``File: …`` header left out), sentences for prose."""
+    if text.startswith("File: "):
+        parts = text.splitlines()[1:]
+    else:
+        parts = _PROSE_SPLIT.split(" ".join(text.split()))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def support_window(sentence: str, text: str) -> str:
+    """The units of one chunk that share the most terms with ``sentence`` (all ties), in order.
+
+    This is the part of the chunk that states the sentence; two chunks whose windows are the same
+    text are copies of one passage as far as the sentence is concerned (D-052 extension).
+    """
+    wanted = _terms(sentence)
+    units = text_units(text)
+    scores = [len(_terms(u) & wanted) for u in units]
+    best = max(scores, default=0)
+    if best == 0:
+        return ""
+    return "\n".join(u for u, score in zip(units, scores, strict=True) if score == best)
+
+
 def focus_premise(
     sentence: str, chunk_texts: Sequence[str], max_chars: int = FOCUS_MAX_CHARS
 ) -> str:
@@ -225,10 +258,7 @@ def focus_premise(
     n_facts = len(facts)
     units: list[tuple[str, bool]] = [(f, False) for f in facts]
     for text in chunk_texts:
-        code_like = text.startswith("File: ")
-        flat = " ".join(text.split())
-        parts = text.splitlines()[1:] if code_like else _PROSE_SPLIT.split(flat)
-        units.extend((p.strip(), not code_like) for p in parts if p.strip())
+        units.extend((u, not text.startswith("File: ")) for u in text_units(text))
     scores = [len(_terms(u) & wanted) for u, _ in units]
     best = max(scores, default=0)
     if best == 0:
