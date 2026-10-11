@@ -98,6 +98,29 @@ counts once.
 | **Ingest jobs ended as expected** (with `--setup`; always a target) | Corpus sources whose ingest job ended as expected / corpus sources. See "Corpus file". Exit 1 when any did not. |
 | **Expected sources cited** (informational) | Per answerable question: distinct expected sources (as resolved in the space) that were cited / expected sources found in the space. Shows whether a multi-source answer used both sources. |
 
+### Latency and judge calls (D-080)
+
+The report's "Latency and judge calls" table shows where the answer time went, from each answer's
+`diagnostics` (`judge_calls`, `judge_seconds`, `answer_calls`, `timings`, `prompt_tokens`,
+`regenerated`, and the parent context fields of D-077). **N** is the answers that reached
+generation (`answer_calls > 0`); answers refused before any answer call (layer 2, no sources) are
+listed separately, and answers from an API without these diagnostics are counted as unknown.
+
+| Row | Definition |
+|---|---|
+| Judge calls per answer: mean / p50 / p95 / max | Over N: every judge request of the answer (batch confirmations and rescues, solo re-asks, both verification passes, citation choice). |
+| Answers with 0 / 1 / 2 / ≥3 judge calls | The distribution over N. |
+| Judge seconds per answer: p50 / p95 | Over N (0 when the judge was not called). |
+| Judge share of answer time | Judge seconds / answer latency, summed over N. |
+| Answer calls per answer: mean / max | Answer generation requests (JSON retries and the regeneration included). |
+| Regenerations | Answers regenerated / N. |
+| Answers over 60 s | Answers (`answered` and `refused`, with a latency) over 60 s / those answers. With `n` of them, p95 ≤ 60 s holds whenever at most `n − 1 − ceil(0.95·(n − 1))` are over 60 s (2 of 45); more are flagged. Each one is listed below the table with its generation, verification and judge seconds and call counts. |
+| Latency p50 / p95 | As in the main table. |
+| Prompt tokens of the first answer call: p50 / p95 | Estimated by the app (characters / 4). |
+| Promoted tokens, Outline tokens: p50 / p95 | The parent context (D-077): citable chunks promoted for the top children, and the non-citable code outline. |
+| Outline-only failures | Failed sentences whose missing name or literal only the outline shows (`diagnostics.outline_only`, per pass), the answers they are in, and how many of those answers were regenerated. |
+| Citations to promoted chunks | Citations (deduplicated per answer) of chunks listed in `diagnostics.expansions`, and how many of them are correct. |
+
 `--min-precision`, `--min-refusal`, `--min-must-contain` and `--min-ranges-valid` (fractions, `0.9` or
 `90`) make the runner exit 1 when a value is below the threshold or cannot be computed (no citations /
 no unanswerable questions / no answerable questions with `must_contain` / no file citations).
@@ -201,9 +224,12 @@ Prints a Markdown table of the questions whose outcome differs between two sidec
 run's date, chat model, generation settings and citation precision. For each difference it says
 whether retrieval was the **same** (equal `retrieval_fingerprint`, or, for sidecars without one, an
 equal top rerank score, shown as "same top score") or **different**. Same retrieval means the model or
-its sampling made the difference; different retrieval points at the pipeline or the index. It also
-lists every question whose retrieval differs, and the ids found in only one run. Exits 0, or 2 for a
-file that is not a sidecar. Version 1 sidecars work, with less to compare.
+its sampling made the difference; different retrieval points at the pipeline or the index. When both
+sidecars have an `outline_fingerprint` (version 4) and the chunks are the same but the code outline
+differs, the difference is shown as "same chunks, different outline" with cause **outline only**, and
+those questions are listed on their own line. It also lists every question whose retrieval differs,
+and the ids found in only one run. Exits 0, or 2 for a file that is not a sidecar. Version 1 sidecars
+work, with less to compare.
 
 ## Scores sidecar (`--report out.md` → `out.json`)
 
@@ -211,11 +237,13 @@ With `--report`, the runner also writes a JSON file next to the report (`out.md`
 another name gets `.json` appended). It holds ids and numbers, never question text, and nothing is
 written anywhere else, so a private set stays wherever you keep it. The only answer text is
 `failed_sentences` (version 3, D-076): the sentences of a refused or partially verified answer that
-failed verification, and why, each capped at 300 characters.
+failed verification, and why, each capped at 300 characters. Version 4 (D-080) adds the latency,
+judge-call and parent context numbers.
 
 ```json
-{"version": 3, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
+{"version": 4, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
  "thresholds": {"refuse": 0.15, "verify": 0.5},          // GET /api/settings; null if unavailable
+ "retrieval_settings": {"parent_context": true, "outline": true},  // GET /api/settings; null if unavailable
  "generation_requested": {"temperature": 0, "seed": 42}, // null with --app-default
  "chat": {"model": "Qwen3.6-35B-A3B", "endpoint_host": "192.168.1.5:8080", "preset": "llama_server",
           "overridden": false},                           // null if the API did not say
@@ -230,7 +258,24 @@ failed verification, and why, each capped at 300 characters.
                 "removed_sentences": 1, "citations": 2, "citations_correct": 2,
                 "must_contain_found": 1, "must_contain_total": 1, "latency_s": 4.1,
                 "retrieval_fingerprint": "…", "generation": {"temperature": 0, "seed": 42},
-                "failed_sentences": [{"text": "…", "reason": "checker score 0.12 < 0.5"}]}],
+                "failed_sentences": [{"text": "…", "reason": "checker score 0.12 < 0.5"}],
+                "judge_calls": 2, "judge_calls_per_pass": [2], "judge_seconds": 4.5,
+                "answer_calls": 1, "prompt_tokens": [3300], "completion_tokens": [900],
+                "timings": {"retrieval_s": 0.2, "generation_s": [12.5], "verification_s": [5.0],
+                            "citation_s": 0.1, "gate_s": 0.8, "total_s": 18.0},
+                "expansions": [{"chunk_id": "…", "kind": "class_head", "referrer": "…"}],
+                "promoted_tokens": 60, "outline_tokens": 85, "outline_fingerprint": "…",
+                "outline_only": [0], "promoted_cited": [1, 0],
+                "promoted_citations": {"n": 1, "correct": 1}}],
+ "latency": {"generated": 44, "before_generation": ["un-03"], "unknown": [],
+             "judge_calls": {"mean": 1.4, "p50": 1, "p95": 3, "max": 5,
+                             "distribution": {"0": 9, "1": 20, "2": 10, "3+": 5}},
+             "judge_seconds": {"p50": 3.1, "p95": 9.4, "share": 0.12},
+             "answer_calls": {"mean": 1.1, "p50": 1, "p95": 2, "max": 4},
+             "regenerated": 3, "over_60_s": ["ref-near-05"], "timed": 45, "allowed_over_60_s": 2,
+             "first_prompt_tokens": {…}, "promoted_tokens": {…}, "outline_tokens": {…},
+             "outline_only": {"answers": [], "sentences": 0, "regenerated": 0},
+             "promoted_citations": {"n": 2, "correct": 2}},
  "false_refusals": {"docs": {"num": 0, "den": 5, "value": 0.0}, "code": {…}, "multi": {…}, "other": {…}},
  "false_refusals_code": {"num": 1, "den": 17, "value": 0.06},
  "cited_ranges": {"num": 48, "den": 48, "value": 1.0},     // only with --code-root
@@ -251,7 +296,19 @@ API without them. `failed_sentences` comes from `diagnostics.failed_sentences` (
 did not send it); the report lists them under "False refusals: failed sentences" for every answerable
 question that was refused. Version 1 sidecars (before Gate 3's rework) lack `generation_requested`, `chat`,
 `setup`, `must_contain_*`, `retrieval_fingerprint` and `generation`; versions 1 and 2 lack
-`failed_sentences`.
+`failed_sentences`; versions 1 to 3 lack `retrieval_settings`, `latency` and the per-question
+`judge_calls` … `promoted_citations` fields. Per question, these come from the answer's
+`diagnostics` (docs/ARCHITECTURE.md, "Parent context and latency diagnostics") and are `null` when
+the API did not send them: `judge_calls` (every judge request), `judge_calls_per_pass` (first reply,
+regenerated reply), `answer_calls` (JSON retries and the regeneration included), `timings` (seconds:
+retrieval, each answer call, each verification pass, citation choice, the gate, the pipeline total),
+`prompt_tokens` (estimated) and `completion_tokens` (as reported by the endpoint) per answer call,
+`expansions` (promoted chunk ids, `section_previous` or `class_head`, and the child each was promoted
+for), `promoted_tokens`, `outline_tokens`, `outline_fingerprint` (a hash of the outline;
+`retrieval_fingerprint` still covers only the numbered chunks), `outline_only` (per pass) and
+`promoted_cited` ([kept sentences citing a promoted chunk, those also citing another chunk]).
+`promoted_citations` is computed by the runner. `latency` holds the run's numbers of the "Latency and
+judge calls" table.
 
 ## Threshold sweep
 
