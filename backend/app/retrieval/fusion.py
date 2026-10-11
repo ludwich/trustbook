@@ -17,25 +17,31 @@ CONTEXT_TOKENS = 6_000
 
 @dataclass(frozen=True)
 class Fused:
-    """One chunk after fusion. ``best_rank`` is its best 1-based rank in any input list."""
+    """One chunk after fusion. ``best_rank`` is its best 1-based rank in any input list.
+
+    ``key``: the content key of its hits (:func:`app.index.base.tie_key`), "" when unknown.
+    """
 
     chunk_id: str
     source_id: str
     score: float
     best_rank: int
+    key: str = ""
 
 
 def reciprocal_rank_fusion(*rankings: Sequence[Hit], k: int = RRF_K) -> list[Fused]:
     """Fuse ranked lists: ``score = Σ 1 / (k + rank)`` over the lists a chunk appears in.
 
     Only a chunk's first appearance in each list counts. Ties are broken by the best single rank,
-    then by chunk id, so the order is deterministic.
+    then by the content key of the hits, then by chunk id (D-056). Chunk ids are new uuids on every
+    re-index, so they only decide between hits without a key or with identical text.
     """
     if k < 0:
         raise ValueError("k must not be negative")
     scores: dict[str, float] = {}
     best: dict[str, int] = {}
     sources: dict[str, str] = {}
+    keys: dict[str, str] = {}
     for ranking in rankings:
         seen: set[str] = set()
         rank = 0
@@ -47,8 +53,10 @@ def reciprocal_rank_fusion(*rankings: Sequence[Hit], k: int = RRF_K) -> list[Fus
             scores[hit.chunk_id] = scores.get(hit.chunk_id, 0.0) + 1.0 / (k + rank)
             best[hit.chunk_id] = min(best.get(hit.chunk_id, rank), rank)
             sources.setdefault(hit.chunk_id, hit.source_id)
-    fused = [Fused(cid, sources[cid], scores[cid], best[cid]) for cid in scores]
-    fused.sort(key=lambda f: (-f.score, f.best_rank, f.chunk_id))
+            if hit.key:
+                keys.setdefault(hit.chunk_id, hit.key)
+    fused = [Fused(cid, sources[cid], scores[cid], best[cid], keys.get(cid, "")) for cid in scores]
+    fused.sort(key=lambda f: (-f.score, f.best_rank, f.key or f.chunk_id, f.chunk_id))
     return fused
 
 

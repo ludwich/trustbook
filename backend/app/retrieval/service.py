@@ -90,7 +90,12 @@ def usable_source_ids(engine: Engine) -> list[str]:
 
 
 def rerank(query: str, rows: Sequence[ChunkRow], reranker: Reranker) -> list[RetrievedChunk]:
-    """Score ``rows`` against ``query``; best first, ties keep the input order."""
+    """Score ``rows`` against ``query``; best first, ties keep the input order.
+
+    The input is the fused list, whose order is itself fixed by scores and content keys (D-056),
+    so equal rerank scores (common with a BF16 reranker) are ordered the same on every run,
+    re-index and machine. The fused rank is a better tie-breaker than a hash: it is evidence.
+    """
     if not rows:
         return []
     scores = reranker.score(query, [row.text for row in rows])

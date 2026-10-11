@@ -3,6 +3,8 @@
 Columns: chunk_id, source_id, text, vector (fixed size, set by the first rows added). Full-text
 index on ``text`` and a BTree on ``source_id``. Vector search is exact (no ANN index) with cosine
 distance; scores are ``1 - distance`` for vectors and the BM25 ``_score`` for full text.
+Hits with equal scores are ordered by a key derived from the indexed text (D-056), never by the
+table's internal row order, which depends on the order rows were written in.
 Writes to one space are serialised; every search is filtered to the given source ids. Bulk
 indexing appends in batches and folds them into the full-text index once at the end.
 """
@@ -16,7 +18,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from app.index.base import Hit, IndexedChunk
+from app.index.base import Hit, IndexedChunk, stable_top, tie_key
 
 logger = logging.getLogger("trustbook.index")
 
@@ -35,6 +37,10 @@ def _filter(source_ids: Sequence[str]) -> str | None:
     if not safe:
         return None
     return "source_id IN (" + ", ".join(f"'{s}'" for s in safe) + ")"
+
+
+def _hit(row: dict[str, Any], score: float) -> Hit:
+    return Hit(row["chunk_id"], row["source_id"], score, tie_key(row.get("text") or ""))
 
 
 class LanceSpaceIndex:
@@ -155,29 +161,38 @@ class LanceSpaceIndex:
         if self.dim != len(vector):
             logger.warning("Query vector size %d does not match the index", len(vector))
             return []
-        rows = (
-            table.search([float(x) for x in vector], vector_column_name="vector")
-            .metric("cosine")
-            .where(where, prefilter=True)
-            .limit(limit)
-            .select(["chunk_id", "source_id", "_distance"])
-            .to_list()
-        )
-        return [Hit(r["chunk_id"], r["source_id"], 1.0 - float(r["_distance"])) for r in rows]
+        query = [float(x) for x in vector]
+
+        def fetch(n: int) -> list[Hit]:
+            rows = (
+                table.search(query, vector_column_name="vector")
+                .metric("cosine")
+                .where(where, prefilter=True)
+                .limit(n)
+                .select(["chunk_id", "source_id", "text", "_distance"])
+                .to_list()
+            )
+            return [_hit(r, 1.0 - float(r["_distance"])) for r in rows]
+
+        return stable_top(fetch, limit)
 
     def text_search(self, query: str, *, limit: int, source_ids: Sequence[str]) -> list[Hit]:
         where = _filter(source_ids)
         table = self._open()
         if where is None or table is None or limit <= 0 or not query.strip():
             return []
-        rows = (
-            table.search(query, query_type="fts", fts_columns="text")
-            .where(where, prefilter=True)
-            .limit(limit)
-            .select(["chunk_id", "source_id", "_score"])
-            .to_list()
-        )
-        return [Hit(r["chunk_id"], r["source_id"], float(r["_score"])) for r in rows]
+
+        def fetch(n: int) -> list[Hit]:
+            rows = (
+                table.search(query, query_type="fts", fts_columns="text")
+                .where(where, prefilter=True)
+                .limit(n)
+                .select(["chunk_id", "source_id", "text", "_score"])
+                .to_list()
+            )
+            return [_hit(r, float(r["_score"])) for r in rows]
+
+        return stable_top(fetch, limit)
 
     def count(self) -> int:
         table = self._open()
