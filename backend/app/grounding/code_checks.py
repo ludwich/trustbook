@@ -24,7 +24,9 @@ from app.chunking.header import complete_numbers, header_content, split_header, 
 
 logger = logging.getLogger("trustbook.grounding")
 
-_BACKTICKED = re.compile(r"`([^`\n]+)`")
+# A code span (D-083): a run of backticks closed by a run of the same length, as in Markdown and
+# reStructuredText (``x``). Pairing single backticks read ``a`` and ``b`` as the span "and".
+CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)([^\n]+?)(?<!`)\1(?!`)")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 LineRange = tuple[int, int]
@@ -33,8 +35,8 @@ LineRange = tuple[int, int]
 def backticked(text: str) -> list[str]:
     """The backticked identifiers of ``text``, unique, in order (``get()`` → ``get``)."""
     found: dict[str, None] = {}
-    for match in _BACKTICKED.finditer(text):
-        token = match.group(1).strip()
+    for match in CODE_SPAN.finditer(text):
+        token = match.group(2).strip()
         if token.endswith("()") and len(token) > 2:
             token = token[:-2]
         if token:
@@ -58,8 +60,6 @@ def unescape_markdown(text: str) -> str:
 # character outside its markers and no space inside them, so ``2*x*y`` and ``*args, **kwargs``
 # are left alone. Underscore emphasis (_x_) is never removed: it cannot be told apart from Python
 # names such as ``_value_``, ``_missing_`` or ``self._value_``.
-_RST_LITERAL = re.compile(r"``([^`\n]+?)``")
-_CODE_SPAN = re.compile(r"`([^`\n]+)`")
 _STRONG = re.compile(r"(?<![\w*])\*\*(?![\s*])([^*\n]+?)(?<![\s*])\*\*(?![\w*])")
 _EMPHASIS = re.compile(r"(?<![\w*])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![\w*])")
 
@@ -72,8 +72,7 @@ def normalize_inline(text: str, *, emphasis: bool = True) -> str:
     asterisk emphasis; the sentence side (``emphasis=False``) drops literals and code spans only,
     because a sentence's ``*x*`` inside a name or quote is what it claims, not markup.
     """
-    out = _RST_LITERAL.sub(r"\1", text)
-    out = _CODE_SPAN.sub(r"\1", out)
+    out = CODE_SPAN.sub(r"\2", text)
     if emphasis:
         out = _STRONG.sub(r"\1", out)
         out = _EMPHASIS.sub(r"\1", out)

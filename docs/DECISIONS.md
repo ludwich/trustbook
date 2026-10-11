@@ -1505,3 +1505,16 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     false passed (4 of 4 true passed). Real checker: 0 of 41 false passed (18 of 21 true passed).
   - Live (temperature 0, seed 42): ref-near-10 was verified 4 of 4 times (before: 1 of 3); code-04 answered 3 of 3
     (2 verified, 1 partially verified).
+
+### D-083 Code spans are read as Markdown/reStructuredText write them (double backticks)
+- **Finding (gate attempt 4, run 2):** ref-near-10 was refused with "`and` is not in the cited chunks". The answer
+  was "The attribute names for HTTP status code 429 are ``too_many_requests`` and ``too_many``." The single-backtick
+  pattern paired the inner backticks and read " and " as a code span.
+- **Decision:** one shared `CODE_SPAN` pattern in `code_checks.py`, used by layer 5 (`backticked`), the judge's
+  anchors (`code_anchors`, `content_words`) and `normalize_inline`. It matches a run of backticks closed by a run
+  of the same length, as in CommonMark and reStructuredText. Each name inside a span is still checked.
+- **Consequences:**
+  - A sentence written with double backticks is checked on exactly the names it quotes.
+  - The source side was already handled (`normalize_inline` removed ``x`` first), so the claim replay's
+    double-backtick source texts read the same.
+  - Nothing that a single-backtick sentence was checked on changes.

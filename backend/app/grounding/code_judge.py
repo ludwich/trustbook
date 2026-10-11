@@ -74,6 +74,7 @@ from app.grounding.code_checks import (
     _NAME_PART,
     _NUMBER,
     _VALUE_CONSTANT,
+    CODE_SPAN,
     _occurs,
     quoted_in,
     unescape_markdown,
@@ -383,7 +384,7 @@ def parse_verdicts(text: str) -> dict[int, Verdict]:
 
 # --- anchors ---------------------------------------------------------------------------------
 
-_BACKTICK_SPAN = re.compile(r"`([^`\n]+)`")
+_BACKTICK_SPAN = CODE_SPAN
 _QUOTED = re.compile(
     r"\"([^\"\n]{1,80})\"|“([^”\n]{1,80})”|‘([^’\n]{1,80})’|(?<![A-Za-z0-9])'([^'\n]{1,80})'(?![A-Za-z0-9])"
 )
@@ -508,7 +509,7 @@ def code_anchors(sentence: str) -> list[Anchor]:
     anchors: list[Anchor] = []
     rest = sentence
     for match in _BACKTICK_SPAN.finditer(sentence):
-        span = match.group(1).strip()
+        span = match.group(2).strip()
         if span.endswith("()") and len(span) > 2:
             span = span[:-2]
         if span:

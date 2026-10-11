@@ -20,6 +20,7 @@ from app.chat.prompt import (
 from app.grounding.code_checks import (
     LineRange,
     SnapshotFiles,
+    backticked,
     missing_identifiers,
     normalize_inline,
     quoted_in,
@@ -667,3 +668,18 @@ def test_the_first_answer_prompt_has_no_feedback() -> None:
 )
 def test_failure_reasons(check: SentenceCheck, reason: str) -> None:
     assert check.failure(0.5) == reason
+
+
+def test_double_backtick_code_spans_are_read_whole() -> None:
+    # D-083 (gate attempt 4, run 2: ref-near-10 refused with "`and` is not in the cited chunks").
+    sentence = "The names for 429 are ``too_many_requests`` and ``too_many``."
+    assert backticked(sentence) == ["too_many_requests", "too_many"]
+    assert [a.text for a in code_anchors(sentence) if a.kind == "code"] == [
+        "too_many_requests",
+        "too_many",
+    ]
+    assert backticked("Use `get()` or `post`, not ``a `b` c``.") == ["get", "post", "a `b` c"]
+    chunk = '    429: ("too_many_requests", "too_many"),'
+    assert missing_identifiers(sentence, [chunk]) == []
+    assert missing_identifiers("Use ``too_many`` and ``slow_down``.", [chunk]) == ["slow_down"]
+    assert normalize_inline("It is ``200 OK`` and `x`.") == "It is 200 OK and x."

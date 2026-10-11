@@ -22,6 +22,9 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
    Status 22:00: attempt 3 on p3h, run 1 FAIL (code-04 + ref-near-10), run 2 PASS, real-use PASS, Qwen3.8 reference
    precision 77.8% (comparison only). Fix D-082 (feedback after a failed rescue, judge evidence for every name);
    rerun all 4 on the next image.
+   Attempt 4 (p3i, 36d17db): runs 1, 2 and real-use PASS (code false refusals 0/1/0, precision 100%, p95 42.7/42.6/44.6 s);
+   Qwen3.8 reference 79.4% precision, p95 84.5 s. Run 2's one refusal was a double-backtick parse bug, fixed in D-083,
+   so the final runs are on the next image (p3j).
 4. Stop when Phase 4 is done or blocked on a decision only Ludwig can make. Summary at the top of docs/GATES.md:
    what waits for him (Gate 3 → 3b → 4) and how to test each.
 
@@ -53,9 +56,9 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
     document files chunked on whole lines (line locators claim only lines the chunk holds); `CHUNKER_VERSION` 4
   - [x] retrieval (D-059–062): content-ordered ties, callee definitions, agreement guard; chat (D-063/064): judge confirms checker passes
   - [x] attempt-2 measurement: run 1 passed; run 2 (2 code FR), real-use (p95 66 s) and Qwen3.8 reference failed
-  - [ ] round 2a: anchor matching (dotted names, plural acronyms, inline markup), confirmation veto checks the full
+  - [x] round 2a (D-068..D-076): anchor matching (dotted names, plural acronyms, inline markup), confirmation veto checks the full
     cited chunks, targeted retry, failed_sentences diagnostics
-  - [ ] round 2b (Ludwig): general parent/child retrieval — retrieve on small chunks, expand to capped parent context
+  - [x] round 2b (Ludwig, D-077..D-081): general parent/child retrieval — retrieve on small chunks, expand to capped parent context
     for the prompt (docs: enclosing section with heading path; code: enclosing class / file outline + imports;
     transcripts later: ~1–2k-token window with speakers + timestamps); citations always the child's exact
     lines/timestamps, never the parent; replace the D-032 constant lookup and the callee lookup where possible

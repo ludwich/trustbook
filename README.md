@@ -19,6 +19,26 @@ checking, code-specific features and the Ideation tab follow in later phases (se
 You need Docker (or Podman) with Compose, about 12 GB of free disk space and at least 8 GB of RAM for
 the app container (Docker Desktop: Settings → Resources). With Podman, use podman-compose 1.1 or newer (or Podman's docker-compose provider).
 
+> **Memory.** Trustbook needs the most memory while it indexes: the embedding, reranking and answer-checking
+> models and the document parser all run inside the container. In the Gate 3 run (indexing the `requests`
+> repository and its documentation, then answering 45 questions) the container peaked at **5.4 GB** and
+> typically used about 4.4 GB. If the container has less, indexing can be killed part-way and the source shows
+> as failed.
+>
+> - **Docker Desktop on Windows** usually runs on WSL 2. There the memory limit is not under Settings →
+>   Resources; it is set in `%UserProfile%\.wslconfig`. WSL 2 gets half of your RAM by default. To give it
+>   more, add the lines below, then run `wsl --shutdown` and restart Docker Desktop:
+>
+>   ```ini
+>   [wsl2]
+>   memory=10GB
+>   ```
+>
+> - **On macOS, and on Windows with the Hyper-V backend,** set the limit in Docker Desktop under Settings →
+>   Resources.
+> - **A local chat model** (Ollama, llama-server, LM Studio) runs outside this container and needs its own
+>   memory on top of this.
+
 1. Create a folder, for example `trustbook`, and put two files in it:
    - [`compose.yaml`](compose.yaml)
    - [`.env.example`](.env.example), renamed to `.env`
