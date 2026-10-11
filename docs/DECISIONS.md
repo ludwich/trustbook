@@ -1304,7 +1304,9 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   - **Replaced (lookups):**
     - **D-032 constants.** The referrer's file is looked up first, through its module family's stored `defines`:
       one indexed query per file, cached for the whole retrieval (`store.FileRows`, shared with the expansion).
-      This replaces the per-name GLOB for same-file names (23 of 32 constant references on requests).
+      This replaces the per-name GLOB for same-file names. (The design estimated 23 of 32 constant references on
+      requests; on the 45 Smoke questions only 5 of 415 looked-up names were in the referrer's own file, see
+      below: most looked-up UPPER-case words are defined by no file, and they take the GLOB on the miss.)
     - **D-058 split literals.** Their parts come from the same rows, in place of `chunks_of_symbol`.
     - **D-060/D-062 callees.** Scoping uses parent keys:
       - receiver calls (`self.`, `this.`, `cls.`) match the caller's class family, nested classes included;
@@ -1324,10 +1326,25 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   - The retrieval passes one `FileRows` to `with_definitions` and `with_callees` (`file_rows=`), and to the
     expansion; `file_rows=None` keeps the lookups without parent keys.
 - **Consequences:**
-  - **Parity (slice A fills this in):** _placeholder — the 45-question retrieval-only listing over the Smoke
-    questions (no LLM): constant names, definition chunks and callee chunks before and after, each difference with
-    its question. Allowed are names now found in module-level `try`/`if` blocks and JS/TS `const X`, and ties
-    broken by an import target. To be written from slice A's parity run._
+  - **Slice A measurements:**
+    - **Quality bar** (each run separately in backend/, real exit status): `uv sync --frozen` 0, `ruff check .` 0,
+      `ruff format --check .` 0 (189 files), `mypy --strict app` 0 (121 files), `pytest` 0 (full suite). No eval/
+      changes.
+    - **Parity, 45 Smoke questions, live in trustbook-g3** (old = phase-3 code, new = this branch):
+      - retrieval identical 45/45;
+      - new code without the cache == old 45/45;
+      - new code with FileRows == old 45/45: 13 definition extras and 10 callee extras, the same final context;
+      - 5 of 415 names were found in the referrer's own file; 410 still took the GLOB;
+      - lookup time p50: definitions 3.77 → 3.60 ms, callees 0.60 → 1.38 ms;
+      - FileRows queries per question: p50 4, max 7.
+    - **Corpus** (requests, real tokenizer):
+      - 962 chunks: 788 code (all with structure), 174 document;
+      - 157 document chunks have a heading, with 0 title/header mismatches;
+      - the HISTORY.md line-188 chunk is 159-199, key `HISTORY.md#L159`, `head=True`.
+    - **Index-time cost**: the structure pass adds +9.3 to +9.6% over the same code with the pass turned off
+      (about 6.2 of 72 ms). Whole chunking vs phase-3 (p3-treesitter-5): 0.0715-0.0744 s vs 0.0748-0.0756 s.
+    - **Statement-row query vs Python walk**: identical rows on 37 requests files, 121 backend files, 120 frontend
+      files and 10 C#/TS sample files.
   - Same-file lookups cost one query per file instead of one GLOB per name.
 
 ### D-079 Prompt and citations: numbered children, one separate outline, regeneration text in the user message
