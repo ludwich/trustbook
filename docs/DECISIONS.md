@@ -739,3 +739,120 @@ grounding correctness > data safety > simplicity > performance > features.
   C# static helper, the Python module function (a same-named function in another module is not taken), Java/Go
   fallback files, the orphaned-constant reproducer and the one-scan-per-candidate bound.
 - **Grounding:** unchanged; no threshold, verification or refusal rule is touched.
+
+### D-052 (extended) Near-copy citations collapse to the defining chunk
+- **Correction to D-052's finding:** the two Quickstart chunks in docs-04 do not "only mention `.netrc`": they repeat
+  the look-up sentence word for word ("Requests will search for the netrc file at `~/.netrc`, `~/_netrc`, …") and
+  pass the checker alone (0.95–0.97). D-052 correctly kept them; nothing chose among chunks that each support a
+  sentence. The same happened in code-02 (`Response.ok`, `__bool__` and `__nonzero__` share a docstring; each
+  0.97 alone) and ref-near-05 (a `Session.__init__` comment restates the docs, 0.98 alone).
+- **Decision (checker-passed sentences only; judge-rescued sentences keep their citations):**
+  1. D-052 as before.
+  2. Among the chunks that support the sentence alone, a chunk whose supporting window (the units sharing the most
+     terms with the sentence) is ≥ 90 % word-3-gram contained in an already kept chunk's window is dropped.
+     Preference order: the chunk whose `locator.symbol` the sentence names (full dotted name, `Class.name`, a
+     backticked last part, or a last part of ≥ 4 characters as a word), then the one the question names, then the
+     higher rerank score for the question, then context order. Windows under 4 shingles are never called copies.
+  3. Guarded upgrade: a kept citation whose symbol the sentence does not name is swapped for a better-ranked
+     context chunk whose symbol it does name, only if that chunk's window contains the cited window (≥ 90 %) and
+     the chunk passes verification alone (checker or judge, no layer 5 problems).
+  4. A choice that would leave a backticked name or a literal outside the kept chunks is not made.
+  Citations are only removed when a kept chunk supports the sentence alone; `diagnostics.citation_changes` lists
+  every drop and swap (chunk ids only).
+- **Why 90 % and the best-units window:** focus windows (D-044) of the docs-04 copies overlapped only 0.11–0.73,
+  so they would not collapse; best-units windows were 1.00 for all true copies (docs-04, code-02) and 0.70–0.79
+  for genuinely different support (`__bool__` vs `ok` for "a response in a boolean context returns self.ok").
+- **Measured** (live Smoke space, real HHEM, reranker and judge; 25 recorded model replies from the diagnoses,
+  replayed through the old and the new pipeline): distinct citations correct 52/58 (89.7 %) → 45/45. code-02
+  `[ok, __bool__, __nonzero__]` → `[ok]`; docs-04 → Authentication only; ref-near-05 `[SSL web, advanced.rst,
+  Session.__init__]` → `[SSL web]`. No answer changed outcome because of the choice.
+
+### D-063 Gate 3 rework: the judge for every citation, confirmation, citation completion, regeneration, eval generation
+(Review corrections in D-064: the prose rescue and citation completion below were withdrawn, rescues are asked
+again alone, and digit-term abbreviations are one-letter initials only.)
+- **Judge for every citation type (rescue; withdrawn by D-064).** The D-045 judge now rescues any sentence that
+  fails only the checker, whatever it cites. **Why:** HHEM fails correct paraphrases of technical prose (ref-near-07: "resolve hostnames on
+  the proxy server instead of your own machine" vs the source's "resolve the domains on the proxy server", 0.34–0.36),
+  and whether a sentence got the judge depended on provenance (the same text as `.rst` was judged, as a web page not).
+  Prose chunks are numbered from 1, a line per sentence (lines over 160 characters split at sentence ends), headed by
+  title and section. Same evidence anchoring and anchor/content-word rules; the prompt says "excerpts (source code or
+  documentation)" and adds "direction (which side does what)". In prose evidence a named character ("comma") may
+  match the word itself.
+- **Judge confirms every checker pass (veto).** HHEM passes role-swapped false claims: "With socks5h, DNS resolution
+  happens on the client" 0.718–0.98, "This causes DNS resolution to happen on the proxy server rather than the
+  client" citing the chunk that says the opposite 0.58–0.60, "setting trust_env to True" 0.739, an invented
+  `HOME_NETRC` variable 0.857, "Response.ok returns True only if the status code is exactly 200" 0.702.
+  **Band:** measured on 71 statements (43 true, 28 false; 9 questions), false checker passes scored 0.58–0.98 and
+  true ones 0.56–0.99, so no band separates them: every checker pass is confirmed (`CONFIRM_BELOW = inf`). A veto
+  needs the verdict to say unsupported, name evidence outside the sentence's citations, or name evidence lines
+  missing an anchor, **and** the same when the sentence is asked again alone: in batches of similar statements
+  the judge rejected true sentences stated verbatim in a docstring ("returns True when the status code is between
+  200 and 400"), 4 times in 3 answers; alone it accepted 5/5 such true sentences and vetoed 9/9 false passes.
+  Content-share shortfalls and missing verdicts never veto. Vetoed sentences get `sentence_scores` 0.0 and are
+  listed in `diagnostics.judge_vetoed`.
+- **Measured:** batch of 71 statements: all 10 false checker passes vetoed in the batch (each of the 9 distinct
+  ones again when asked alone), 0 of 32 true checker passes vetoed, 11/11 true checker failures rescued, 0/18 false
+  checker failures rescued. On the 25 replayed
+  replies, the live false pass (c2 role swap) was removed; no answer was refused that was answered before.
+  **Latency:** one judge call per answer that has sentences: 1.4–8.4 s (mean 3.4 s over 25 answers, Qwen3.6-35B-A3B
+  on Ludwig's shared server, no thinking), plus ~1–1.5 s per vetoed sentence for the repeat.
+- **Grounding:** confirmation can only fail sentences (stronger). The prose rescue made checker failures on prose
+  weaker, which D-064 corrects. Judge failures keep the checker's result (as D-045).
+- **Digit-bearing names (judge vocabulary).** `b64` ↔ base64, `sha256` ↔ SHA-256, `utf8` ↔ UTF-8 match in both
+  directions: equal keys after dropping case, `-` and `_`, or a letter-prefix abbreviation with the same digits and
+  suffix (a one-letter abbreviation needs a word of ≥ 4 letters). sha1/sha256, utf8/utf16, md4/md5, base32/b64,
+  e2/ec2 and s3/sha3 do not match (tests). Hyphenated prose terms (SHA-256, UTF-8) are anchors; they match the same
+  term in any spelling or, as before, their numbers as whole words. Backticked spans stay exact.
+- **Two exact-match fixes found while measuring (both stricter or neutral):** a backticked span no longer matches
+  inside a longer name (`socks5` is not in `socks5h`), in layer 5 and in anchoring; Markdown escapes are removed
+  before matching (web pages store `trust\_env`; a true sentence naming trust_env was vetoed).
+- **Citation completion (ref-near-10; withdrawn by D-064).** Before verification, a sentence whose backticked name is missing from its
+  cited chunks but present in another context chunk also cites it (same file first, then context order, at most 2;
+  nothing when a name is in no context chunk). Every layer then runs on the new set. Measured on current chunks
+  (ref-near-10's table chunk 40-91 added to the context by hand, since retrieval misses it until the chunker fix):
+  the `requests.codes` sentence gained status_codes.py 1-39 and lost its layer-5 failure, but the judge did not
+  accept it (checker 0.25), so it still fails; `requests.codes.rate_limited` and `codes.TOO_MANY_REQUESTS` get
+  nothing added and fail layer 5. With retrieval as it is, ref-near-10 stays `not_in_sources` (2/2 runs).
+- **Prompt rule:** "Use the chunks' own words for names and facts. Do not replace them with the question's
+  wording." The regeneration note repeats it. (Diagnosis sample: HHEM-only first-sentence failures 4/8 → 1/6.)
+- **Regeneration (§15 decision; SPEC §8 is silent on the first-sentence case):** the one regeneration also runs when
+  only the first sentence failed; the refusal rule applies to the second reply unchanged.
+- **Eval generation override (F5).** `POST …/messages` takes `"generation": {"temperature": 0..1, "seed": int}`.
+  Default unchanged (0.2, no seed). The seed goes to the answer, gate and judge calls; OpenAI-compatible/Azure send
+  `seed` (dropped on a 400 naming it), Anthropic ignores it. Diagnostics gain `generation` and
+  `retrieval_fingerprint` (16 hex of SHA-256 over the ordered context chunk ids).
+- **Live before/after (real LLM, temperature 0.2, 2 runs each, current chunks):** code-02 verified 2/2 (all
+  citations `Response.ok`), docs-04 2/2 answered with correct citations only (one run regenerated after its first
+  sentence listed `~/.netrc` twice and was vetoed), ref-near-05 verified 2/2 citing the SSL section, ref-near-07
+  verified 2/2 (the question-worded paraphrase rescued by the judge in both), ref-near-10 `not_in_sources` 2/2 (retrieval).
+
+### D-064 Review corrections to D-063: no prose rescue, no citation completion, rescues asked twice, initials only
+Four review findings on D-063, each checked with a reproducer and fixed, never by loosening a threshold:
+- **Prose rescue withdrawn.** Rescue is back to the D-045 scope: only sentences citing code, judged on their cited
+  code chunks only. **Why:** for prose the deterministic rescue gates do almost nothing. Prose has no anchors, so
+  the only gate left is "half the content words are in the evidence line", and negations and direction words
+  are stopwords. Reproduced: with a judge "supported", `assess()` accepted "With socks5h, DNS resolution happens
+  on the client instead of the proxy server" (a role swap), "Requests does not resolve DNS on the proxy server
+  when socks5h is used" (content share 0.75, no anchors) and, for a PDF page saying "The budget was not approved,
+  so the meeting was moved to Friday", "The meeting was moved to Friday because the budget was approved". So a
+  checker failure on prose (HHEM's home domain) came down to one verdict from the model that wrote the answer.
+  The 0/18 safety figure came from 71 statements on one English corpus. A negation/direction-word gate would be
+  language-specific (Swedish "inte" is not English "not"), so it is not a general fix; prose stays checker-only
+  for rescue. Confirmation (vetoes) still covers prose; it can only fail sentences.
+- **Rescues are asked again alone.** A rescue from the batch now needs the same "accepted" when the sentence is
+  judged alone, symmetric with the veto (D-063 measured batch noise; a judge-only pass is the riskiest path).
+- **Citation completion withdrawn.** It rewrote the model's citations before layer 5, so a sentence citing the
+  wrong chunk for a backticked name passed layer 5 when any context chunk held the name (the added chunk was
+  chosen because it holds the name, not because it supports the claim; reproduced with "Set `max_redirects` to 0
+  to stop Requests from reading netrc." citing a netrc chunk, completed with `sessions.py`). SPEC §8 layer 5 says
+  such a sentence fails. Completion also did not fix ref-near-10 (D-063: still `not_in_sources`).
+  `citation_changes` loses `added`.
+- **Digit-term abbreviations: one-letter initials only.** `terms_match` accepted any letter prefix, so `sha256`
+  matched `shake_256` and `py3` matched `pypy3` (a judge anchor for SHA256 was "found" in `hashlib.shake_256`).
+  Now only a one-letter initial of a word of ≥ 4 letters abbreviates (`b64` ↔ base64, `h2` ↔ http2); equal keys
+  (`SHA-256` ↔ `sha256`) are unchanged.
+- **Measured** (live Smoke space, real HHEM and judge, the 10 recorded replies of the D-063 before/after run
+  replayed): every outcome, method and citation unchanged. The 3 rescues (code-02 run 2 s4, ref-near-07 both runs,
+  which cite `docs/user/advanced.rst` from the folder source) were accepted again alone; judge time per answer
+  1.5–6.1 s (ref-near-07 run 2: 3.2 → 6.0 s, one extra call per rescue). ref-near-07 still depends on the folder
+  source's `.rst` chunk being cited; a sentence citing only the web page would now fail on the checker.

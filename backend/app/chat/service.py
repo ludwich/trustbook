@@ -9,7 +9,7 @@ from app.chat.gate import CHITCHAT_REPLY, Gate, GateResult
 from app.chat.llm import ChatAdapterFactory
 from app.chat.pipeline import Refused, answer
 from app.chat.repository import ChatStore
-from app.chat.schemas import Diagnostics, Hint, MessageOut, Stage
+from app.chat.schemas import Diagnostics, Generation, Hint, MessageOut, Stage
 from app.grounding.verify import Verifier
 from app.retrieval.service import Retrieval
 
@@ -29,6 +29,7 @@ class ChatService:
         refuse_threshold: float,
         verifier: Callable[[], Verifier],
         gate: Gate | None = None,
+        generation: Generation | None = None,
     ) -> None:
         self._store = store
         self._retrieve = retrieve
@@ -36,6 +37,7 @@ class ChatService:
         self._refuse_threshold = refuse_threshold
         self._verifier = verifier
         self._gate = gate
+        self._generation = generation
 
     def respond(self, conversation_id: str, question: str, emit: EventSink) -> MessageOut:
         """Answer ``question`` (already stored as the user message) and emit the events.
@@ -73,6 +75,7 @@ class ChatService:
             refuse_threshold=self._refuse_threshold,
             verifier=self._verifier(),
             on_stage=on_stage,
+            generation=self._generation,
         )
         if isinstance(outcome, Refused):
             message = self._store.add_refusal(

@@ -20,12 +20,15 @@ from app.grounding.code_judge import (
     Statement,
     accept,
     code_anchors,
+    content_share,
     content_words,
+    judge_messages,
     number_chunk,
     parse_judge_prompt,
     parse_verdicts,
     prepare,
     split_identifier,
+    terms_match,
 )
 from app.grounding.verify import GroundingSettings, Verifier, build_verifier
 from app.retrieval.service import Retrieval, RetrievedChunk
@@ -149,7 +152,9 @@ def low(pairs: Sequence[tuple[str, str]]) -> list[float]:
 def judged(
     reply: str, sentences: list[tuple[str, list[RetrievedChunk]]]
 ) -> tuple[list[bool], list[str | None], ScriptedChat]:
-    chat = ScriptedChat(reply)
+    """Judge ``sentences`` (all failing the checker); a single sentence's rescue is asked again
+    alone and gets the same ``reply``."""
+    chat = ScriptedChat(reply, *([reply] if len(sentences) == 1 else []))
     verifier = Verifier(low, threshold=0.5, files=SNAPSHOT, code_judge=CodeJudge(lambda: chat))
     checked = verifier.check(sentences)
     return [c.passed for c in checked.checks], list(checked.methods), chat
@@ -235,27 +240,186 @@ def test_unsupported_verdicts_and_missing_verdicts_fail() -> None:
 # --- what goes to the judge ------------------------------------------------------------------
 
 
-def test_only_code_sentences_that_failed_only_the_checker_are_judged() -> None:
-    chat = ScriptedChat(verdicts((1, True, [("c1", 71, 73)])))
+def test_only_sentences_citing_code_are_rescued_and_the_judge_sees_only_that_code() -> None:
+    # D-045, D-064: a rescue is judged on the cited code chunks only; prose-only sentences are
+    # never sent for a rescue.
+    supported = verdicts((1, True, [("c1", 71, 73)]))
+    chat = ScriptedChat(supported, supported)  # the batch, then the rescue asked alone
     scores = {TRUE_CLAIM: 0.05, "Prose claim.": 0.05, "Checker passes this.": 0.9}
 
     def checker(pairs: Sequence[tuple[str, str]]) -> list[float]:
         return [scores.get(h, 0.05) for _, h in pairs]
 
-    verifier = Verifier(checker, threshold=0.5, files=SNAPSHOT, code_judge=CodeJudge(lambda: chat))
+    verifier = Verifier(
+        checker,
+        threshold=0.5,
+        files=SNAPSHOT,
+        code_judge=CodeJudge(lambda: chat),
+        confirm_below=0.8,
+    )
     checked = verifier.check(
         [
-            (TRUE_CLAIM, [code_chunk(), prose_chunk()]),  # judged; sees only the code chunk
-            ("Prose claim.", [prose_chunk()]),  # not code
-            ("Checker passes this.", [code_chunk()]),  # passed already
+            (TRUE_CLAIM, [code_chunk(), prose_chunk()]),  # judged on the code chunk only
+            ("Prose claim.", [prose_chunk()]),  # cites only prose: never rescued
+            ("Checker passes this.", [code_chunk()]),  # passed above the confirmation band
             ("Uses `no_such_name` here.", [code_chunk()]),  # layer 5 failure
         ]
     )
     assert [c.passed for c in checked.checks] == [True, False, True, False]
     assert checked.methods == ["code_judge", None, "checker", None]
-    assert len(chat.calls) == 1  # one call per answer
-    user = chat.calls[0]["messages"][1]["content"]
-    assert user.count("(cites") == 1 and "Basic Auth sends" not in user
+    assert len(chat.calls) == 2
+    for call in chat.calls:
+        user = call["messages"][1]["content"]
+        assert user.count("(cites") == 1 and f"1. (cites c1) {TRUE_CLAIM}" in user
+        assert "Basic Auth sends" not in user and "Prose claim." not in user
+    assert verifier.judge_calls == 2 and verifier.judge_seconds >= 0
+
+
+def test_a_rescue_not_repeated_alone_fails() -> None:
+    supported = verdicts((1, True, [("c1", 71, 73)]))
+    for alone in (verdicts((1, False, [])), "not json", verdicts()):
+        passed, methods, chat = judged_with(supported, alone)
+        assert (passed, methods) == ([False], [None])
+        assert len(chat.calls) == 2
+
+
+def judged_with(batch: str, alone: str) -> tuple[list[bool], list[str | None], ScriptedChat]:
+    chat = ScriptedChat(batch, alone)
+    verifier = Verifier(low, threshold=0.5, files=SNAPSHOT, code_judge=CodeJudge(lambda: chat))
+    checked = verifier.check([(TRUE_CLAIM, [code_chunk()])])
+    return [c.passed for c in checked.checks], list(checked.methods), chat
+
+
+PAGE = "The board met on Monday. The budget was not approved, so the meeting was moved to Friday."
+
+
+@pytest.mark.parametrize(
+    ("claim", "chunk"),
+    [
+        # A role swap and a negation of the SOCKS page, and a reversed cause in a PDF page: word
+        # overlap with the evidence line is 75-100 %, so only the checker can fail them.
+        ("With socks5h, DNS resolution happens on the client instead of the proxy server.", None),
+        ("Requests does not resolve DNS on the proxy server when socks5h is used.", None),
+        (
+            "The meeting was moved to Friday because the budget was approved.",
+            RetrievedChunk("pdf", "s3", "Minutes", PAGE, {"page": 3}, 30, 0.9),
+        ),
+    ],
+)
+def test_prose_sentences_the_checker_failed_are_never_rescued(
+    claim: str, chunk: RetrievedChunk | None
+) -> None:
+    chat = ScriptedChat()  # any call would fail the rescue; none may be made
+    verifier = Verifier(low, threshold=0.5, code_judge=CodeJudge(lambda: chat))
+    check = verifier.check([(claim, [chunk or socks_chunk()])]).checks[0]
+    assert (check.passed, check.method) == (False, None)
+    assert chat.calls == []
+
+
+# --- confirmation of borderline checker passes (D-063) ----------------------------------------
+
+SOCKS = (
+    "Using the scheme socks5 causes the DNS resolution to happen on the client, rather than on "
+    "the proxy server. This is in line with curl, which uses the scheme to decide whether to do "
+    "the DNS resolution on the client or proxy. If you want to resolve the domains on the proxy "
+    "server, use socks5h as the scheme."
+)
+
+
+def socks_chunk() -> RetrievedChunk:
+    return RetrievedChunk("socks", "w", "Advanced Usage", SOCKS, {"heading": "SOCKS"}, 80, 0.9)
+
+
+SWAPPED = "With socks5h, DNS resolution happens on the client."
+RIGHT = "With socks5h, the domains are resolved on the proxy server."
+
+
+def confirmed(
+    reply: str, score: float, confirm_below: float = 0.8, alone: str | None = None
+) -> tuple[bool, bool, int]:
+    """Check SWAPPED; ``alone`` is the judge's second reply (the veto asked again alone)."""
+    chat = ScriptedChat(reply, *([alone] if alone is not None else []))
+    verifier = Verifier(
+        lambda pairs: [score for _ in pairs],
+        threshold=0.5,
+        code_judge=CodeJudge(lambda: chat),
+        confirm_below=confirm_below,
+    )
+    check = verifier.check([(SWAPPED, [socks_chunk()])]).checks[0]
+    return check.passed, check.vetoed, len(chat.calls)
+
+
+def test_a_pass_the_judge_contradicts_twice_fails() -> None:
+    no = verdicts((1, False, []))
+    passed, vetoed, calls = confirmed(no, 0.6, alone=no)
+    assert (passed, vetoed, calls) == (False, True, 2)
+
+
+def test_a_veto_not_repeated_alone_keeps_the_pass() -> None:
+    supported = verdicts((1, True, [("c1", 1, 1)]))
+    assert confirmed(verdicts((1, False, [])), 0.6, alone=supported) == (True, False, 2)
+    assert confirmed(verdicts((1, False, [])), 0.6, alone="not json") == (True, False, 2)
+
+
+def test_a_pass_with_evidence_outside_its_citations_fails() -> None:
+    outside = verdicts((1, True, [("c2", 1, 1)]))
+    passed, vetoed, _ = confirmed(outside, 0.6, alone=outside)
+    assert (passed, vetoed) == (False, True)
+
+
+def test_a_confirmed_pass_and_a_judge_without_an_answer_keep_the_pass() -> None:
+    assert confirmed(verdicts((1, True, [("c1", 3, 3)])), 0.6)[:2] == (True, False)
+    assert confirmed(verdicts(), 0.6)[:2] == (True, False)  # no verdict: no veto
+    assert confirmed("not json", 0.6)[:2] == (True, False)  # judge failed: checker stands
+
+
+def test_passes_at_or_above_the_bound_are_not_sent() -> None:
+    assert confirmed(verdicts((1, False, [])), 0.8) == (True, False, 0)
+
+
+def test_vetoed_sentences_score_zero_for_the_threshold_sweep() -> None:
+    chat = ScriptedChat(verdicts((1, False, [])), verdicts((1, False, [])))
+    verifier = Verifier(
+        lambda pairs: [0.6 for _ in pairs],
+        threshold=0.5,
+        code_judge=CodeJudge(lambda: chat),
+        confirm_below=0.8,
+    )
+    checked = verifier.check([(SWAPPED, [socks_chunk()])])
+    assert checked.vetoed == [0] and checked.checks[0].diagnostic_score == 0.0
+    assert checked.methods == [None] and checked.refuse
+
+
+def test_prose_is_numbered_a_sentence_per_line_under_its_title() -> None:
+    chunks, _ = prepare([(RIGHT, [socks_chunk()])])
+    numbered = chunks["c1"]
+    assert (numbered.first, numbered.last) == (1, 3)
+    assert (
+        numbered.lines[2]
+        == "If you want to resolve the domains on the proxy server, use socks5h as the scheme."
+    )
+    user = judge_messages(list(chunks.values()), [Statement(RIGHT, ("c1",))])[1]["content"]
+    assert "[c1] Advanced Usage (section “SOCKS”), lines 1-3" in user
+    assert "3 | If you want to resolve" in user
+
+
+def test_a_prose_pass_whose_evidence_line_lacks_its_name_is_vetoed() -> None:
+    # Confirmation still covers prose: socks5 is not in line 3, so the judge's support does not
+    # anchor the sentence, which is a veto (asked again alone).
+    reply = verdicts((1, True, [("c1", 3, 3)]))
+    chat = ScriptedChat(reply, reply)
+    verifier = Verifier(
+        lambda pairs: [0.6 for _ in pairs], threshold=0.5, code_judge=CodeJudge(lambda: chat)
+    )
+    check = verifier.check([("Use `socks5` to resolve domains on the proxy.", [socks_chunk()])])
+    assert check.checks[0].vetoed and not check.checks[0].passed
+    chat = ScriptedChat(reply)
+    verifier = Verifier(
+        lambda pairs: [0.6 for _ in pairs], threshold=0.5, code_judge=CodeJudge(lambda: chat)
+    )
+    check = verifier.check([("Use `socks5h` to resolve domains on the proxy.", [socks_chunk()])])
+    assert check.checks[0].passed and not check.checks[0].vetoed
+    assert len(chat.calls) == 1
 
 
 def test_judge_off_is_phase_2_behaviour(tmp_path: Path) -> None:
@@ -323,7 +487,8 @@ def test_judge_failures_and_timeouts_keep_the_checker_result(
 def test_the_judge_rescues_a_sentence_in_the_answer_pipeline() -> None:
     chunk = code_chunk()
     found = Retrieval(chunks=[chunk], ranked=[chunk], source_ids=["s1"])
-    chat = ScriptedChat(answer_json((TRUE_CLAIM, ["c1"])), verdicts((1, True, [("c1", 71, 73)])))
+    supported = verdicts((1, True, [("c1", 71, 73)]))
+    chat = ScriptedChat(answer_json((TRUE_CLAIM, ["c1"])), supported, supported)
     outcome = answer(
         "How does requests build the Basic auth header?",
         retrieve=lambda _q: found,
@@ -461,3 +626,87 @@ def test_dotted_names_need_their_last_part_in_the_evidence_and_the_rest_in_cited
     assert not accept(false, supported, chunks)[0]
     uncited = Statement("Use requests.codes.too_many_requests for HTTP 429.", ("c1",))
     assert not accept(uncited, supported, chunks)[0]  # "codes" is only in the uncited chunk
+
+
+# --- digit-bearing names (D-063) --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("b64", "base64"),
+        ("b64encode", "base64encode"),
+        ("sha256", "SHA-256"),
+        ("SHA256", "sha256"),
+        ("utf8", "UTF-8"),
+        ("UTF_8", "utf8"),
+        ("md5", "MD5"),
+        ("h2", "http2"),
+    ],
+)
+def test_digit_terms_match_in_both_directions(a: str, b: str) -> None:
+    assert terms_match(a, b) and terms_match(b, a)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("sha1", "sha256"),
+        ("SHA-1", "SHA-256"),
+        ("utf8", "utf16"),
+        ("md4", "md5"),
+        ("base32", "b64"),
+        ("base64", "base"),  # no digits on one side
+        ("e2", "ec2"),  # a one-letter abbreviation needs a word of four letters or more
+        ("s3", "sha3"),
+        ("x64", "b64"),
+        ("ipv4", "ipv6"),
+        ("b64encode", "base64decode"),
+        ("sha256", "shake_256"),  # only a one-letter initial abbreviates (D-064)
+        ("SHA256", "SHAKE256"),
+        ("py3", "pypy3"),
+        ("sha3", "shake3"),
+    ],
+)
+def test_digit_terms_do_not_match_other_terms(a: str, b: str) -> None:
+    assert not terms_match(a, b) and not terms_match(b, a)
+
+
+def test_prose_terms_are_anchors_matched_in_any_spelling() -> None:
+    assert Anchor("term", "SHA-256") in code_anchors("Digest auth supports SHA-256 too.")
+    assert Anchor("term", "UTF-8") in code_anchors("Text is decoded as UTF-8 by default.")
+    evidence = "elif _algorithm == 'SHA-256':\n    hash_utf8 = hashlib.sha256"
+    from app.grounding.code_judge import anchor_found
+
+    assert anchor_found(Anchor("term", "SHA-256"), "x = hashlib.sha256(b)", [])
+    assert anchor_found(Anchor("term", "UTF-8"), "s.encode('utf8')", [])
+    assert anchor_found(Anchor("identifier", "SHA256"), evidence, [])
+    assert anchor_found(Anchor("identifier", "MD5"), "_algorithm = 'md5'", [])
+    assert not anchor_found(Anchor("term", "SHA-1"), "x = hashlib.sha256(b)", [])
+    assert not anchor_found(Anchor("identifier", "SHA512"), evidence, [])
+    assert not anchor_found(Anchor("identifier", "SHA256"), "h = hashlib.shake_256(data)", [])
+    assert content_share(["sha256"], "h = hashlib.shake_256(data)") == 0.0
+    assert not anchor_found(Anchor("term", "UTF-16"), "s.encode('utf8')", [])
+    # A backticked span stays exact.
+    assert not anchor_found(Anchor("code", "sha256"), "SHA-256", [])
+
+
+def test_content_words_match_digit_abbreviations_both_ways() -> None:
+    assert content_share(["base64"], "b64encode(b':'.join(x))") == 1.0
+    assert content_share(["b64"], "The value is base64 encoded.") == 1.0
+    assert content_share(["utf8"], "Bodies are decoded as UTF-8.") == 1.0
+    assert content_share(["base32"], "b64encode(x)") == 0.0
+    assert content_share(["sha1"], "hashlib.sha256(x)") == 0.0
+
+
+def test_markdown_escapes_do_not_hide_names() -> None:
+    # Web pages are stored as Markdown: "trust\\_env" is what the page shows as trust_env.
+    text = "Usage of netrc file can be disabled by setting trust\\_env to False in the session."
+    page = RetrievedChunk("w", "w", "Authentication", text, {"heading": "netrc"}, 20, 0.9)
+    chunks, statements = prepare([("Setting trust_env to False disables netrc.", [page])])
+    supported = parse_verdicts(verdicts((1, True, [("c1", 1, 1)])))[1]
+    assert accept(statements[0], supported, chunks) == (True, "")
+    from app.grounding.code_checks import missing_identifiers
+
+    assert missing_identifiers("Set `trust_env` to False.", [text]) == []
+    assert missing_identifiers("Set `trust_envs` to False.", [text]) == ["trust_envs"]

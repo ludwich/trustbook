@@ -95,6 +95,7 @@ def classify(
     adapter: Callable[[], ChatAdapter],
     *,
     timeout_s: float = GATE_TIMEOUT_S,
+    seed: int | None = None,
 ) -> GateResult:
     """One fixed-choice call, at most ``timeout_s`` seconds; any failure → ``sources``.
 
@@ -113,6 +114,7 @@ def classify(
                 max_tokens=GATE_MAX_TOKENS,
                 json_schema=GATE_SCHEMA,
                 think=False,  # a router; a reasoning model would spend its tokens thinking
+                seed=seed,
             )
             results.put(parse_gate(reply.text))
         except BaseException as exc:  # reported to the caller below
@@ -196,17 +198,19 @@ class Gate:
         *,
         adapter: Callable[[], ChatAdapter] | None,
         timeout_s: float = GATE_TIMEOUT_S,
+        seed: int | None = None,
     ) -> None:
         self._store = store
         self._adapter = adapter
         self._timeout_s = timeout_s
+        self._seed = seed
 
     def route(self, question: str) -> GateResult:
         """Decide and log. ``adapter`` None (gate off or not set up) → ``sources``, logged."""
         result = (
             FALLBACK
             if self._adapter is None
-            else classify(question, self._adapter, timeout_s=self._timeout_s)
+            else classify(question, self._adapter, timeout_s=self._timeout_s, seed=self._seed)
         )
         try:
             entry = self._store.add(question, result)

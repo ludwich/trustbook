@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from app.chat.pipeline import NOT_IN_SOURCES, Answered, Refused, answer
+from app.chat.pipeline import NOT_IN_SOURCES, Answered, Refused, answer, retrieval_fingerprint
 from app.chat.prompt import ANSWER_SYSTEM, REGENERATE_INSTRUCTION
 from app.chat.schemas import Stage
 from app.grounding.verify import Verifier
@@ -68,6 +68,11 @@ def test_all_sentences_pass_is_verified_with_scores_and_diagnostics() -> None:
         "sentence_scores": [0.9, 0.6],
         "regenerated": False,
         "sentence_methods": ["checker", "checker"],
+        "judge_vetoed": [],
+        "judge_seconds": None,
+        "citation_changes": [],
+        "retrieval_fingerprint": retrieval_fingerprint(FOUND.chunks),
+        "generation": {"temperature": 0.2, "seed": None},
     }
     assert stages == ["retrieving", "generating", "checking"]
     assert len(chat.calls) == 1
@@ -99,18 +104,38 @@ def test_exactly_half_failing_is_not_refused_and_not_regenerated() -> None:
     assert len(chat.calls) == 1
 
 
-def test_first_sentence_failing_refuses_without_regenerating() -> None:
-    chat = ScriptedChat(answer_json(("Bad first.", ["c1"]), ("Good.", ["c2"])))
-    outcome, stages = run(chat, {"Bad first.": 0.1})
+def test_first_sentence_failing_regenerates_once_then_refuses() -> None:
+    # D-063: the first sentence failing alone (not more than half) also gets the one
+    # regeneration; the refusal rule applies to the second reply.
+    chat = ScriptedChat(
+        answer_json(("Bad first.", ["c1"]), ("Good.", ["c2"])),
+        answer_json(("Bad again.", ["c1"]), ("Good.", ["c2"]), ("Fine.", ["c3"])),
+        "never used",
+    )
+    outcome, stages = run(chat, {"Bad first.": 0.1, "Bad again.": 0.2})
     assert isinstance(outcome, Refused)
     assert outcome.refusal.reason == "unsupported"
     assert outcome.refusal.message == NOT_IN_SOURCES
     assert outcome.refusal.suggestion == (
         "Add sources that cover “how are proxies configured in requests”, then ask again."
     )
-    assert outcome.diagnostics.sentence_scores == [0.1, 1.0]
-    assert outcome.diagnostics.regenerated is False
-    assert len(chat.calls) == 1 and stages[-1] == "checking"
+    assert outcome.diagnostics.sentence_scores == [0.2, 1.0, 1.0]
+    assert outcome.diagnostics.regenerated is True
+    assert len(chat.calls) == 2
+    assert stages == ["retrieving", "generating", "checking", "generating", "checking"]
+
+
+def test_first_sentence_failing_can_recover_on_the_regeneration() -> None:
+    chat = ScriptedChat(
+        answer_json(("Bad first.", ["c1"]), ("Good.", ["c2"])),
+        answer_json(("Better.", ["c1"]), ("Good.", ["c2"])),
+    )
+    outcome, _ = run(chat, {"Bad first.": 0.1})
+    assert isinstance(outcome, Answered) and outcome.badge == "verified"
+    assert [s.text for s in outcome.sentences] == ["Better.", "Good."]
+    assert outcome.diagnostics.regenerated is True
+    second = chat.calls[1]["messages"]
+    assert second[0]["content"] == f"{ANSWER_SYSTEM}\n\n{REGENERATE_INSTRUCTION}"
 
 
 def test_more_than_half_failing_regenerates_once_and_can_recover() -> None:
@@ -133,7 +158,7 @@ def test_more_than_half_failing_regenerates_once_and_can_recover() -> None:
     assert second[1] == first[1]  # same chunks and question
     assert REGENERATE_INSTRUCTION == (
         "Some sentences were not supported by the cited chunks. "
-        "Only state what the chunks say, and cite them."
+        "Only state what the chunks say, in the chunks' own words, and cite them."
     )
 
 
@@ -201,6 +226,11 @@ def test_refusals_before_generation_carry_the_top_score() -> None:
         "sentence_scores": [],
         "regenerated": False,
         "sentence_methods": [],
+        "judge_vetoed": [],
+        "judge_seconds": None,
+        "citation_changes": [],
+        "retrieval_fingerprint": retrieval_fingerprint(low.chunks),
+        "generation": None,  # no answer call
     }
     none = Retrieval(chunks=[], ranked=[], source_ids=[])
     outcome, _ = run(ScriptedChat(), found=none)

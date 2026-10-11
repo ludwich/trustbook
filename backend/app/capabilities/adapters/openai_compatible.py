@@ -90,6 +90,7 @@ class OpenAICompatibleAdapter:
         max_tokens: int = 1024,
         json_schema: dict[str, Any] | None = None,
         think: bool = True,
+        seed: int | None = None,
     ) -> ChatResult:
         """Send a chat completion.
 
@@ -97,9 +98,14 @@ class OpenAICompatibleAdapter:
         ``json_object`` to a prompt-only instruction when the endpoint rejects it (400).
         ``think=False`` asks local servers (llama-server, vLLM, LM Studio) to skip a reasoning
         model's thinking via ``chat_template_kwargs``; endpoints that reject the field get the
-        request again without it (D-043).
+        request again without it (D-043). ``seed`` is sent as ``seed`` (eval runs, F5);
+        endpoints that reject it get the request again without it.
         """
-        extra = {} if think else {"chat_template_kwargs": {"enable_thinking": False}}
+        extra: dict[str, Any] = (
+            {} if think else {"chat_template_kwargs": {"enable_thinking": False}}
+        )
+        if seed is not None:
+            extra["seed"] = seed
         if json_schema is None:
             return self._complete({**self._body(messages, temperature, max_tokens), **extra})
         start = _JSON_MODES.index(self._json_mode)
@@ -217,6 +223,10 @@ def _compat_adjust(body: dict[str, Any], exc: AdapterError) -> dict[str, Any] | 
         del adjusted["chat_template_kwargs"]
         return adjusted
     reason = exc.message.lower()
+    if "seed" in reason and "seed" in body:
+        adjusted = dict(body)
+        del adjusted["seed"]
+        return adjusted
     if "max_completion_tokens" in reason and "max_tokens" in body:
         adjusted = dict(body)
         adjusted["max_completion_tokens"] = adjusted.pop("max_tokens")
