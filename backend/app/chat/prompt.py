@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.capabilities.adapters.base import ChatMessage
+from app.chunking.clock import clock
 from app.chunking.headings import heading_syntax
-from app.chunking.transcript import clock
 from app.grounding.code_checks import unescape_markdown
 from app.retrieval.parents import OutlineBlock, TranscriptWindow, outline_text, window_text
 from app.retrieval.service import RetrievedChunk

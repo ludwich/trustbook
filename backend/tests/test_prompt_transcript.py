@@ -16,7 +16,7 @@ from app.chat.prompt import (
     parse_prompt,
     transcript_section,
 )
-from app.chunking.transcript import clock
+from app.chunking.clock import clock
 from app.retrieval.parents import (
     WINDOW_PLACEHOLDER,
     OutlineBlock,

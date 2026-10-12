@@ -38,9 +38,9 @@ from typing import Literal, Protocol
 
 from sqlalchemy import Engine
 
+from app.chunking.clock import clock
 from app.chunking.header import split_header
 from app.chunking.structure import Import, Structure, key_file, module_key
-from app.chunking.transcript import clock
 from app.grounding.code_checks import unescape_markdown
 from app.retrieval.definitions import code_file
 from app.retrieval.fusion import CONTEXT_TOKENS
