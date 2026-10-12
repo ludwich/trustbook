@@ -68,7 +68,7 @@ def test_default_run_sends_temperature_0_and_seed_42_and_says_so(tmp_path: Path)
     assert "- Generation: temperature 0, seed 42 (eval override" in text
     assert "do not honour a seed" in text
     data = json.loads(sidecar.read_text())
-    assert data["version"] == 4
+    assert data["version"] == 5
     assert data["generation_requested"] == {"temperature": 0.0, "seed": 42}
 
 
@@ -166,7 +166,7 @@ def test_false_refusals_list_their_failed_sentences(tmp_path: Path) -> None:
     assert '  - “Response.ok is "not a check \\| 200 OK".” — judge veto: no support' in text
     assert "  - “word word" in text and "— checker score 0.20 < 0.5" in text
     data = json.loads(sidecar.read_text())
-    assert data["version"] == 4
+    assert data["version"] == 5
     rows = {q["id"]: q for q in data["questions"]}
     kept = rows["code-1"]["failed_sentences"]
     assert [f["reason"] for f in kept] == ["judge veto: no support", "checker score 0.20 < 0.5"]

@@ -581,6 +581,11 @@ class QuestionResult:
     outline_fingerprint: str | None = None
     outline_only: list[int] | None = None
     promoted_cited: list[int] | None = None
+    # Transcript windows (D-090) from ``diagnostics``; None when not sent.
+    windows: list[dict[str, Any]] | None = None
+    window_tokens: int | None = None
+    window_fingerprint: str | None = None
+    window_only: list[int] | None = None
 
     @property
     def answer_text(self) -> str:
@@ -878,6 +883,10 @@ class Latency:
         return [r for r in self.generated if r.outline_only and any(r.outline_only)]
 
     @property
+    def window_only(self) -> list[QuestionResult]:
+        return [r for r in self.generated if r.window_only and any(r.window_only)]
+
+    @property
     def promoted_citations(self) -> tuple[int, int]:
         found = [p for p in (promoted_citations(r) for r in self.generated) if p is not None]
         return sum(p["n"] for p in found), sum(p["correct"] for p in found)
@@ -945,6 +954,12 @@ def latency_json(results: Sequence[QuestionResult]) -> dict[str, Any]:
             "regenerated": sum(1 for r in lat.outline_only if r.regenerated),
         },
         "promoted_citations": {"n": promoted, "correct": correct},
+        "window_tokens": _stats(lat.tokens("window_tokens")),
+        "window_only": {
+            "answers": [r.question.id for r in lat.window_only],
+            "sentences": sum(sum(r.window_only or []) for r in lat.window_only),
+            "regenerated": sum(1 for r in lat.window_only if r.regenerated),
+        },
     }
 
 
@@ -988,6 +1003,9 @@ def render_latency(results: Sequence[QuestionResult]) -> list[str]:
     only = lat.outline_only
     only_sentences = sum(sum(r.outline_only or []) for r in only)
     only_regen = sum(1 for r in only if r.regenerated)
+    windowed = lat.window_only
+    window_sentences = sum(sum(r.window_only or []) for r in windowed)
+    window_regen = sum(1 for r in windowed if r.regenerated)
     promoted, correct = lat.promoted_citations
     out = ["#### Latency and judge calls", ""]
     out.append("| Measure | Value |")
@@ -1022,9 +1040,14 @@ def render_latency(results: Sequence[QuestionResult]) -> list[str]:
     )
     out.append(f"| Promoted tokens: p50 / p95 | {tokens(lat.tokens('promoted_tokens'))} |")
     out.append(f"| Outline tokens: p50 / p95 | {tokens(lat.tokens('outline_tokens'))} |")
+    out.append(f"| Transcript window tokens: p50 / p95 | {tokens(lat.tokens('window_tokens'))} |")
     out.append(
         f"| Outline-only failures | {only_sentences} sentence(s) in {len(only)} answer(s), "
         f"{only_regen} of them regenerated |"
+    )
+    out.append(
+        f"| Window-only failures | {window_sentences} sentence(s) in {len(windowed)} "
+        f"answer(s), {window_regen} of them regenerated |"
     )
     out.append(
         f"| Citations to promoted chunks | {promoted} ({correct} inside an expected locator) |"
@@ -1063,7 +1086,9 @@ def _ratio_json(r: Ratio) -> dict[str, Any]:
 
 
 # 4: wf-2's version 3 plus the D-080 latency fields and the D-077 parent context fields.
-SIDECAR_VERSION = 4
+# 5: the D-090 transcript window fields (``windows``, ``window_tokens``, ``window_fingerprint``,
+# ``window_only``) per question and ``window_tokens`` / ``window_only`` in ``latency``.
+SIDECAR_VERSION = 5
 FAILED_TEXT_CHARS = 300  # the app caps failed sentences at this; the runner does too
 
 
@@ -1153,6 +1178,10 @@ def sidecar(
                 "outline_only": r.outline_only,
                 "promoted_cited": r.promoted_cited,
                 "promoted_citations": promoted_citations(r),
+                "windows": r.windows,
+                "window_tokens": r.window_tokens,
+                "window_fingerprint": r.window_fingerprint,
+                "window_only": r.window_only,
             }
             for r in results
         ],
@@ -1528,6 +1557,22 @@ def read_latency(result: QuestionResult, diagnostics: dict[str, Any]) -> None:
     result.outline_fingerprint = outline if isinstance(outline, str) and outline else None
     result.outline_only = _counts(diagnostics.get("outline_only"))
     result.promoted_cited = _counts(diagnostics.get("promoted_cited"))
+    windows = diagnostics.get("windows")
+    if isinstance(windows, list):
+        result.windows = [
+            {
+                "source_id": w.get("source_id"),
+                "numbered": [i for i in w.get("numbered") or [] if isinstance(i, str)],
+                "chunk_ids": [i for i in w.get("chunk_ids") or [] if isinstance(i, str)],
+                "tokens": _int_value(w.get("tokens")),
+            }
+            for w in windows
+            if isinstance(w, dict)
+        ]
+    result.window_tokens = _int_value(diagnostics.get("window_tokens"))
+    window = diagnostics.get("window_fingerprint")
+    result.window_fingerprint = window if isinstance(window, str) and window else None
+    result.window_only = _counts(diagnostics.get("window_only"))
 
 
 def _capped(value: str) -> str:
@@ -2658,6 +2703,14 @@ def outline_same(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
     return bool(a.get("outline_fingerprint") == b.get("outline_fingerprint"))
 
 
+def windows_same(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
+    """Same transcript windows (D-090)? None when either sidecar predates
+    ``window_fingerprint`` (version 5)."""
+    if "window_fingerprint" not in a or "window_fingerprint" not in b:
+        return None
+    return bool(a.get("window_fingerprint") == b.get("window_fingerprint"))
+
+
 def _run_label(data: dict[str, Any]) -> str:
     chat = data.get("chat") if isinstance(data.get("chat"), dict) else None
     model = f"`{chat.get('model')}` at `{chat.get('endpoint_host')}`" if chat else "chat unknown"
@@ -2697,7 +2750,14 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
         for qid in common
         if retrieval_same(qa[qid], qb[qid]) is True and outline_same(qa[qid], qb[qid]) is False
     ]
-    causes = {"model": 0, "outline": 0, "retrieval": 0, "unknown": 0}
+    window_moved = [
+        qid
+        for qid in common
+        if retrieval_same(qa[qid], qb[qid]) is True
+        and outline_same(qa[qid], qb[qid]) is not False
+        and windows_same(qa[qid], qb[qid]) is False
+    ]
+    causes = {"model": 0, "outline": 0, "window": 0, "retrieval": 0, "unknown": 0}
     if changed:
         out.append("| ID | A | B | Retrieval | Likely cause |")
         out.append("|---|---|---|---|---|")
@@ -2708,6 +2768,8 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
             )
             if same is True and outline_same(qa[qid], qb[qid]) is False:
                 where, cause = "same chunks, different outline", "outline"
+            elif same is True and windows_same(qa[qid], qb[qid]) is False:
+                where, cause = "same chunks, different transcript window", "window"
             elif same is True:
                 where = "same" if fingerprinted else "same top score"
                 cause = "model"
@@ -2719,6 +2781,7 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
             label = {
                 "model": "model / sampling",
                 "outline": "outline only",
+                "window": "transcript window only",
                 "retrieval": "pipeline / index",
                 "unknown": "unknown",
             }[cause]
@@ -2732,7 +2795,14 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
     out.append(
         f"{len(changed)} of {len(common)} questions differ: {causes['model']} with the same "
         f"retrieval (model / sampling), {causes['outline']} with the same chunks and a "
-        f"different outline (outline only), {causes['retrieval']} with different retrieval "
+        f"different outline (outline only), "
+        + (
+            f"{causes['window']} with the same chunks and a different transcript window "
+            "(transcript window only), "
+            if causes["window"]
+            else ""
+        )
+        + f"{causes['retrieval']} with different retrieval "
         f"(pipeline / index), {causes['unknown']} unknown (no fingerprint or scores). "
         f"Retrieval differs on {len(retrieval_moved)} question(s) in all"
         + (": " + ", ".join(f"`{q}`" for q in retrieval_moved) if retrieval_moved else "")
@@ -2742,6 +2812,12 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
         out.append(
             f"Only the outline differs on {len(outline_moved)} question(s): "
             + ", ".join(f"`{q}`" for q in outline_moved)
+            + "."
+        )
+    if window_moved:
+        out.append(
+            f"Only the transcript windows differ on {len(window_moved)} question(s): "
+            + ", ".join(f"`{q}`" for q in window_moved)
             + "."
         )
     only_a = [qid for qid in qa if qid not in qb]

@@ -158,10 +158,14 @@ def diag(**extra: Any) -> dict[str, Any]:
         "outline_fingerprint": "of-1",
         "outline_only": [0],
         "promoted_cited": [1, 0],
+        "windows": [{"source_id": "src2", "numbered": ["t3"], "chunk_ids": ["t2"], "tokens": 40}],
+        "window_tokens": 40,
+        "window_fingerprint": "wf-1",
+        "window_only": [0],
     } | extra
 
 
-def test_the_sidecar_v4_keeps_numbers_and_ids(tmp_path: Path) -> None:
+def test_the_sidecar_v5_keeps_numbers_and_ids(tmp_path: Path) -> None:
     api = good_api()
     message = {
         "id": "m",
@@ -190,7 +194,7 @@ def test_the_sidecar_v4_keeps_numbers_and_ids(tmp_path: Path) -> None:
     code, text, _, sidecar = run(api, tmp_path)
     assert code == 0, text
     data = json.loads(sidecar.read_text())
-    assert data["version"] == 4
+    assert data["version"] == 5
     assert data["retrieval_settings"] is None  # the fake API does not report them
     row = {r["id"]: r for r in data["questions"]}["code-1"]
     assert row["judge_calls"] == 2 and row["judge_calls_per_pass"] == [2]
@@ -199,10 +203,19 @@ def test_the_sidecar_v4_keeps_numbers_and_ids(tmp_path: Path) -> None:
     assert row["expansions"] == [{"chunk_id": "src1-c1", "kind": "class_head", "referrer": "x"}]
     assert row["outline_fingerprint"] == "of-1" and row["outline_tokens"] == 85
     assert row["promoted_citations"] == {"n": 1, "correct": 1}
+    # Transcript windows (D-090): ids and numbers only.
+    assert row["windows"] == [
+        {"source_id": "src2", "numbered": ["t3"], "chunk_ids": ["t2"], "tokens": 40}
+    ]
+    assert row["window_tokens"] == 40 and row["window_fingerprint"] == "wf-1"
+    assert row["window_only"] == [0]
     latency = data["latency"]
     assert latency["generated"] == 1 and latency["judge_calls"]["max"] == 2
     assert latency["judge_calls"]["distribution"] == {"0": 0, "1": 0, "2": 1, "3+": 0}
     assert latency["allowed_over_60_s"] == runner.allowed_over(latency["timed"])
+    assert latency["window_tokens"]["p50"] == 40
+    assert latency["window_only"] == {"answers": [], "sentences": 0, "regenerated": 0}
+    assert "| Transcript window tokens: p50 / p95 | 40 / 40 |" in text
     assert "| Citations to promoted chunks | 1 (1 inside an expected locator) |" in text
     # No question text and no answer text besides failed sentences.
     assert "Max redirects?" not in sidecar.read_text()
@@ -283,3 +296,77 @@ def test_compare_reports_outline_only_changes_separately(tmp_path: Path) -> None
         "| outline | answered 1/1 | refused (unsupported) | same | model / sampling |"
         in out.getvalue()
     )
+
+
+def test_the_report_shows_window_tokens_and_window_only_failures() -> None:
+    results = [
+        res("a", 10.0, window_tokens=0, window_only=[0]),
+        res("b", 20.0, window_tokens=900, window_only=[1, 2], regenerated=True, answer_calls=2),
+        res("c", 30.0, window_tokens=1500, window_only=[0]),
+    ]
+    text = runner.render_report(info(), results, {})
+    assert "| Transcript window tokens: p50 / p95 | 900 / 1440 |" in text
+    assert "| Window-only failures | 3 sentence(s) in 1 answer(s), 1 of them regenerated |" in text
+    assert text.index("| Outline tokens") < text.index("| Transcript window tokens")
+    assert text.index("| Outline-only failures") < text.index("| Window-only failures")
+    data = runner.latency_json(results)
+    assert data["window_only"] == {"answers": ["b"], "sentences": 3, "regenerated": 1}
+    assert data["window_tokens"]["max"] == 1500
+
+
+def test_compare_reports_window_only_changes_separately(tmp_path: Path) -> None:
+    def row(qid: str, outcome: str, ofp: str | None, wfp: str | None) -> dict[str, Any]:
+        extra: dict[str, Any] = {"citations": 1, "citations_correct": 1}
+        if outcome == "refused":
+            extra = {"refusal_reason": "unsupported"}
+        return {
+            "id": qid,
+            "type": "answerable",
+            "outcome": outcome,
+            "retrieval_fingerprint": f"f-{qid}",
+            "outline_fingerprint": ofp,
+            "window_fingerprint": wfp,
+        } | extra
+
+    a = {
+        "version": 5,
+        "questions": [row("talk", "answered", None, "w1"), row("code", "answered", "o1", "w1")],
+    }
+    b = {
+        "version": 5,
+        "questions": [row("talk", "refused", None, "w2"), row("code", "refused", "o2", "w2")],
+    }
+    pa, pb = tmp_path / "a.json", tmp_path / "b.json"
+    pa.write_text(json.dumps(a))
+    pb.write_text(json.dumps(b))
+    out = io.StringIO()
+    assert runner.main(["--compare", str(pa), str(pb)], out=out, log=io.StringIO()) == 0
+    text = out.getvalue()
+    assert (
+        "| talk | answered 1/1 | refused (unsupported) | same chunks, different transcript window "
+        "| transcript window only |" in text
+    )
+    # The outline is checked first: a changed outline is reported as the outline.
+    assert (
+        "| code | answered 1/1 | refused (unsupported) | same chunks, different outline "
+        "| outline only |" in text
+    )
+    assert (
+        "1 with the same chunks and a different outline (outline only), 1 with the same chunks "
+        "and a different transcript window (transcript window only), 0 with different retrieval"
+        in text
+    )
+    assert "Only the transcript windows differ on 1 question(s): `talk`." in text
+    # Version 4 sidecars have no window fingerprint: the old classification holds.
+    for data in (a, b):
+        for r in data["questions"]:
+            r.pop("window_fingerprint")
+    pa.write_text(json.dumps(a))
+    pb.write_text(json.dumps(b))
+    out = io.StringIO()
+    runner.main(["--compare", str(pa), str(pb)], out=out, log=io.StringIO())
+    assert (
+        "| talk | answered 1/1 | refused (unsupported) | same | model / sampling |"
+        in out.getvalue()
+    )
+    assert "transcript window" not in out.getvalue()

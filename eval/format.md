@@ -118,7 +118,9 @@ listed separately, and answers from an API without these diagnostics are counted
 | Latency p50 / p95 | As in the main table. |
 | Prompt tokens of the first answer call: p50 / p95 | Estimated by the app (characters / 4). |
 | Promoted tokens, Outline tokens: p50 / p95 | The parent context (D-077): citable chunks promoted for the top children, and the non-citable code outline. |
+| Transcript window tokens: p50 / p95 | The non-citable transcript windows (D-090): what was said around the top transcript chunks (`diagnostics.window_tokens`). 0 for answers without a transcript chunk in the top 3. |
 | Outline-only failures | Failed sentences whose missing name or literal only the outline shows (`diagnostics.outline_only`, per pass), the answers they are in, and how many of those answers were regenerated. |
+| Window-only failures | Failed sentences that miss a name, or use a content word, that a transcript window shows and no numbered chunk has (`diagnostics.window_only`, per pass), the answers they are in, and how many of those answers were regenerated. |
 | Citations to promoted chunks | Citations (deduplicated per answer) of chunks listed in `diagnostics.expansions`, and how many of them are correct. |
 
 `--min-precision`, `--min-refusal`, `--min-must-contain` and `--min-ranges-valid` (fractions, `0.9` or
@@ -227,7 +229,10 @@ equal top rerank score, shown as "same top score") or **different**. Same retrie
 its sampling made the difference; different retrieval points at the pipeline or the index. When both
 sidecars have an `outline_fingerprint` (version 4) and the chunks are the same but the code outline
 differs, the difference is shown as "same chunks, different outline" with cause **outline only**, and
-those questions are listed on their own line. It also lists every question whose retrieval differs,
+those questions are listed on their own line. Likewise, when both sidecars have a `window_fingerprint`
+(version 5), the chunks and the outline are the same and the transcript windows differ, the difference
+is shown as "same chunks, different transcript window" with cause **transcript window only**, and those
+questions are listed on their own line. It also lists every question whose retrieval differs,
 and the ids found in only one run. Exits 0, or 2 for a file that is not a sidecar. Version 1 sidecars
 work, with less to compare.
 
@@ -238,10 +243,10 @@ another name gets `.json` appended). It holds ids and numbers, never question te
 written anywhere else, so a private set stays wherever you keep it. The only answer text is
 `failed_sentences` (version 3, D-076): the sentences of a refused or partially verified answer that
 failed verification, and why, each capped at 300 characters. Version 4 (D-080) adds the latency,
-judge-call and parent context numbers.
+judge-call and parent context numbers; version 5 (D-090) the transcript window numbers.
 
 ```json
-{"version": 4, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
+{"version": 5, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
  "thresholds": {"refuse": 0.15, "verify": 0.5},          // GET /api/settings; null if unavailable
  "retrieval_settings": {"parent_context": true, "outline": true},  // GET /api/settings; null if unavailable
  "generation_requested": {"temperature": 0, "seed": 42}, // null with --app-default
@@ -266,7 +271,10 @@ judge-call and parent context numbers.
                 "expansions": [{"chunk_id": "…", "kind": "class_head", "referrer": "…"}],
                 "promoted_tokens": 60, "outline_tokens": 85, "outline_fingerprint": "…",
                 "outline_only": [0], "promoted_cited": [1, 0],
-                "promoted_citations": {"n": 1, "correct": 1}}],
+                "promoted_citations": {"n": 1, "correct": 1},
+                "windows": [{"source_id": "…", "numbered": ["…"], "chunk_ids": ["…", "…"],
+                             "tokens": 1210}],
+                "window_tokens": 1210, "window_fingerprint": "…", "window_only": [0]}],
  "latency": {"generated": 44, "before_generation": ["un-03"], "unknown": [],
              "judge_calls": {"mean": 1.4, "p50": 1, "p95": 3, "max": 5,
                              "distribution": {"0": 9, "1": 20, "2": 10, "3+": 5}},
@@ -275,7 +283,9 @@ judge-call and parent context numbers.
              "regenerated": 3, "over_60_s": ["ref-near-05"], "timed": 45, "allowed_over_60_s": 2,
              "first_prompt_tokens": {…}, "promoted_tokens": {…}, "outline_tokens": {…},
              "outline_only": {"answers": [], "sentences": 0, "regenerated": 0},
-             "promoted_citations": {"n": 2, "correct": 2}},
+             "promoted_citations": {"n": 2, "correct": 2},
+             "window_tokens": {…},
+             "window_only": {"answers": [], "sentences": 0, "regenerated": 0}},
  "false_refusals": {"docs": {"num": 0, "den": 5, "value": 0.0}, "code": {…}, "multi": {…}, "other": {…}},
  "false_refusals_code": {"num": 1, "den": 17, "value": 0.06},
  "cited_ranges": {"num": 48, "den": 48, "value": 1.0},     // only with --code-root
@@ -307,6 +317,10 @@ retrieval, each answer call, each verification pass, citation choice, the gate, 
 for), `promoted_tokens`, `outline_tokens`, `outline_fingerprint` (a hash of the outline;
 `retrieval_fingerprint` still covers only the numbered chunks), `outline_only` (per pass) and
 `promoted_cited` ([kept sentences citing a promoted chunk, those also citing another chunk]).
+Version 5 adds, per question, the transcript windows (D-090): `windows` (per window block, the
+numbered chunks it names by their times only, the neighbours whose text it shows, in time order, and
+its prompt tokens), `window_tokens`, `window_fingerprint` (a hash of the windows' text; `null`
+without one) and `window_only` (per pass); versions 1 to 4 lack them.
 `promoted_citations` is computed by the runner. `latency` holds the run's numbers of the "Latency and
 judge calls" table.
 
