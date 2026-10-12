@@ -1,7 +1,10 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, beforeEach } from "vitest";
 import { server } from "./server";
+
+// findBy*/waitFor wait up to 1 s by default; a first full app render on a busy CI runner can take longer.
+configure({ asyncUtilTimeout: 4000 });
 
 // No network in tests: any request without a handler fails the test.
 beforeAll(() => server.listen({ onUnhandledFrame: "error" }));
