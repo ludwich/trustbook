@@ -1569,3 +1569,25 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   - Probe on ref-near-10 (3 answers, temperature 0): the follow-up added the docstring lines (c1 2-4) and the
     sentence was verified. It costs one judge call only where the judge's evidence was incomplete.
   - Gate 3 was re-run on this code (attempt 7).
+
+### D-086 The citation choice keeps every name layer 5 checks
+- **Finding (Gate 3, attempt 7, Qwen3.8-27B reference run, code-02):** "Response.__bool__ and Response.__nonzero__
+  both simply return self.ok, so a Response object is truthy whenever the status code is less than 400." It cited
+  `Response.__bool__` and `Response.__nonzero__` and passed layer 5 on both (D-084).
+  - After verification, the citation choice kept only `__nonzero__`, the chunk that passed the checker alone
+    (D-052 step 1). The answer then showed one citation, and `__bool__` is not in it.
+  - The choice's guard ("a choice that would leave a backticked name or a literal outside the kept chunks is not
+    made", D-052 extended) had its own copy of layer 5's checks. D-084 extended layer 5 to unbackticked code names,
+    but not that copy.
+  - The sentence was true and verified on what it cited; the citation shown was incomplete.
+- **Decision:** one function, `grounding.verify.name_problems`, holds layer 5's name and literal checks:
+  - backticked names, always;
+  - unbackticked code names and literals, for a sentence citing a file chunk.
+
+  Layer 5 calls it, and so does the citation choice's guard (`citation_choice._grounded`), so the two cannot
+  drift apart again. A pruning or near-copy choice that would leave such a name outside the kept chunks is not
+  made, and every citation stays.
+- **Consequences:**
+  - Shown citations only ever grow compared with before; whether a sentence passes does not change.
+  - The regression test reproduces code-02: it fails on the old guard and passes on the new one.
+  - Gate 3 was re-run on this code (attempt 8).

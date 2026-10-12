@@ -17,7 +17,8 @@ name (D-064). For a sentence the checker passed:
 
 Citations are only ever removed when another kept citation supports the sentence alone, and only
 swapped in (upgrade) when the new chunk passes verification alone. A choice that
-would leave a backticked name or a literal outside the kept chunks is not made.
+would leave a name or a literal that layer 5 checks outside the kept chunks is not made
+(:func:`~app.grounding.verify.name_problems`, D-086).
 """
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from app.chat.output import DraftSentence
-from app.grounding.code_checks import missing_identifiers, missing_literals, support_window
+from app.grounding.code_checks import support_window
+from app.grounding.verify import name_problems
 from app.retrieval.service import RetrievedChunk
 
 COPY_CONTAINMENT = 0.9  # share of a window's word 3-grams found in another window: a near-copy
@@ -36,11 +38,6 @@ SHINGLE_WORDS = 3
 MIN_BARE_NAME = 4  # a symbol's last part counts as named, unquoted, from this length on
 
 _SHINGLE_WORD = re.compile(r"[A-Za-z0-9_]+")
-
-
-def _file(chunk: RetrievedChunk) -> str | None:
-    file = chunk.locator.get("file")
-    return file if isinstance(file, str) and file else None
 
 
 # --- near-copies -----------------------------------------------------------------------------
@@ -93,11 +90,10 @@ def _copy_of(window: str, others: Sequence[str]) -> bool:
 
 
 def _grounded(text: str, chunks: Sequence[RetrievedChunk]) -> bool:
-    """Layer 5's name and literal checks still pass on ``chunks`` (a choice must keep them)."""
-    texts = [c.text for c in chunks]
-    if missing_identifiers(text, texts):
-        return False
-    return not (any(_file(c) for c in chunks) and missing_literals(text, texts))
+    """Layer 5's name and literal checks still pass on ``chunks`` (a choice must keep them): the
+    same function as layer 5, so the two cannot drift apart (D-086)."""
+    problems, _ = name_problems(text, chunks)
+    return not problems
 
 
 @dataclass(frozen=True)

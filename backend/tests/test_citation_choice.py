@@ -127,6 +127,27 @@ def test_a_choice_never_drops_the_chunk_holding_a_backticked_name() -> None:
     assert "c2" in choice.sentence.chunk_ids
 
 
+def test_a_choice_never_drops_the_chunk_holding_an_unbackticked_code_name() -> None:
+    # Gate 3 attempt 7, Qwen3.8 reference run, code-02: "Response.__bool__ and
+    # Response.__nonzero__ both simply return self.ok" passed layer 5 on its cited chunks, then
+    # D-052 kept only the chunk that passed the checker alone (__nonzero__), so the shown
+    # citation lacked Response.__bool__. The choice now uses layer 5's own name test, which
+    # includes names without backticks (D-084), so it keeps both (D-086).
+    chunks = labelled(
+        [
+            code("n", NONZERO, "Response.__nonzero__", 845, 853, 0.7),
+            code("b", BOOL, "Response.__bool__", 835, 843, 0.6),
+        ]
+    )
+    text = "Response.__bool__ and Response.__nonzero__ both simply return self.ok."
+    choice = choose(QUESTION, DraftSentence(text, ("c1", "c2")), (0.97, 0.3), chunks, 0.5)
+    assert choice.sentence.chunk_ids == ("c1", "c2") and choice.dropped == ()
+    # A sentence naming only the chunk that passes alone is still pruned to it.
+    one = "Response.__nonzero__ simply returns self.ok."
+    choice = choose(QUESTION, DraftSentence(one, ("c1", "c2")), (0.97, 0.3), chunks, 0.5)
+    assert choice.sentence.chunk_ids == ("c1",)
+
+
 def test_containment_and_symbol_names() -> None:
     assert containment("a b c d e", "x a b c d e y") == 1.0
     assert containment("a b c d e", "a b x d e") == 0.0

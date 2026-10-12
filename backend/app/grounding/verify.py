@@ -399,20 +399,30 @@ class Verifier:
         self, text: str, cited: Sequence[RetrievedChunk]
     ) -> tuple[list[str], list[str]]:
         """Layer 5 problems, and the names and literals among them that no cited chunk has."""
-        missing = missing_identifiers(text, (c.text for c in cited))
-        problems = [f"`{name}` is not in the cited chunks" for name in missing]
-        if any("file" in chunk.locator for chunk in cited):
-            plain = missing_plain_identifiers(text, [c.text for c in cited])
-            missing.extend(plain)
-            problems.extend(f"{name} is not in the cited chunks" for name in plain)
-            literals = missing_literals(text, (c.text for c in cited))
-            missing.extend(literals)
-            problems.extend(f"{literal} is not in the cited code" for literal in literals)
+        problems, missing = name_problems(text, cited)
         for chunk in cited:
             problem = locator_problem(self._files, chunk.source_id, chunk.locator)
             if problem is not None:
                 problems.append(problem)
         return list(dict.fromkeys(problems)), list(dict.fromkeys(missing))
+
+
+def name_problems(text: str, cited: Sequence[RetrievedChunk]) -> tuple[list[str], list[str]]:
+    """Layer 5's name and literal checks of ``text`` on ``cited``: the problems, and the names
+    and literals that no cited chunk has. Backticked names always (D-042); for a sentence citing a
+    file chunk also unbackticked code names (D-084) and literals (D-044). The citation choice
+    after verification keeps these passing on the chunks it keeps (D-052, D-086)."""
+    texts = [c.text for c in cited]
+    missing = missing_identifiers(text, texts)
+    problems = [f"`{name}` is not in the cited chunks" for name in missing]
+    if any("file" in chunk.locator for chunk in cited):
+        plain = missing_plain_identifiers(text, texts)
+        missing.extend(plain)
+        problems.extend(f"{name} is not in the cited chunks" for name in plain)
+        literals = missing_literals(text, texts)
+        missing.extend(literals)
+        problems.extend(f"{literal} is not in the cited code" for literal in literals)
+    return problems, missing
 
 
 def checker_scores(providers: ProviderRegistry) -> ScorePairs:
