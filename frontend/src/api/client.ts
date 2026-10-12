@@ -38,6 +38,11 @@ import type {
   GateLogEntry,
   SourceEstimate,
   SourceEstimateItem,
+  IdeationAnswer,
+  IdeationEstimate,
+  IdeationSession,
+  IdeationSessionSummary,
+  IdeationStreamEvent,
 } from "./types";
 import { readSse, type SseEvent } from "@/lib/sse";
 
@@ -196,6 +201,79 @@ export async function* streamMessage(
     const typed = toChatEvent(ev);
     if (typed) yield typed;
   }
+}
+
+/** Maps one SSE event of an ideation turn stream to a typed event. Unknown or malformed → null. */
+export function toIdeationEvent(ev: SseEvent): IdeationStreamEvent | null {
+  const d = parseEventData(ev.data);
+  if (!d) return null;
+  switch (ev.event) {
+    case "status":
+      return typeof d.stage === "string" ? { type: "status", stage: d.stage as ChatStage } : null;
+    case "done":
+      return d.session && typeof d.session === "object"
+        ? { type: "done", session: d.session as IdeationSession }
+        : null;
+    case "error":
+      return { type: "error", message: String(d.message ?? "") };
+    default:
+      return null;
+  }
+}
+
+export interface IdeationStreamOptions {
+  signal?: AbortSignal;
+  /** Called once the server accepted the request (an answer is stored by then). */
+  onOpen?: () => void;
+}
+
+async function* ideationStream(
+  path: string,
+  body: unknown,
+  { signal, onOpen }: IdeationStreamOptions,
+): AsyncGenerator<IdeationStreamEvent> {
+  const init: RequestInit = {
+    method: "POST",
+    headers: { Accept: "text/event-stream" },
+    signal,
+  };
+  if (body !== undefined) {
+    init.headers = { ...init.headers, "Content-Type": "application/json" };
+    init.body = JSON.stringify(body);
+  }
+  const res = await send(path, init);
+  if (!res.body) throw new ApiError(0, "The next question could not be read.");
+  onOpen?.();
+  for await (const ev of readSse(res.body, signal)) {
+    const typed = toIdeationEvent(ev);
+    if (typed) yield typed;
+  }
+}
+
+function ideationPath(sid: string, rest = ""): string {
+  return `/api/spaces/${enc(sid)}/ideation${rest}`;
+}
+
+/**
+ * Seeds the map if needed and asks the next question ("Ask again" and resume too).
+ * Throws ApiError (e.g. 409) if the request is refused before streaming starts.
+ */
+export function streamIdeationTurn(
+  spaceId: string,
+  sessionId: string,
+  opts: IdeationStreamOptions = {},
+): AsyncGenerator<IdeationStreamEvent> {
+  return ideationStream(ideationPath(spaceId, `/sessions/${enc(sessionId)}/turn`), undefined, opts);
+}
+
+/** Stores an answer (answer, accept or skip), then streams the next turn. */
+export function streamIdeationAnswer(
+  spaceId: string,
+  sessionId: string,
+  answer: IdeationAnswer,
+  opts: IdeationStreamOptions = {},
+): AsyncGenerator<IdeationStreamEvent> {
+  return ideationStream(ideationPath(spaceId, `/sessions/${enc(sessionId)}/answer`), answer, opts);
 }
 
 const GATE_DECISIONS: readonly GateDecision[] = ["sources", "brainstorm", "chitchat"];
@@ -368,6 +446,31 @@ export const api = {
     request<Job>("POST", `/api/spaces/${enc(sid)}/overview/refresh`),
   setOverviewEnabled: (sid: string, enabled: boolean) =>
     request<Overview>("PUT", `/api/spaces/${enc(sid)}/overview`, { enabled }),
+
+  // Ideation
+  getIdeationEstimate: (sid: string) =>
+    request<IdeationEstimate>("GET", ideationPath(sid, "/estimate")),
+  listIdeationSessions: (sid: string) =>
+    request<IdeationSessionSummary[]>("GET", ideationPath(sid, "/sessions")),
+  createIdeationSession: (sid: string, idea: string) =>
+    request<IdeationSession>("POST", ideationPath(sid, "/sessions"), { idea }),
+  getIdeationSession: (sid: string, id: string) =>
+    request<IdeationSession>("GET", ideationPath(sid, `/sessions/${enc(id)}`)),
+  deleteIdeationSession: (sid: string, id: string) =>
+    request<void>("DELETE", ideationPath(sid, `/sessions/${enc(id)}`)),
+  dismissIdeationNode: (sid: string, id: string, nodeId: string) =>
+    request<IdeationSession>(
+      "POST",
+      ideationPath(sid, `/sessions/${enc(id)}/nodes/${enc(nodeId)}/dismiss`),
+    ),
+  finishIdeationSession: (sid: string, id: string) =>
+    request<IdeationSession>("POST", ideationPath(sid, `/sessions/${enc(id)}/finish`)),
+  continueIdeationSession: (sid: string, id: string) =>
+    request<IdeationSession>("POST", ideationPath(sid, `/sessions/${enc(id)}/continue`)),
+  /** URL of the brief (Markdown, served as an attachment): the Export link's href. */
+  ideationBriefUrl: (sid: string, id: string) => ideationPath(sid, `/sessions/${enc(id)}/brief`),
+  streamIdeationTurn,
+  streamIdeationAnswer,
 };
 
 export type Api = typeof api;

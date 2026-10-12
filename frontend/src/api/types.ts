@@ -578,3 +578,101 @@ export interface GateLogEntry {
   confidence: number | null;
   correction: GateDecision | null;
 }
+
+// ---- Phase 4: ideation ---------------------------------------------------------
+
+export type IdeationSessionStatus = "active" | "finished";
+export type IdeationNodeStatus = "tentative" | "open" | "resolved" | "dismissed";
+export type IdeationAnswerSource = "user" | "accepted" | "skipped";
+export type IdeationAction = "answer" | "accept" | "skip";
+/** cited: every shown sentence cites verified chunks; partly_cited: some do; suggestion: none. */
+export type RecommendationGrounding = "cited" | "partly_cited" | "suggestion";
+/** As chat's badge; null when the recommendation shows no cited sentence. */
+export type RecommendationBadge = "verified" | "partially_verified" | "unverified";
+
+export interface RecommendationSentence {
+  text: string;
+  /** Empty for suggestions. Numbers are per recommendation. */
+  citations: Citation[];
+  /** "suggestion": the model's own idea, labelled "Suggestion", never shown as grounded. */
+  kind: "cited" | "suggestion";
+}
+
+export interface Recommendation {
+  grounding: RecommendationGrounding;
+  badge: RecommendationBadge | null;
+  sentences: RecommendationSentence[];
+  /** Cited sentences that failed verification: the "Unverified, not from your sources" drawer. */
+  removed: string[];
+}
+
+/** A branch of the map. Sessions list them in tree pre-order; depth 0 is a seed's level. */
+export interface IdeationNode {
+  id: string;
+  parent_id: string | null;
+  ordinal: number;
+  depth: number;
+  title: string;
+  status: IdeationNodeStatus;
+  origin: "seed" | "answer";
+  question: string | null;
+  recommendation: Recommendation | null;
+  final_answer: string | null;
+  answer_source: IdeationAnswerSource | null;
+  asked_at: string | null;
+  answered_at: string | null;
+  /** Tentative with nothing asked under it: the map shows × for it. */
+  dismissible: boolean;
+}
+
+export interface IdeationProgress {
+  resolved: number;
+  /** Tentative and open branches. */
+  open: number;
+}
+
+export interface IdeationSessionSummary {
+  id: string;
+  title: string;
+  idea: string;
+  status: IdeationSessionStatus;
+  progress: IdeationProgress;
+  /** Has branches and none is open. */
+  complete: boolean;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  brief_at: string | null;
+}
+
+export interface IdeationRisk {
+  text: string;
+  node_id: string | null;
+}
+
+export interface IdeationSession extends IdeationSessionSummary {
+  nodes: IdeationNode[];
+  /** The branch whose question waits for an answer. */
+  current_node_id: string | null;
+  risks: IdeationRisk[];
+}
+
+export interface IdeationAnswer {
+  node_id: string;
+  action: IdeationAction;
+  /** Only (and required) for "answer". */
+  text?: string;
+}
+
+/** GET …/ideation/estimate. Shown before a session when the chat endpoint is remote. */
+export interface IdeationEstimate {
+  tokens_per_turn: number;
+  seed_tokens: number;
+  remote: boolean;
+}
+
+/** Events of a turn stream (POST …/turn and …/answer). No per-sentence streaming. */
+export type IdeationStreamEvent =
+  | { type: "status"; stage: ChatStage }
+  | { type: "done"; session: IdeationSession }
+  | { type: "error"; message: string };
