@@ -31,22 +31,21 @@ the app's own settings). ``--chat-endpoint`` / ``--chat-model`` switch the chat 
 run and restore it afterwards, also on an error or Ctrl-C. ``--compare A.json B.json`` lists the
 per-question differences between two sidecars and exits.
 
-Only ``httpx`` and ``PyYAML`` are used. The runner talks to the API contract in
+Only ``httpx``, ``PyYAML`` and the CLI's API client (``cli/``, package ``trustbook-cli``, installed
+with the backend and in the image; D-086) are used. The runner talks to the API contract in
 ``docs/ARCHITECTURE.md`` ("Phase 1: sources, index, retrieval and chat").
 """
 
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import math
 import re
 import signal
 import sys
 import time
-import unicodedata
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,6 +55,17 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import yaml
+from trustbook_cli.client import (
+    ApiUnreachableError,
+    TrustbookError,
+    find_space,
+    iter_sse,
+    norm_text,
+    request_json,
+)
+from trustbook_cli.client import (
+    SseEvent as SseEvent,  # re-exported (tests)
+)
 
 QUESTION_TYPES = ("answerable", "unanswerable")
 CATEGORIES = ("docs", "code", "multi", "unanswerable")
@@ -82,12 +92,9 @@ EXIT_UNAVAILABLE = 2
 EXIT_INTERRUPTED = 130
 
 
-class EvalError(Exception):
-    """Invalid input or an unusable API answer (exit code 2)."""
-
-
-class ApiUnreachableError(EvalError):
-    """The Trustbook API cannot be reached."""
+# Invalid input or an unusable API answer (exit code 2). The shared client's errors are kinds of
+# it: ApiError (an HTTP error status) and ApiUnreachableError (no connection, D-086).
+EvalError = TrustbookError
 
 
 class GenerationUnsupportedError(EvalError):
@@ -296,45 +303,6 @@ def load_questions(paths: Sequence[str]) -> list[Question]:
 
 
 # ---------------------------------------------------------------------------------------------
-# SSE
-# ---------------------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class SseEvent:
-    event: str
-    data: str
-
-
-def iter_sse(lines: Iterable[str]) -> Iterator[SseEvent]:
-    """Parse a ``text/event-stream`` (WHATWG rules, minus ``id``/``retry`` which are unused).
-
-    Data lines are joined with ``\\n``; comment lines (``:``) are ignored; an event without a
-    blank line before the end of the stream is still delivered.
-    """
-    event = ""
-    data: list[str] = []
-    for raw in lines:
-        line = raw.rstrip("\r\n")
-        if not line:
-            if data:
-                yield SseEvent(event or "message", "\n".join(data))
-            event, data = "", []
-            continue
-        if line.startswith(":"):
-            continue
-        name, sep, value = line.partition(":")
-        if sep and value.startswith(" "):
-            value = value[1:]
-        if name == "event":
-            event = value
-        elif name == "data":
-            data.append(value)
-    if data:
-        yield SseEvent(event or "message", "\n".join(data))
-
-
-# ---------------------------------------------------------------------------------------------
 # Matching (sources and locators)
 # ---------------------------------------------------------------------------------------------
 
@@ -364,16 +332,6 @@ class SourceInfo:
             progress=raw.get("progress") if isinstance(raw.get("progress"), int | float) else None,
             job_id=raw["job_id"] if isinstance(raw.get("job_id"), str) and raw["job_id"] else None,
         )
-
-
-_DASHES = dict.fromkeys(map(ord, "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"), "-")
-
-
-def norm_text(value: str) -> str:
-    """Case-, whitespace-, entity- and dash-insensitive form used for titles and headings."""
-    value = unicodedata.normalize("NFKC", html.unescape(value)).translate(_DASHES)
-    value = value.replace("\u00b6", "").strip().strip("#").strip()
-    return " ".join(value.casefold().split())
 
 
 def is_url(value: str) -> bool:
@@ -1238,22 +1196,6 @@ def score(result: QuestionResult, sources: dict[str, SourceInfo]) -> None:
 # ---------------------------------------------------------------------------------------------
 
 
-def _json(resp: httpx.Response, what: str) -> Any:
-    if resp.status_code >= 400:
-        detail = resp.text[:300]
-        try:
-            body = resp.json()
-            if isinstance(body, dict) and "detail" in body:
-                detail = str(body["detail"])
-        except ValueError:
-            pass
-        raise EvalError(f"{what} failed: HTTP {resp.status_code}: {detail}")
-    try:
-        return resp.json()
-    except ValueError as exc:
-        raise EvalError(f"{what}: response is not JSON") from exc
-
-
 class Api:
     """Thin wrapper over the Trustbook HTTP API (docs/ARCHITECTURE.md)."""
 
@@ -1261,11 +1203,7 @@ class Api:
         self.client = client
 
     def _request(self, method: str, url: str, what: str, **kwargs: Any) -> Any:
-        try:
-            resp = self.client.request(method, url, **kwargs)
-        except httpx.TransportError as exc:
-            raise ApiUnreachableError(f"{what}: {type(exc).__name__}: {exc}") from exc
-        return _json(resp, what)
+        return request_json(self.client, method, url, what, **kwargs)
 
     def thresholds(self) -> Thresholds | None:
         """The grounding thresholds in use, or None if the API does not report them."""
@@ -1381,19 +1319,6 @@ class Api:
         if not isinstance(data, dict) or "id" not in data:
             raise EvalError("create conversation: unexpected response")
         return str(data["id"])
-
-
-def find_space(spaces: Iterable[dict[str, Any]], key: str) -> dict[str, Any] | None:
-    """Match ``--space`` by id, then slug, then name (case-insensitive)."""
-    spaces = list(spaces)
-    for field_name in ("id", "slug"):
-        for s in spaces:
-            if str(s.get(field_name, "")) == key:
-                return s
-    for s in spaces:
-        if norm_text(str(s.get("name", ""))) == norm_text(key):
-            return s
-    return None
 
 
 def ask(

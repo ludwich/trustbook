@@ -2041,6 +2041,7 @@ dependencies = [
     { name = "tree-sitter-javascript" },
     { name = "tree-sitter-python" },
     { name = "tree-sitter-typescript" },
+    { name = "trustbook-cli" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "yt-dlp" },
 ]
@@ -2111,6 +2112,7 @@ requires-dist = [
     { name = "tree-sitter-javascript", specifier = "==0.25.0" },
     { name = "tree-sitter-python", specifier = "==0.25.0" },
     { name = "tree-sitter-typescript", specifier = "==0.23.2" },
+    { name = "trustbook-cli", editable = "../cli" },
     { name = "uvicorn", extras = ["standard"] },
     { name = "yt-dlp", specifier = "==2026.8.19" },
 ]
@@ -2122,6 +2124,24 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
     { name = "types-pyyaml" },
+]
+
+[[package]]
+name = "trustbook-cli"
+version = "0.1.0"
+source = { editable = "../cli" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "ruff" },
 ]
 
 [[package]]
