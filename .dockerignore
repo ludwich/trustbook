@@ -23,6 +23,7 @@ Trustbook/
 **/.coverage
 **/htmlcov
 backend/tests
+cli/tests
 
 # Node / frontend build output
 **/node_modules
