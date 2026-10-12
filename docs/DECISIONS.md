@@ -1591,3 +1591,83 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   - Shown citations only ever grow compared with before; whether a sentence passes does not change.
   - The regression test reproduces code-02: it fails on the old guard and passes on the new one.
   - Gate 3 was re-run on this code (attempt 8).
+
+### D-086 The `trustbook` CLI is its own package and shares one API client with the eval runner
+- **Context:** Phase 3b adds a command line for scripts and agents (Claude Code). It must be in the image
+  (`docker compose exec app trustbook …`), pip-installable on a laptop without the backend's dependencies, and
+  unable to bypass grounding or refusal. The eval runner already had an HTTP client and an SSE parser.
+- **Decision:**
+  - New package `cli/` (`trustbook-cli`, hatchling, Apache-2.0, `src/` layout, version 0.1.0). Its only
+    dependency is `httpx`; console script `trustbook = trustbook_cli.main:main`. Modules: `client` (requests,
+    errors, SSE), `ask`, `wait`, `paths`, `redact`, `output`, `commands`, `eval_cmd`, `main`.
+  - It uses only the public HTTP API (the same routes as the UI), so answers pass the same six layers and the
+    same refusal. It never reads settings from the API.
+  - `SseEvent`, `iter_sse`, `norm_text`, `find_space` and the request core move from `eval/runner.py` to
+    `trustbook_cli.client`; the runner imports them. Errors: `TrustbookError` ⊃ `ApiError` (`http_status`) ⊃
+    `ApiUnreachableError`. The runner's `EvalError` is `TrustbookError`, so its existing `except` clauses and
+    exit codes are unchanged.
+  - The backend depends on it as an editable path dependency (`[tool.uv.sources]`, `../cli`): `uv sync` in CI and
+    `uv run --project backend python eval/runner.py` keep working. The image's dependency layer skips it
+    (`--no-install-package trustbook-cli`, only `cli/pyproject.toml` copied); `cli/` is installed as a wheel after
+    the app code (`uv pip install --no-deps`), so a CLI change does not rebuild the torch layer.
+  - CI: a `cli` job (ruff, mypy --strict, pytest, `trustbook --version`) on ubuntu-24.04 and windows-latest, with
+    its own `cli/uv.lock`. `backend/tests/test_cli.py` runs every command against the app (TestClient, mock chat).
+  - `trustbook eval …` runs `eval/runner.py` (image, checkout, or `TRUSTBOOK_EVAL_RUNNER`) with the CLI's base URL;
+    the runner's output passes the CLI's redactor and its exit code is returned unchanged.
+- **Consequences:**
+  - The runner now needs `trustbook-cli` installed; it is in the backend environment and the image.
+  - No new bundled third-party code (`httpx` was already a dependency; hatchling is build-only).
+  - Backlog: an MCP server can wrap the same client.
+
+### D-087 The CLI's JSON contract and exit codes
+- **Decision:**
+  - With `--json`, stdout holds exactly one JSON document, on one line and ASCII-only (`\uXXXX` escapes), errors
+    included; progress and notes go to stderr. One line: Windows PowerShell 5.1's `ConvertFrom-Json` reads it
+    without `Out-String`; ASCII: any console code page decodes it.
+  - Every document names its `schema` with a version: `trustbook.ask/1`, `spaces/1`, `space/1`, `sources/1`,
+    `source/1`, `search/1`, `jobs/1`, `gate_log/1`, `deleted/1`, `error/1` (`{message, http_status}`). A version
+    changes only when a field is removed or changes meaning; fields may be added. Fields: `docs/cli.md`.
+  - `trustbook.ask/1`: `{space{id,name}, question, conversation_id, message_id, verdict, answer,
+    sentences[{text, citations[n]}], citations[{n, source, source_id, origin, chunk_id, file, lines, pages,
+    start_s, end_s, speaker, heading, symbol, text}], removed_statements[{text, reason}], refusal, latency_s}`.
+    - `verdict` is the message's badge (`verified`, `partially_verified`, `unverified`) or `refused`.
+    - `answer` joins the sentences, each followed by its numbers (`… [1][2]`). Numbers are the API's (per answer,
+      by first use), so they match the conversation in the UI.
+    - `text` is what the source viewer highlights, read from `GET /spaces/{id}/chunks/{chunk}/context`: the cited
+      lines for code, the highlighted passage otherwise. `CitationOut` stays without text.
+    - `removed_statements` are the message's `removed_sentences` with the reason from
+      `diagnostics.failed_sentences`; empty for a refusal.
+    - The gate's fixed small-talk reply counts as a refusal with reason `chitchat` (nothing was answered from the
+      sources).
+  - Exit codes: 0 ok; 1 error (also usage errors: argparse's own 2 would read as "refused"); 2 `ask` refused;
+    3 a source failed (`sources add … --wait`, `status`, `list`); 130 interrupted.
+  - Destructive commands (`spaces delete`, `sources remove`) need `--yes`. `sources add search` without `--pick`
+    only lists results (SPEC §7.1: the user ticks results); `--pick` takes numbers or URLs.
+  - Safety net for secrets: all output passes a redactor that masks the key values in `settings.json` (when the
+    CLI can read it: `TRUSTBOOK_DATA`, `/data`, `~/Trustbook`) and well-known key shapes. It does not mask code
+    such as `api_key = settings.api_key`, which cited passages may quote.
+
+### D-088 Folder paths on the command line
+- **Context:** the API takes a folder relative to the browse root (`normalise_relative`, POSIX). On a Windows
+  laptop people type `C:\Users\anna\code\app`; in the container the same folder is `/host/code/app`.
+- **Decision:**
+  - A relative path is relative to the browse root (as in the UI's folder picker), not to the current folder.
+    `\` is accepted as a separator.
+  - An absolute path (POSIX, `C:\…`, `C:/…`, UNC) is mapped through `--browse-root` / `TRUSTBOOK_BROWSE_ROOT`
+    (the image sets `/host`). Drive paths compare case-insensitively, POSIX paths exactly.
+  - A path outside the root, with `..`, or the root itself is refused by the CLI before any request; the API's own
+    checks (symlinks, existence) still apply.
+- **Consequences:** `trustbook sources add folder C:\Users\anna\x --browse-root C:/Users/anna` and
+  `docker compose exec app trustbook sources add folder /host/x` both link `x`.
+
+### D-089 The Claude Code skill: a refusal is final
+- **Context:** an agent that gets "not in the sources" is inclined to retry with other words, try another space
+  or answer from its own knowledge, which defeats the point of a grounded notebook.
+- **Decision:** `skills/trustbook/SKILL.md` (frontmatter `name`, `description`) tells the agent to use `--json`
+  and the exit code, and:
+  - exit 2 means "not in the sources": report it (with `refusal.message` and `suggestion`) and stop. Never retry,
+    rephrase, split the question, switch space on its own, or answer from its own knowledge or by reading files;
+  - never present `removed_statements` as facts; say when an answer is partially verified;
+  - cite with the citation fields; add or remove sources only when the user asks.
+- **Consequences:** Gate 3b checks on Ludwig's laptop that the agent gives a cited answer and reports a refusal
+  without retrying.
