@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { notifyManager, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useSyncExternalStore } from "react";
 import { api } from "@/api/client";
 import { queryKeys, storeIdeationSession } from "@/api/queries";
@@ -92,7 +92,10 @@ export function useIdeationStream(spaceId: string, sessionId: string | null) {
         update({ error: errorMessage(e) });
       } finally {
         const cur = turns.get(key);
-        setTurn(key, cur?.error ? { ...cur, running: false, stage: null, pending: null } : null);
+        const next = cur?.error ? { ...cur, running: false, stage: null, pending: null } : null;
+        // Query observers hear about the stored session on a later tick. Clear the turn after
+        // them, so the question just answered never shows again for a moment.
+        notifyManager.schedule(() => setTurn(key, next));
       }
       if (!done) {
         // Whatever happened, show what the server stored (an answer is kept after an error).

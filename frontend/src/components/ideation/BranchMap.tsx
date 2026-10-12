@@ -74,7 +74,9 @@ function MapNode({
           ) : (
             <IconCircleCheck className="size-3.5 shrink-0 text-success" aria-hidden />
           ))}
-        <span className="min-w-0 flex-1 break-words">{node.title}</span>
+        <span className="min-w-0 flex-1 break-words" data-testid="map-node-title">
+          {node.title}
+        </span>
         <span className="sr-only">({stateLabel(node, current)})</span>
         {node.dismissible && canDismiss && (
           <button
