@@ -105,7 +105,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] Transcript windows, non-citable (D-091); golden prompts unchanged for the eval corpus
 - [x] Release: sub-phase images and the CLI end-to-end test (D-092); CLI installed into the app venv
 - [x] Quality bar (backend, eval, cli, frontend) green; local image: CLI e2e PASS, failed URL → exit 3
-- [ ] CI + `phase-3b-rc`; PR phase-3b → phase-3; Gate 3b in GATES.md (checklist written)
+- [x] CI + `phase-3b-rc` (4b3cb21); PR #5 phase-3b → phase-3; Gate 3b in GATES.md — waiting for Ludwig
 
 ### Original Phase 3b scope
 - `trustbook` CLI (in the image: `docker compose exec app trustbook …`; pip-installable from the repo), talks to the HTTP API (default http://127.0.0.1:8484, `--base-url`), reuses the eval runner's client
