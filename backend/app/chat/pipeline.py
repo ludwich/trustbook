@@ -26,8 +26,10 @@ Citation numbers are given after removal, in order of first use among the kept s
 
 Parent context (D-077, D-079): the retrieval's promoted chunks are ordinary numbered chunks; its
 code outline goes into the prompt after the chunks and nowhere else. No check reads it: it is not
-a chunk, so nothing only the outline shows can verify. The diagnostics count such failures
-(``outline_only``) and record the time, judge calls and answer calls of each step (D-080).
+a chunk, so nothing only the outline shows can verify. Transcript windows (D-090) go after the
+outline, the same way: citations always carry the cited child's own times. The diagnostics count
+such failures (``outline_only``, ``window_only``) and record the time, judge calls and answer
+calls of each step (D-080).
 """
 
 from __future__ import annotations
@@ -62,11 +64,18 @@ from app.chat.schemas import (
     SentenceOut,
     Stage,
     Timings,
+    WindowOut,
 )
 from app.chat.text import content_terms, question_topic
 from app.grounding.code_checks import name_in, unescape_markdown, without_location
 from app.grounding.verify import Checked, Verifier
-from app.retrieval.parents import outline_fingerprint, outline_text
+from app.retrieval.parents import (
+    WINDOW_PLACEHOLDER,
+    outline_fingerprint,
+    outline_text,
+    window_fingerprint,
+    window_text,
+)
 from app.retrieval.service import Retrieval, RetrievedChunk
 
 logger = logging.getLogger("trustbook.chat")
@@ -329,25 +338,58 @@ def retrieval_fingerprint(chunks: Sequence[RetrievedChunk]) -> str | None:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
+def noncitable_only(
+    sentences: Sequence[DraftSentence],
+    checked: Checked,
+    chunks: Mapping[str, RetrievedChunk],
+    text: str,
+    *,
+    words: bool = False,
+) -> int:
+    """Diagnostics only (D-077, D-090): failed sentences missing a name or literal that the
+    non-citable ``text`` shows and no labelled chunk holds. With ``words`` (transcript windows,
+    whose prose layer 5 does not check), also failed sentences using a content word that ``text``
+    has and no labelled chunk has. Never used to decide a sentence."""
+    if not text:
+        return 0
+    held: set[str] = set()
+    shown: set[str] = set()
+    if words:
+        for chunk in chunks.values():
+            held.update(content_terms(unescape_markdown(chunk.text)))
+        shown = set(content_terms(text)) - held
+    count = 0
+    for i, check in enumerate(checked.checks):
+        if check.passed:
+            continue
+        if any(
+            name_in(name, [text]) and not any(_holds(name, c) for c in chunks.values())
+            for name in check.missing
+        ) or (words and i < len(sentences) and shown & set(content_terms(sentences[i].text))):
+            count += 1
+    return count
+
+
 def outline_only(
     sentences: Sequence[DraftSentence],
     checked: Checked,
     chunks: Mapping[str, RetrievedChunk],
     outline: str,
 ) -> int:
-    """Diagnostics only (D-077): failed sentences missing a name or literal that the outline
-    shows and no labelled chunk holds. Never used to decide a sentence."""
-    if not outline:
-        return 0
-    return sum(
-        1
-        for check in checked.checks
-        if not check.passed
-        and any(
-            name_in(name, [outline]) and not any(_holds(name, c) for c in chunks.values())
-            for name in check.missing
-        )
-    )
+    """Failed sentences missing a name or literal only the outline shows (D-077)."""
+    return noncitable_only(sentences, checked, chunks, outline)
+
+
+def window_only(
+    sentences: Sequence[DraftSentence],
+    checked: Checked,
+    chunks: Mapping[str, RetrievedChunk],
+    windows: str,
+) -> int:
+    """Failed sentences stating something only a transcript window shows (D-090): a missing
+    name, or a content word no labelled chunk has. ``windows``: the windows' text without the
+    numbered chunks' placeholders."""
+    return noncitable_only(sentences, checked, chunks, windows, words=True)
 
 
 def _round(seconds: float) -> float:
@@ -365,6 +407,7 @@ class _Meter:
     verification_s: list[float] = field(default_factory=list)
     judge_per_pass: list[int] = field(default_factory=list)
     outline_only: list[int] = field(default_factory=list)
+    window_only: list[int] = field(default_factory=list)
     citation_s: float | None = None
     promoted_cited: tuple[int, int] = (0, 0)
 
@@ -379,8 +422,13 @@ class _Meter:
         checked = check_sentences(verifier, sentences, chunks)
         self.verification_s.append(_round(time.perf_counter() - started))
         self.judge_per_pass.append(verifier.judge_calls - judged)
-        outline = outline_text(self.retrieval.outline) if self.retrieval is not None else ""
+        retrieval = self.retrieval
+        outline = outline_text(retrieval.outline) if retrieval is not None else ""
         self.outline_only.append(outline_only(sentences, checked, chunks, outline))
+        windows = ""
+        if retrieval is not None and retrieval.transcript_windows:
+            windows = window_text(retrieval.transcript_windows).replace(WINDOW_PLACEHOLDER, "")
+        self.window_only.append(window_only(sentences, checked, chunks, windows))
         return checked
 
     def update(self, verifier: Verifier) -> dict[str, object]:
@@ -398,6 +446,7 @@ class _Meter:
             "prompt_tokens": [c.prompt_tokens for c in self.calls],
             "completion_tokens": [c.completion_tokens for c in self.calls],
             "outline_only": list(self.outline_only),
+            "window_only": list(self.window_only),
             "promoted_cited": list(self.promoted_cited),
         }
         retrieval = self.retrieval
@@ -410,6 +459,18 @@ class _Meter:
             update["promoted_tokens"] = sum(max(0, c.token_count) for c in promoted)
             update["outline_tokens"] = sum(b.tokens for b in retrieval.outline)
             update["outline_fingerprint"] = outline_fingerprint(retrieval.outline)
+            windows = retrieval.transcript_windows
+            update["windows"] = [
+                WindowOut(
+                    source_id=w.source_id,
+                    numbered=list(w.numbered_ids),
+                    chunk_ids=list(w.chunk_ids),
+                    tokens=w.tokens,
+                )
+                for w in windows
+            ]
+            update["window_tokens"] = sum(w.tokens for w in windows)
+            update["window_fingerprint"] = window_fingerprint(windows)
         return update
 
 
@@ -491,6 +552,7 @@ def _answer(
                 question,
                 retrieval.chunks,
                 outline=retrieval.outline,
+                windows=retrieval.transcript_windows,
                 regenerate=regenerate,
                 failed=failed,
             ),

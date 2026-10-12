@@ -91,6 +91,9 @@ PARENTS_OFF: dict[str, object] = {
     "outline_tokens": 0,
     "outline_fingerprint": None,
     "promoted_cited": [0, 0],
+    "windows": [],
+    "window_tokens": 0,
+    "window_fingerprint": None,
 }
 
 
@@ -118,6 +121,7 @@ def test_all_sentences_pass_is_verified_with_scores_and_diagnostics() -> None:
         "answer_calls": 1,
         "completion_tokens": [None],
         "outline_only": [0],
+        "window_only": [0],
         **PARENTS_OFF,
     }
     assert stages == ["retrieving", "generating", "checking"]
@@ -308,6 +312,7 @@ def test_refusals_before_generation_carry_the_top_score() -> None:
         "answer_calls": 0,
         "completion_tokens": [],
         "outline_only": [],
+        "window_only": [],
         **PARENTS_OFF,
     }
     none = Retrieval(chunks=[], ranked=[], source_ids=[])

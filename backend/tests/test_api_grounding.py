@@ -29,7 +29,7 @@ from tests.chat_helpers import (
 )
 from tests.conftest import AppFactory
 from tests.fakes import FakeGrounding, Router
-from tests.parent_helpers import ADAPTERS, adapters_specs, add_rows, doc, with_parent_rows
+from tests.parent_helpers import ADAPTERS, adapters_specs, add_rows, doc, turn, with_parent_rows
 
 GUIDE = "Requests is an HTTP library for Python. Proxies are configured with the proxies argument."
 QUOTE = "Proxies are configured with the proxies argument."
@@ -186,6 +186,11 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
         "outline_tokens": 0,
         "outline_fingerprint": None,
         "promoted_cited": [0, 0],
+        # Transcript windows (D-090): none without a transcript.
+        "windows": [],
+        "window_tokens": 0,
+        "window_fingerprint": None,
+        "window_only": [0, 0],
     }
     assert len(chat.calls) == 2  # answer, regeneration
     # The regeneration is told which sentence of the first reply failed and why (D-074), in the
@@ -576,3 +581,57 @@ def test_the_outline_changes_only_the_outline_fingerprint(
     assert off["expansions"] == [] and off["promoted_tokens"] == 0
     # The promoted chunk was a numbered chunk: the context fingerprint covers it.
     assert off["retrieval_fingerprint"] != on["retrieval_fingerprint"]
+
+
+# --- transcript windows (D-090) ---------------------------------------------------------------
+
+WINDOW_QUESTION = "When will we ship the release on Friday?"
+FILLER = (
+    "apples bicycles candles dolphins engines falcons glaciers harbours islands jackets kettles "
+    "lanterns meadows needles oceans pebbles quarries rivers saddles tunnels umbrellas valleys "
+    "wagons yachts zebras anchors barrels cabins dunes"
+).split()
+
+
+def transcript_source(env: Env) -> dict[int, str]:
+    """A 29-turn call (400 tokens a turn): the context holds 8 turns, so neighbours are left."""
+    source = add_source(env.engine, "Planning call", source_type="youtube")
+    specs = [
+        turn(n, f"Then we talked about {word} for a while.", tokens=400)
+        for n, word in enumerate(FILLER)
+    ]
+    specs[14] = turn(14, "We agreed to ship the release on Friday.", tokens=400)
+    return add_rows(env.engine, env.index, source, specs)
+
+
+def test_a_transcript_answer_gets_windows_and_a_window_only_sentence_fails(env: Env) -> None:
+    ids = transcript_source(env)
+    message = env.ask(f"{WINDOW_QUESTION} TB-WINDOW-FACT")[-1][1]["message"]
+    d = message["diagnostics"]
+    assert d["windows"] and d["window_tokens"] == sum(w["tokens"] for w in d["windows"])
+    assert ids[14] in d["windows"][0]["numbered"]
+    assert isinstance(d["window_fingerprint"], str) and len(d["window_fingerprint"]) == 16
+    # The mock quotes a neighbour only the window shows, citing c1: it fails and is removed.
+    assert message["badge"] == "partially_verified"
+    (removed,) = message["removed_sentences"]
+    assert removed.startswith("Then we talked about ")
+    assert d["window_only"] == [1]
+    for sentence in message["content"]["sentences"]:
+        for citation in sentence["citations"]:
+            assert citation["locator"] == stored_locator(env, citation["chunk_id"])
+
+
+def test_parent_context_off_gives_no_windows(env: Env) -> None:
+    transcript_source(env)
+    on = env.ask(WINDOW_QUESTION)[-1][1]["message"]["diagnostics"]
+    assert on["windows"] and on["window_only"] == [0]
+    put = env.client.put("/api/settings", json={"retrieval": {"parent_context": False}})
+    assert put.status_code == 200
+    off = env.ask(WINDOW_QUESTION)[-1][1]["message"]["diagnostics"]
+    assert off["windows"] == [] and off["window_tokens"] == 0
+    assert off["window_fingerprint"] is None
+    # The windows never change the numbered chunks.
+    assert off["retrieval_fingerprint"] == on["retrieval_fingerprint"]
+    env.client.put("/api/settings", json={"retrieval": {"parent_context": True, "outline": False}})
+    no_outline = env.ask(WINDOW_QUESTION)[-1][1]["message"]["diagnostics"]
+    assert no_outline["window_fingerprint"] == on["window_fingerprint"]  # outline off keeps them

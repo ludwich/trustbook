@@ -15,9 +15,13 @@ Test hooks (docs/ARCHITECTURE.md, "Test hooks"):
 - A question containing ``TB-OUTLINE-FACT`` gets one extra sentence naming, in backticks, a name
   that only the prompt's code outline shows (D-077), citing ``c1``. The outline is not a chunk, so
   the sentence fails layer 5 and is removed. Without an outline nothing is added.
+- A question containing ``TB-WINDOW-FACT`` gets one extra sentence quoted from a transcript
+  window (D-090): the first sentence of a neighbour's line with a word no numbered chunk has,
+  citing ``c1``. The window is not a chunk, so the sentence fails verification and is removed.
+  Without a window nothing is added.
 
-The mock never quotes the outline otherwise: answers and judge verdicts read only the numbered
-chunks (:func:`~app.chat.prompt.parse_prompt` returns the outline separately).
+The mock never quotes the outline or a window otherwise: answers and judge verdicts read only the
+numbered chunks (:func:`~app.chat.prompt.parse_prompt` returns both separately).
 - Judge prompts (schema with ``verdicts``): a statement is supported when its cited lines share
   at least two content words with it; each cited chunk's whole line range is the evidence.
 - :class:`MockSearchAdapter`: the ``mock`` web-search provider, fixed results for any query.
@@ -37,6 +41,7 @@ from app.capabilities.adapters.search import demote_homepages
 from app.chat.prompt import PromptChunk, parse_prompt
 from app.chat.text import content_terms, truncate
 from app.grounding.code_judge import parse_judge_prompt
+from app.retrieval.parents import WINDOW_PLACEHOLDER
 
 MOCK_MODEL = "mock"
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
@@ -46,6 +51,9 @@ UNSUPPORTED_SENTENCE = "This also requires a licence key from the vendor."
 OUTLINE_FACT_TRIGGER = "TB-OUTLINE-FACT"
 OUTLINE_FACT_SENTENCE = "The file also defines `{name}`."
 _OUTLINE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+WINDOW_FACT_TRIGGER = "TB-WINDOW-FACT"
+_WINDOW_LINE = re.compile(r"^\s+\[[^\]]*\]\s+(.*)$")
+_SPEAKER = re.compile(r"^[^\s:][^:]{0,38}:\s+")
 JUDGE_MIN_SHARED = 2
 
 
@@ -91,13 +99,29 @@ def outline_only_name(chunks: Sequence[PromptChunk], outline: str) -> str | None
     return None
 
 
+def window_only_sentence(chunks: Sequence[PromptChunk], transcript: str) -> str | None:
+    """The first sentence of a transcript window's neighbour lines that has a content word no
+    chunk has (the speaker label left out); None when there is none."""
+    held = {term for c in chunks for term in content_terms(c.text)}
+    for line in transcript.splitlines():
+        match = _WINDOW_LINE.match(line)
+        if match is None or match.group(1).startswith(WINDOW_PLACEHOLDER):
+            continue
+        body = _SPEAKER.sub("", match.group(1), count=1)
+        for sentence in _sentences(body):
+            if set(content_terms(sentence)) - held:
+                return truncate(sentence, MAX_QUOTE_CHARS)
+    return None
+
+
 def grounded_answer(
-    chunks: Sequence[PromptChunk], question: str, outline: str = ""
+    chunks: Sequence[PromptChunk], question: str, outline: str = "", transcript: str = ""
 ) -> dict[str, Any]:
     """1–2 sentences quoting the best-matching chunk(s), or no sentences when nothing matches.
 
-    ``outline``: the prompt's code outline; never quoted (only the ``TB-OUTLINE-FACT`` hook names
-    one of its names).
+    ``outline`` and ``transcript``: the prompt's code outline and transcript windows; never
+    quoted (only the ``TB-OUTLINE-FACT`` hook names one of the outline's names, and only the
+    ``TB-WINDOW-FACT`` hook quotes a window).
     """
     terms = set(content_terms(question))
     scored = [(_overlap(terms, c.text), i, c) for i, c in enumerate(chunks)]
@@ -118,6 +142,10 @@ def grounded_answer(
         if name is not None:
             text = OUTLINE_FACT_SENTENCE.format(name=name)
             sentences.append({"text": text, "chunk_ids": [chunks[0].label]})
+    if WINDOW_FACT_TRIGGER in question and chunks:
+        quoted = window_only_sentence(chunks, transcript)
+        if quoted is not None:
+            sentences.append({"text": quoted, "chunk_ids": [chunks[0].label]})
     return {"sentences": sentences}
 
 
@@ -232,7 +260,9 @@ class MockChatAdapter:
             if "questions" in properties:
                 data = grounded_overview(parts.chunks)
             else:
-                data = grounded_answer(parts.chunks, parts.question or "", parts.outline)
+                data = grounded_answer(
+                    parts.chunks, parts.question or "", parts.outline, parts.transcript
+                )
             text = json.dumps(data, ensure_ascii=False)
             return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
         if last_user.strip().lower().startswith("reply with ok"):

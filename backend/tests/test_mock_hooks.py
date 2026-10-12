@@ -12,6 +12,7 @@ from app.capabilities.adapters.base import AdapterError
 from app.capabilities.adapters.factory import build_search_adapter
 from app.capabilities.adapters.mock import (
     UNSUPPORTED_SENTENCE,
+    WINDOW_FACT_TRIGGER,
     MockChatAdapter,
     MockSearchAdapter,
 )
@@ -24,6 +25,7 @@ from app.chat.prompt import ANSWER_SCHEMA, answer_messages
 from app.config import Paths, SettingsStore
 from app.grounding.code_judge import CodeJudge, judge_messages, prepare
 from app.grounding.verify import Verifier
+from app.retrieval.parents import TranscriptWindow, WindowPart
 from app.retrieval.service import Retrieval, RetrievedChunk
 from tests.fakes import FakeGrounding
 
@@ -176,3 +178,41 @@ def test_mock_answers_never_quote_a_code_chunk_header() -> None:
     reply = grounded_answer([chunk], "What is the default pool size in make_pool?")
     assert reply["sentences"]
     assert all("354" not in s["text"] and "File:" not in s["text"] for s in reply["sentences"])
+
+
+TALK = RetrievedChunk(
+    "t3",
+    "s3",
+    "Call",
+    "Carla will write the release notes.",
+    {"start_s": 180.0, "end_s": 240.0},
+    9,
+    0.9,
+)
+TALK_WINDOW = TranscriptWindow(
+    "s3",
+    "Call",
+    (
+        WindowPart("t2", 2, 120.0, 180.0, "Anna", "Carla will write it. Ship it on Friday.", 15),
+        WindowPart("t3", 3, 180.0, 240.0, None, None, 6),
+    ),
+    25,
+)
+
+
+def mock_reply(question: str, windows: tuple[TranscriptWindow, ...]) -> list[dict[str, Any]]:
+    messages = answer_messages(question, [TALK], windows=windows)
+    text = MockChatAdapter().chat(messages, json_schema=ANSWER_SCHEMA).text
+    sentences: list[dict[str, Any]] = json.loads(text)["sentences"]
+    return sentences
+
+
+def test_tb_window_fact_quotes_a_window_only_sentence_citing_c1() -> None:
+    question = f"Who will write the release notes? {WINDOW_FACT_TRIGGER}"
+    sentences = mock_reply(question, (TALK_WINDOW,))
+    # The first window sentence is only words the chunk has; the second is window-only.
+    assert sentences[-1] == {"text": "Ship it on Friday.", "chunk_ids": ["c1"]}
+    assert [s["text"] for s in sentences[:-1]] == ["Carla will write the release notes."]
+    # Without the trigger, or without a window, the mock never quotes a window.
+    assert mock_reply("Who will write the release notes?", (TALK_WINDOW,)) == sentences[:-1]
+    assert mock_reply(question, ()) == sentences[:-1]
