@@ -1799,8 +1799,9 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   order is testable and does not loop.
 - **Alternatives:** letting the model choose the branch (non-deterministic, loops); two calls per turn (branches,
   then the question), slower for every turn.
-- **Mock:** seed and turn prompts are answered by the mock adapter; `TB-UNSUPPORTED` (idea), `TB-BRANCH` and
-  "risk" (answer) are test hooks (docs/ARCHITECTURE.md, "Test hooks").
+- **Mock:** seed and turn prompts are answered by the mock adapter; `TB-UNSUPPORTED` and `TB-SEEDS4` (idea: four
+  seeds, so the Gate 4 e2e stays mid-session), `TB-BRANCH` and "risk" (answer) are test hooks
+  (docs/ARCHITECTURE.md, "Test hooks").
 - **Prompts:** Trustbook's own wording; only the interview pattern is credited to Matt Pocock's grill-me (README).
 
 ### D-094 Recommendations are grounded per sentence; a failing cited sentence is removed, never relabelled
@@ -1887,9 +1888,29 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Decision:**
   - `/turn` and `/answer` reuse the chat stream (`status`, then `done` with the stored session, or `error`), run in
     the space's request-log context, so every seed, turn and judge call is in the request log with the space.
-  - A per-session lock gives `409` while a turn runs.
+  - A per-session lock gives `409` while a turn runs. `Session.running` reports that lock, so a page reloaded
+    during a turn waits for it instead of asking again (D-102).
   - `GET …/ideation/estimate` returns the approximate tokens per turn and for the seed call, and whether the chat
     endpoint is remote; the UI shows it before a session when remote (SPEC §11).
   - Node diagnostics (scores, failed sentences, timings, calls) are stored but not returned.
 - **Reason:** simplicity (one stream format and client), SPEC §11.
 - **Alternatives:** blocking JSON (no progress for 10–60 s turns on local models).
+
+### D-102 Ideation tab: a reload opens the newest session; turn state lives outside React
+- **Context:** SPEC §10 asks for sessions that survive a reload; it does not say which session the tab shows or
+  what the page does with a turn the server is still running.
+- **Decision:**
+  - After a reload the Ideation tab opens the most recently updated session (the first of `GET /sessions`), with
+    its waiting question and map; picking another session or "New idea" overrides that until the next reload.
+  - The state of a turn (running, stage, the answer being sent, the error) is kept in a module-level store
+    outside React (`useIdeationStream.ts`), keyed by space and session. The stream keeps reading when the tab
+    unmounts (e.g. the user looks at Chat), and the tab shows the running turn again when it comes back.
+  - API contract: `Session.running` (`GET /sessions/{id}` and every `Session` response) is true while the
+    session's turn lock is held. A page that is not streaming that turn (after a reload) shows "Preparing the
+    next question…", hides "Ask the next question" and Dismiss, and refetches the session every second until
+    `running` is false. The `done` event's session always has `running: false`.
+- **Reason:** simplicity (§15): the newest session is almost always the one being worked on; the server finishes
+  a turn whether or not anyone listens, so the page must not lose it or offer a request that only gets a `409`.
+- **Alternatives:** remembering the selected session in local storage (more state, stale after deletes);
+  re-attaching to the running stream (needs server-side fan-out of events); turn state in React state (lost on
+  tab switch).
