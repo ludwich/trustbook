@@ -141,7 +141,8 @@ RUN --mount=type=cache,id=trustbook-uv,target=/root/.cache/uv \
     --mount=type=bind,source=cli,target=/tmp/build/cli,rw \
     set -eu; \
     rm -rf /cli; \
-    uv pip install --no-deps /tmp/build/cli; \
+    uv pip install --python /app/.venv/bin/python --no-deps /tmp/build/cli; \
+    test "$(command -v trustbook)" = /app/.venv/bin/trustbook; \
     trustbook --version
 
 # Prove every baked model loads offline and scores sensibly (fails the build otherwise).
