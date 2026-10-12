@@ -91,3 +91,10 @@ def test_the_prompt_with_an_outline_is_unchanged() -> None:
 def test_the_regeneration_prompt_is_unchanged() -> None:
     messages = answer_messages(QUESTION, CHUNKS, outline=OUTLINE, regenerate=True, failed=FAILED)
     assert digest(messages) == REGENERATION
+
+
+def test_no_windows_is_the_default() -> None:
+    plain = answer_messages(QUESTION, CHUNKS, outline=OUTLINE, regenerate=True, failed=FAILED)
+    assert plain == answer_messages(
+        QUESTION, CHUNKS, outline=OUTLINE, windows=(), regenerate=True, failed=FAILED
+    )
