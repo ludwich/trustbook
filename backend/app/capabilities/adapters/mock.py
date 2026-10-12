@@ -24,12 +24,14 @@ The mock never quotes the outline or a window otherwise: answers and judge verdi
 numbered chunks (:func:`~app.chat.prompt.parse_prompt` returns both separately).
 - Ideation (D-093): seed prompts (schema with ``branches``) get three branches from the idea's
   first content word ("Who it is for", "What your sources say about <word>", "Risks and open
-  problems"). Turn prompts (schema with ``question``) get a fixed question about the branch and a
-  recommendation quoting the chunk sentence that shares most words with the idea and branch,
-  citing it; without such a chunk, one uncited suggestion. ``TB-UNSUPPORTED`` in the idea adds
-  :data:`UNSUPPORTED_SENTENCE` citing ``c1`` (it fails verification and is removed). A last answer
-  containing ``TB-BRANCH`` adds one new branch under the answered one; one containing "risk" adds
-  a risk.
+  problems"). An idea containing ``TB-SEEDS4`` gets a fourth, "How it is paid for", before the
+  risks (within the map's four-seed cap), so a session stays mid-session for longer; the trigger
+  is left out of the title and branch names. Turn prompts (schema with ``question``) get a fixed
+  question about the branch and a recommendation quoting the chunk sentence that shares most
+  words with the idea and branch, citing it; without such a chunk, one uncited suggestion.
+  ``TB-UNSUPPORTED`` in the idea adds :data:`UNSUPPORTED_SENTENCE` citing ``c1`` (it fails
+  verification and is removed). A last answer containing ``TB-BRANCH`` adds one new branch under
+  the answered one; one containing "risk" adds a risk.
 - Judge prompts (schema with ``verdicts``): a statement is supported when its cited lines share
   at least two content words with it; each cited chunk's whole line range is the evidence.
 - :class:`MockSearchAdapter`: the ``mock`` web-search provider, fixed results for any query.
@@ -65,6 +67,8 @@ _WINDOW_LINE = re.compile(r"^\s+\[[^\]]*\]\s+(.*)$")
 _SPEAKER = re.compile(r"^[^\s:][^:]{0,38}:\s+")
 JUDGE_MIN_SHARED = 2
 BRANCH_TRIGGER = "TB-BRANCH"
+SEEDS4_TRIGGER = "TB-SEEDS4"
+SEEDS4_BRANCH = "How it is paid for"
 IDEA_SUGGESTION = "Start small and try it with one real user before building more."
 
 
@@ -239,12 +243,15 @@ def grounded_overview(chunks: Sequence[PromptChunk]) -> dict[str, Any]:
 
 
 def ideation_seed(prompt: str) -> dict[str, Any]:
-    """Three branches named after the idea's first content word, and a title from its start."""
+    """Three branches named after the idea's first content word (four with ``TB-SEEDS4``), and a
+    title from the idea's start."""
     parts = parse_ideation_prompt(prompt)
-    terms = content_terms(parts.idea)
+    idea = parts.idea.replace(SEEDS4_TRIGGER, " ")
+    terms = content_terms(idea)
     about = f"What your sources say about {terms[0]}" if terms else "What your sources say"
-    title = truncate(parts.idea, 40) or "Untitled idea"
-    return {"title": title, "branches": ["Who it is for", about, "Risks and open problems"]}
+    title = truncate(idea, 40) or "Untitled idea"
+    extra = [SEEDS4_BRANCH] if SEEDS4_TRIGGER in parts.idea else []
+    return {"title": title, "branches": ["Who it is for", about, *extra, "Risks and open problems"]}
 
 
 def ideation_turn(prompt: str) -> dict[str, Any]:

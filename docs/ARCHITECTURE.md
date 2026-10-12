@@ -783,7 +783,9 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
   - The mock code judge supports a sentence when it shares at least two content words with the cited lines,
     and names those lines as evidence.
 - **Mock ideation (D-093):** seed prompts get "Who it is for", "What your sources say about <first content word
-  of the idea>", "Risks and open problems". Turn prompts get "What should be decided about “<branch>”?" and a
+  of the idea>", "Risks and open problems"; an idea containing `TB-SEEDS4` gets a fourth, "How it is paid for",
+  before the risks (within the four-seed cap; the trigger is left out of the title and branch names), so a
+  session stays mid-session after a few answers (Gate 4 e2e). Turn prompts get "What should be decided about “<branch>”?" and a
   recommendation quoting the chunk sentence sharing most words with idea + branch, citing it (else the
   suggestion "Start small and try it with one real user before building more."). `TB-UNSUPPORTED` in the idea
   adds the unsupported sentence citing c1 (removed). A last answer with `TB-BRANCH` adds a branch

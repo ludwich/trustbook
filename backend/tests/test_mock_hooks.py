@@ -1,4 +1,5 @@
-"""Test hooks (only with TRUSTBOOK_MOCK_LLM=1): TB-UNSUPPORTED, the mock code judge, mock search."""
+"""Test hooks (only with TRUSTBOOK_MOCK_LLM=1): TB-UNSUPPORTED, TB-SEEDS4, the mock code judge,
+mock search."""
 
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ from fastapi.testclient import TestClient
 from app.capabilities.adapters.base import AdapterError
 from app.capabilities.adapters.factory import build_search_adapter
 from app.capabilities.adapters.mock import (
+    SEEDS4_BRANCH,
+    SEEDS4_TRIGGER,
     UNSUPPORTED_SENTENCE,
     WINDOW_FACT_TRIGGER,
     MockChatAdapter,
@@ -25,6 +28,9 @@ from app.chat.prompt import ANSWER_SCHEMA, answer_messages
 from app.config import Paths, SettingsStore
 from app.grounding.code_judge import CodeJudge, judge_messages, prepare
 from app.grounding.verify import Verifier
+from app.ideation import map as branch_map
+from app.ideation.output import parse_seed
+from app.ideation.prompt import SEED_SCHEMA, seed_messages
 from app.retrieval.parents import TranscriptWindow, WindowPart
 from app.retrieval.service import Retrieval, RetrievedChunk
 from tests.fakes import FakeGrounding
@@ -216,3 +222,22 @@ def test_tb_window_fact_quotes_a_window_only_sentence_citing_c1() -> None:
     # Without the trigger, or without a window, the mock never quotes a window.
     assert mock_reply("Who will write the release notes?", (TALK_WINDOW,)) == sentences[:-1]
     assert mock_reply(question, ()) == sentences[:-1]
+
+
+def test_tb_seeds4_seeds_a_fourth_branch_within_the_cap() -> None:
+    idea = f"Guided puffin walks on Gull Island {SEEDS4_TRIGGER} for birdwatchers"
+    result = MockChatAdapter().chat(seed_messages(idea), json_schema=SEED_SCHEMA)
+    data = json.loads(result.text)
+    assert data["branches"] == [
+        "Who it is for",
+        "What your sources say about guided",
+        SEEDS4_BRANCH,
+        "Risks and open problems",
+    ]
+    assert data["title"] == "Guided puffin walks on Gull Island for…"
+    parsed = parse_seed(result.text)
+    assert len(parsed.branches) == branch_map.MAX_SEEDS == 4  # the map keeps all four
+    assert all(SEEDS4_TRIGGER not in t for t in [parsed.title, *parsed.branches])
+
+    plain = MockChatAdapter().chat(seed_messages("Guided puffin walks"), json_schema=SEED_SCHEMA)
+    assert SEEDS4_BRANCH not in json.loads(plain.text)["branches"]
