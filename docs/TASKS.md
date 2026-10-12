@@ -6,6 +6,9 @@ Gate 3 (added by Ludwig at Gate 2): at most **1 false refusal across all answera
 smoke + refusal sets, with correct refusals still ≥ 95% and citation precision ≥ 90%. False refusals are
 reported per category (docs/code/multi). p95 latency is tracked in GATES.md and flagged above 60 s.
 
+**Gate 3 passed (Ludwig, 2026-10-12).** #4 squash-merged, tagged `phase-3`; findings G3-1..G3-3 in
+docs/BACKLOG.md.
+
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
 ## Overnight plan (Ludwig, 2026-10-11 evening; authorised to work without waiting)

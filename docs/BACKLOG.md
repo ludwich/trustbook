@@ -63,3 +63,19 @@ design.
 ### Smaller document children
 About 250-token document children (today mean 328 after D-068), with the section as their parent. Not needed
 for the mechanism; the eval would have to be re-measured.
+
+## From Gate 3 pass (2026-10-12)
+
+### G3-1 Code symbol in the citation viewer header
+The viewer header shows the file and lines but not the code symbol. Gate 3 checklist #3 expects the qualified
+name, e.g. `SessionRedirectMixin.should_strip_auth`. The symbol is already stored with each code chunk.
+
+### G3-2 ref-near-10 (`requests.codes`, 429 names)
+Still fails in 3 of Ludwig's last 4 runs. In the UI, in a code-only space, it is refused as `not_in_sources`,
+so retrieval is involved, not only the judge (D-085). Investigate which chunks reach the gate and the answer
+call for this question before touching grounding.
+
+### G3-3 Two-model-family smoke check before every gate
+The Qwen3.8-27B reference run stays around 78% precision. Before each gate, run the smoke set with a second
+model family next to the main model and report both, so a prompt or grounding change tuned to one family is
+seen early.

@@ -3,29 +3,19 @@
 Each phase ends at a gate (SPEC §14). Ludwig verifies it on his laptop with the published `-rc` image and
 reports **pass** or **fail**.
 
-## Waiting for Ludwig (overnight run, 2026-10-12): Gate 3 → Gate 3b → Gate 4
+## Waiting for Ludwig: Gate 3b → Gate 4
 
-Three gates are stacked, each on the one before. Nothing has been merged or tagged, and `main` is untouched. Test
-them in this order. The full checklists are in the sections named below; each is also on its branch.
+**Gate 3 passed** on 2026-10-12 (results under "Gate 3 — Code"). #4 is squash-merged into `main` and tagged
+`phase-3`. The two remaining gates are stacked, each on the one before. Test them in this order; the full
+checklists are on their branches.
 
 | # | Gate | Branch · PR | Image (`TRUSTBOOK_IMAGE_TAG`) | What to test | Section |
 |---|---|---|---|---|---|
-| 1 | **Gate 3: Code** (resubmitted after the failed gate) | `phase-3` · #4 → `main` | `phase-3-rc` | Delete `Smoke`, run the gate command (#1), and do checklist #2–#7. **Decide on the 14 citations outside the answer key** (Qwen3.8 reference run: 3 correct, 5 jointly correct, 6 off-question, 0 wrong); the exact cited text is listed for each. Final builder runs: 3 × Qwen3.6, each with precision 100%, 0 false refusals and p95 47.8–50.6 s | "Gate 3 — Code" |
-| 2 | **Gate 3b: CLI for agents + transcript windows** | `phase-3b` · #5 → `phase-3` | `phase-3b-rc` | 10 PowerShell steps: the `trustbook` CLI in the container and pip-installed on Windows, JSON and exit codes (2 = not in sources, 3 = failed source), no keys in output, the Claude Code skill, transcript windows, Gate 3 still passing | "Gate 3b" |
-| 3 | **Gate 4: Ideation** | `phase-4` · #6 → `phase-3b` | `phase-4-rc` | **Back up your Trustbook folder first** (spaces migrate to schema v6, which older images cannot open). A session in `Smoke` with cited recommendations, accept/answer/skip/dismiss, resume, Finish now mid-session, Export, a full session to Complete, and briefs never reaching chat | "Gate 4 — Ideation" |
+| 1 | **Gate 3b: CLI for agents + transcript windows** | `phase-3b` · #5 → `main` | `phase-3b-rc` | 10 PowerShell steps: the `trustbook` CLI in the container and pip-installed on Windows, JSON and exit codes (2 = not in sources, 3 = failed source), no keys in output, the Claude Code skill, transcript windows, Gate 3 still passing | "Gate 3b" |
+| 2 | **Gate 4: Ideation** | `phase-4` · #6 → `phase-3b` | `phase-4-rc` | **Back up your Trustbook folder first** (spaces migrate to schema v6, which older images cannot open). A session in `Smoke` with cited recommendations, accept/answer/skip/dismiss, resume, Finish now mid-session, Export, a full session to Complete, and briefs never reaching chat | "Gate 4 — Ideation" |
 
-**Decisions only you can make:**
-- The approval list in Gate 3: accept or reject the 14 citations outside the answer key.
-- The pass or fail of each gate.
-
-Nothing else is blocked.
-
-**After a pass:**
-1. Gate 3: squash-merge #4 and tag `phase-3`.
-2. Then I rebase `phase-3b` onto `main`, retarget #5 to `main`, and wait for your Gate 3b result.
-3. Gate 4 follows the same way.
-
-If a gate fails, I fix it on its own branch and rebase the branches stacked on it.
+**After a pass:** I squash-merge the PR, tag the phase on `main`, rebase the next branch onto `main` and
+retarget its PR. If a gate fails, I fix it on its own branch and rebase the branches stacked on it.
 
 ---
 
@@ -258,6 +248,19 @@ Other checks:
 - **Added by Ludwig at Gate 2:** at most **1 false refusal across all answerable code questions** (smoke +
   refusal sets), with correct refusals ≥ 95% and citation precision ≥ 90%.
 - **Tracked:** false refusals per category, and p95 latency (flagged above 60 s).
+
+### Result: passed (Ludwig, 2026-10-12, `phase-3-rc`)
+
+- **Gate command:** precision 100% (35/35), correct refusals 23/23, code false refusals 1/13 (ref-near-10),
+  cited ranges 23/23, p95 48.6 s, ingest 5/5, exit 0.
+- **Secrets:** `deploy.pem` skipped (line 1, rule `private-key`, no key text shown); the question about it was
+  refused.
+- **Code citations:** `should_strip_auth` cites lines 154–184 exactly; the Basic auth answer is verified; the
+  commits-ahead banner and refresh work.
+- **Citations outside the answer key** (Qwen3.8 reference run): the 3 correct and 5 jointly correct are accepted;
+  the 6 off-question stay not counted. The answer key is unchanged.
+- **Backlog, not blocking** (`docs/BACKLOG.md`, "From Gate 3 pass"): G3-1 symbol in the citation viewer header,
+  G3-2 ref-near-10 retrieval in a code-only space, G3-3 two-model-family smoke check before every gate.
 
 ### Setup
 1. In `.env` set `TRUSTBOOK_IMAGE_TAG=phase-3-rc`, then `docker compose pull` and `docker compose up -d`. Let the
