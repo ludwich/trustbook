@@ -9,6 +9,18 @@ space="CLI e2e"
 fail() { echo "CLI e2e FAILED: $*" >&2; exit 1; }
 tb() { docker exec -i "$container" trustbook "$@"; }
 
+# The deterministic mock chat model (as frontend/e2e/helpers.ts does), set up through the API.
+docker exec -i "$container" python - <<'PY' || fail "chat setup"
+import json, urllib.request
+def call(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request("http://127.0.0.1:8484" + path, data=data, method=method,
+                                 headers={"content-type": "application/json"})
+    urllib.request.urlopen(req, timeout=30).read()
+call("PUT", "/api/capabilities/chat", {"preset": "mock"})
+call("POST", "/api/setup/complete")
+PY
+
 out=$(tb --version) || fail "--version"
 echo "$out"
 
