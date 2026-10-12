@@ -467,6 +467,7 @@ export function ideationSession(over: Partial<IdeationSession> = {}): IdeationSe
     nodes: [],
     current_node_id: null,
     risks: [],
+    running: false,
     ...over,
   });
 }

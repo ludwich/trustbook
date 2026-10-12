@@ -183,6 +183,41 @@ describe("Ideation tab", () => {
     expect(state.ideationCalls.streams).toEqual([]);
   });
 
+  it("after a reload during a turn, waits for the server's turn instead of asking again", async () => {
+    // The answer to n1 is stored; the server is still preparing the next question.
+    const answered = secondTurn("user", "Birdwatchers from the mainland");
+    const midTurn = withProgress({
+      ...answered,
+      nodes: answered.nodes.map((n) =>
+        n.id === "n2" ? { ...n, status: "tentative", question: null, recommendation: null } : n,
+      ),
+      current_node_id: null,
+      running: true,
+    });
+    const { state, putSession } = spaceBackend({ ideationSessions: [midTurn] });
+    await openIdeation();
+
+    expect(await screen.findByText("Preparing the next question…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Ask the next question" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("question-card")).not.toBeInTheDocument();
+    // Nothing can be dismissed while the turn runs.
+    const dismiss = { name: "Dismiss branch “Risks and open problems”" };
+    expect(screen.queryByRole("button", dismiss)).not.toBeInTheDocument();
+
+    // The server's turn ends: the polled session shows the next question.
+    putSession(answered);
+    expect(
+      await screen.findByRole(
+        "region",
+        { name: "What should be decided about “What your sources say about guided”?" },
+        { timeout: 4000 },
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Preparing the next question…")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", dismiss)).toBeInTheDocument();
+    expect(state.ideationCalls.streams).toEqual([]);
+  });
+
   it("accepts, answers and skips: each sends the answer and shows the next question", async () => {
     let step = 0;
     const replies = [

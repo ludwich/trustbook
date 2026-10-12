@@ -655,6 +655,8 @@ export interface IdeationSession extends IdeationSessionSummary {
   /** The branch whose question waits for an answer. */
   current_node_id: string | null;
   risks: IdeationRisk[];
+  /** A turn of this session is in progress on the server (e.g. started before a reload). */
+  running: boolean;
 }
 
 export interface IdeationAnswer {

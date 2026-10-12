@@ -5,8 +5,14 @@ import {
   IconLoader2,
   IconPlayerPlay,
 } from "@tabler/icons-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { useIdeationAction, useIdeationSession, useIdeationSessions } from "@/api/queries";
+import {
+  queryKeys,
+  useIdeationAction,
+  useIdeationSession,
+  useIdeationSessions,
+} from "@/api/queries";
 import type { ChatStage, IdeationAction, IdeationNode, IdeationSession } from "@/api/types";
 import { QueryError } from "@/components/common/QueryError";
 import { Badge } from "@/components/ui/badge";
@@ -72,6 +78,7 @@ function CurrentStep({
   session,
   current,
   turn,
+  serverRunning,
   focusQuestion,
   onAnswer,
   onAsk,
@@ -80,14 +87,16 @@ function CurrentStep({
   session: IdeationSession;
   current: IdeationNode | null;
   turn: TurnState | null;
+  /** The server runs a turn this page is not streaming (started before a reload). */
+  serverRunning: boolean;
   focusQuestion: boolean;
   onAnswer: (node: IdeationNode, action: IdeationAction, text?: string) => void;
   onAsk: () => void;
   onFinish: () => void;
 }) {
   const active = session.status === "active";
-  if (turn?.running) {
-    return <StageLine stage={turn.stage} seeding={session.nodes.length === 0} />;
+  if (turn?.running || serverRunning) {
+    return <StageLine stage={turn?.stage ?? null} seeding={session.nodes.length === 0} />;
   }
   return (
     <>
@@ -147,8 +156,11 @@ function SessionView({
   /** Created from the idea box just now: its first question gets focus. */
   startedHere: boolean;
 }) {
-  const query = useIdeationSession(spaceId, sessionId);
+  const qc = useQueryClient();
   const { state: turn, run } = useIdeationStream(spaceId, sessionId);
+  const localRunning = turn?.running ?? false;
+  // A turn started before a reload is not streamed here: poll the session until it ends.
+  const query = useIdeationSession(spaceId, sessionId, !localRunning);
   const action = useIdeationAction(spaceId, sessionId);
   const [dismissing, setDismissing] = useState<string | null>(null);
   // Focus a new question only when it follows the user's own action in this view.
@@ -156,7 +168,8 @@ function SessionView({
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const session = query.data;
-  const running = turn?.running ?? false;
+  const serverRunning = !localRunning && (session?.running ?? false);
+  const running = localRunning || serverRunning;
   const answeredCount = session?.nodes.filter((n) => n.status === "resolved").length ?? 0;
 
   // Keep the newest step in view.
@@ -164,6 +177,15 @@ function SessionView({
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [answeredCount, running, session?.current_node_id]);
+
+  // When a turn this page only polled ends, refresh the session list (order, progress, title).
+  const wasServerRunning = useRef(serverRunning);
+  useEffect(() => {
+    if (wasServerRunning.current && !serverRunning) {
+      void qc.invalidateQueries({ queryKey: queryKeys.ideationSessions(spaceId), exact: true });
+    }
+    wasServerRunning.current = serverRunning;
+  }, [qc, serverRunning, spaceId]);
 
   if (query.isPending) {
     return (
@@ -235,6 +257,7 @@ function SessionView({
             session={session}
             current={current}
             turn={turn}
+            serverRunning={serverRunning}
             focusQuestion={askedHere}
             onAnswer={answer}
             onAsk={ask}

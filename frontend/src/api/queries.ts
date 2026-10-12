@@ -620,11 +620,20 @@ export function useIdeationSessions(sid: string) {
   });
 }
 
-export function useIdeationSession(sid: string, id: string | null) {
+/** How often a session is refetched while the server runs a turn this page is not streaming. */
+export const IDEATION_RUNNING_POLL_MS = 1_000;
+
+/**
+ * One idea session. `pollWhileRunning`: refetch it while the server reports `running` (a turn
+ * started before a reload); off while this page streams the turn itself.
+ */
+export function useIdeationSession(sid: string, id: string | null, pollWhileRunning = false) {
   return useQuery({
     queryKey: queryKeys.ideationSession(sid, id ?? ""),
     queryFn: () => api.getIdeationSession(sid, id as string),
     enabled: id !== null,
+    refetchInterval: (query) =>
+      pollWhileRunning && query.state.data?.running ? IDEATION_RUNNING_POLL_MS : false,
   });
 }
 
