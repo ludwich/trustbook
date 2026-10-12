@@ -119,6 +119,11 @@ Give one verdict per statement. Reply with only this JSON object:
 CODE_HEADING = "Excerpts:"
 STATEMENTS_HEADING = "Statements:"
 JUDGE_TASK = "Task: give one verdict per statement."
+FOLLOW_UP = (
+    "Statement 1 uses {names}. Earlier, the evidence lines given for it did not contain this. "
+    "If the cited excerpts state it, include the lines that do in the evidence, together with "
+    "the other lines the statement needs. If they do not, the statement is not supported."
+)
 
 _EVIDENCE_ITEM: dict[str, Any] = {
     "type": "object",
@@ -316,15 +321,24 @@ class Statement:
 
 
 def judge_messages(
-    chunks: Sequence[NumberedChunk], statements: Sequence[Statement]
+    chunks: Sequence[NumberedChunk],
+    statements: Sequence[Statement],
+    unanchored: Sequence[str] = (),
 ) -> list[ChatMessage]:
-    """System + user messages for one judge call (statements are numbered from 1)."""
+    """System + user messages for one judge call (statements are numbered from 1).
+
+    ``unanchored``: names of a single statement that the judge's earlier evidence lines lacked
+    (a follow-up, D-085); the task then asks for their lines too."""
     code = "\n\n".join(render_chunk(c) for c in chunks)
     listed = "\n".join(
         f"{i}. (cites {', '.join(s.labels)}) {' '.join(s.text.split())}"
         for i, s in enumerate(statements, start=1)
     )
-    user = f"{CODE_HEADING}\n\n{code}\n\n{STATEMENTS_HEADING}\n{listed}\n\n{JUDGE_TASK}"
+    task = JUDGE_TASK
+    if unanchored:
+        names = ", ".join(f"`{name}`" for name in unanchored)
+        task = f"{JUDGE_TASK}\n\n{FOLLOW_UP.format(names=names)}"
+    user = f"{CODE_HEADING}\n\n{code}\n\n{STATEMENTS_HEADING}\n{listed}\n\n{task}"
     return [{"role": "system", "content": JUDGE_SYSTEM}, {"role": "user", "content": user}]
 
 
@@ -717,6 +731,9 @@ class JudgeOutcome:
     absent: tuple[str, ...] = ()
     """Anchors of a veto that occur nowhere in the cited chunks (for the regeneration feedback,
     D-074); anchors that are somewhere in them still veto but are not listed here."""
+    unanchored: tuple[str, ...] = ()
+    """When the only fault is anchors missing from the evidence lines that the cited chunks do
+    contain: those anchors (the judge is asked once for their lines, D-085)."""
 
 
 # Docstring fields (D-073): a reStructuredText field (``:param name:``, ``:returns:``,
@@ -890,7 +907,7 @@ def assess(
         if absent:
             absent_why = "not in the cited chunks: " + ", ".join(absent)
             return JudgeOutcome(False, True, absent_why, absent)
-        return JudgeOutcome(False, True, why)
+        return JudgeOutcome(False, True, why, unanchored=tuple(a.text for a in missing))
     if anchors:
         return JudgeOutcome(True)
     words = content_words(sentence.text, anchors)
@@ -964,10 +981,22 @@ class CodeJudge:
         self._seed = seed
 
     def __call__(self, items: Sequence[JudgeItem]) -> list[JudgeOutcome] | None:
+        return self._judge(items)
+
+    def follow_up(self, item: JudgeItem, unanchored: Sequence[str]) -> JudgeOutcome | None:
+        """Ask again about one sentence whose verdict's evidence lines lacked ``unanchored``
+        (names its cited chunks contain), naming them (D-085). The reply is decided by
+        :func:`assess` like any other; None when the call failed."""
+        outcomes = self._judge([item], unanchored)
+        return outcomes[0] if outcomes and len(outcomes) == 1 else None
+
+    def _judge(
+        self, items: Sequence[JudgeItem], unanchored: Sequence[str] = ()
+    ) -> list[JudgeOutcome] | None:
         if not items:
             return []
         chunks, statements = prepare(items)
-        messages = judge_messages(list(chunks.values()), statements)
+        messages = judge_messages(list(chunks.values()), statements, unanchored)
         reply = self._ask(messages, len(statements))
         if reply is None:
             return None

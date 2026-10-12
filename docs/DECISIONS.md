@@ -1540,3 +1540,32 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   - Claim replay (trustbook-g3, Qwen3.6): 0 of 41, 0 of 33 and 0 of 41 false claims passed (forced base, forced
     extra, real). True claims passed 20 of 21, 4 of 4 and 19 of 21; none lost (judge noise gave one more).
   - Gate 3 was re-run on this code (attempt 6).
+
+### D-085 The judge is asked once for the lines of names its evidence lacked
+- **Finding (Gate 3, attempt 6, run 1, ref-near-10):** "The attribute names `too_many_requests` and `too_many`
+  correspond to HTTP status code 429 on `requests.codes`." It cited the status-code table (`429: ("too_many_requests",
+  "too_many")`) and the module docstring, which shows `requests.codes`.
+  - The judge said "supported" but named only the table line, so the anchor `requests.codes` was not in its evidence
+    lines. The repeat alone did the same, so the sentence failed and the answer was refused (a false refusal).
+  - The D-082 prompt line ("give lines from each excerpt") was not enough. Probes reproduced it in 2 of 3 answers.
+- **Decision:** when the judge's verdict fails only because anchors that occur in the cited chunks are missing from
+  its evidence lines (`JudgeOutcome.unanchored`; no name missing from every cited chunk, no lookalike name), the
+  judge is asked once more about the sentence alone, naming those anchors: "Statement 1 uses `requests.codes`.
+  Earlier, the evidence lines given for it did not contain this. If the cited excerpts state it, include the lines
+  that do… If they do not, the statement is not supported."
+  - The new verdict is assessed by every rule as before (evidence inside the cited chunks, every anchor in the
+    evidence lines, and so on).
+  - For a rescue, it replaces the plain repeat alone. It is the second look a rescue needs, and it must accept.
+  - For a veto, it replaces the plain repeat alone, and the veto stands only if it vetoes again. Other vetoes are
+    repeated plainly, as before.
+  - Asked at most once per sentence and check; a judge without `follow_up` (test doubles) keeps the plain repeat.
+- **Why this is not looser:** nothing that the judge's evidence must contain changes. A sentence passes only on a
+  verdict whose evidence lines hold every anchor, exactly as if the judge had named them the first time (which
+  D-082 asks it to do). Names missing from every cited chunk are not followed up; they fail and go to the
+  regeneration feedback (D-074).
+- **Consequences:**
+  - Claim replay (trustbook-g3, Qwen3.6), unchanged from D-084: 0 of 41, 0 of 33 and 0 of 41 false claims passed
+    (forced base, forced extra, real). True claims passed 20 of 21, 4 of 4 and 19 of 21.
+  - Probe on ref-near-10 (3 answers, temperature 0): the follow-up added the docstring lines (c1 2-4) and the
+    sentence was verified. It costs one judge call only where the judge's evidence was incomplete.
+  - Gate 3 was re-run on this code (attempt 7).

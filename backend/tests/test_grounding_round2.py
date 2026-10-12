@@ -711,3 +711,70 @@ def test_layer_5_checks_code_names_written_without_backticks() -> None:
     # Prose words, plain acronyms and capitalised words are not code names.
     prose = "The Response object is truthy when the HTTP status is OK."
     assert verifier.check([(prose, [nonzero])]).checks[0].passed
+
+
+# --- D-085: the judge is asked once for the lines of names its evidence lacked ----------------
+
+NAMES_429 = "The name `too_many` corresponds to 429 on `requests.codes`."
+TABLE_ONLY = verdicts((1, True, [("c2", 84, 84)]))
+BOTH = verdicts((1, True, [("c1", 1, 1), ("c2", 84, 84)]))
+
+
+def codes_chunks() -> list[RetrievedChunk]:
+    return [
+        code("d", CODES_DOC, 1, 3, "src/requests/status_codes.py"),
+        code("t", TABLE, 84, 85, "src/requests/status_codes.py", "_codes"),
+    ]
+
+
+def judged(score: float, *replies: str) -> tuple[SentenceCheck, ScriptedChat]:
+    chat = ScriptedChat(*replies)
+    verifier = Verifier(
+        lambda pairs: [score for _ in pairs],
+        threshold=0.5,
+        files=SNAPSHOT,
+        code_judge=CodeJudge(lambda: chat),
+    )
+    return verifier.check([(NAMES_429, codes_chunks())]).checks[0], chat
+
+
+def test_names_in_the_cited_chunks_but_not_in_the_evidence_lines_are_unanchored() -> None:
+    # Gate 3 run ref-near-10: the judge named only the table line, not the docstring line that
+    # says `requests.codes`.
+    chunks, statements = prepare([(NAMES_429, codes_chunks())])
+    outcome = assess(statements[0], parse_verdicts(TABLE_ONLY)[1], chunks)
+    assert not outcome.accepted and outcome.vetoed
+    assert outcome.unanchored == ("requests.codes",) and outcome.absent == ()
+    assert assess(statements[0], parse_verdicts(BOTH)[1], chunks).accepted
+
+
+def test_a_rescue_lacking_a_names_lines_is_asked_once_naming_it() -> None:
+    check, chat = judged(0.1, TABLE_ONLY, BOTH)
+    assert check.passed and check.method == "code_judge"
+    assert len(chat.calls) == 2  # the follow-up is the second, alone look a rescue needs
+    follow_up = chat.calls[1]["messages"][-1]["content"]
+    assert "Statement 1 uses `requests.codes`." in follow_up
+    assert "If they do not, the statement is not supported." in follow_up
+    assert "Statement 1 uses" not in chat.calls[0]["messages"][-1]["content"]
+
+
+def test_a_follow_up_still_lacking_the_lines_fails_and_is_not_asked_again() -> None:
+    check, chat = judged(0.1, TABLE_ONLY, TABLE_ONLY)
+    assert not check.passed and len(chat.calls) == 2
+    assert check.judge_reason == "not in the evidence lines: requests.codes"
+    check, chat = judged(0.1, TABLE_ONLY, verdicts((1, False, [])))
+    assert not check.passed and check.judge_reason == "the judge found no support"
+
+
+def test_a_veto_only_for_missing_lines_is_asked_again_naming_them() -> None:
+    check, chat = judged(0.9, TABLE_ONLY, BOTH)
+    assert check.passed and not check.vetoed and check.method == "checker"
+    assert "Statement 1 uses `requests.codes`." in chat.calls[1]["messages"][-1]["content"]
+    check, chat = judged(0.9, TABLE_ONLY, TABLE_ONLY)
+    assert not check.passed and check.vetoed and len(chat.calls) == 2
+
+
+def test_a_veto_for_another_reason_is_asked_again_plainly() -> None:
+    check, chat = judged(0.9, verdicts((1, False, [])), verdicts((1, False, [])))
+    assert check.vetoed and len(chat.calls) == 2
+    assert "Statement 1 uses" not in chat.calls[1]["messages"][-1]["content"]

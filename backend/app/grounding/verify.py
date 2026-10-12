@@ -40,7 +40,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 from app.capabilities.bundled import ProviderRegistry
 from app.grounding.code_checks import (
@@ -65,6 +65,14 @@ ScorePairs = Callable[[Sequence[tuple[str, str]]], list[float]]
 
 JudgeCode = Callable[[Sequence[JudgeItem]], list[JudgeOutcome] | None]
 """The judge: one outcome per ``(sentence, cited chunks)``, None when the call failed."""
+
+
+@runtime_checkable
+class FollowsUp(Protocol):
+    """A judge that can ask again about one sentence, naming what its evidence lines lacked."""
+
+    def follow_up(self, item: JudgeItem, unanchored: Sequence[str]) -> JudgeOutcome | None: ...
+
 
 Method = Literal["checker", "code_judge"]
 
@@ -281,6 +289,16 @@ class Verifier:
         result = list(checks)
         rescued = vetoed = 0
         for n, (i, outcome) in enumerate(zip(pending, outcomes, strict=True)):
+            if i in rescue and not outcome.accepted and outcome.unanchored:
+                # The judge said "supported" but its lines lack names the cited chunks hold:
+                # asked once more, alone, naming them (D-085). Its verdict must pass every rule
+                # and is the second, alone look a rescue needs.
+                again_one = self._follow_up(items[n], outcome.unanchored)
+                if again_one is not None and again_one.accepted:
+                    result[i] = replace(result[i], passed=True, method="code_judge")
+                    rescued += 1
+                    continue
+                outcome = again_one or outcome
             if i in rescue and not outcome.accepted:
                 # The names the judge found in no cited chunk feed only the regeneration feedback
                 # (D-074, D-082); the sentence fails either way.
@@ -296,21 +314,26 @@ class Verifier:
                 result[i] = replace(result[i], passed=True, method="code_judge")
                 rescued += 1
             elif outcome.vetoed:
-                again = self._ask_judge([items[n]])
-                if again is None or len(again) != 1 or not again[0].vetoed:
+                # Asked again alone; a veto only for lines lacking names the cited chunks hold
+                # is asked naming them (D-085).
+                alone = self._follow_up(items[n], outcome.unanchored)
+                if alone is None:
+                    again = self._ask_judge([items[n]])
+                    alone = again[0] if again and len(again) == 1 else None
+                if alone is None or not alone.vetoed:
                     logger.info("Judge veto of sentence %d not repeated alone; kept", i + 1)
                     continue
-                missing = tuple(dict.fromkeys([*result[i].missing, *again[0].absent]))
+                missing = tuple(dict.fromkeys([*result[i].missing, *alone.absent]))
                 result[i] = replace(
                     result[i],
                     passed=False,
                     method=None,
                     vetoed=True,
                     missing=missing,
-                    judge_reason=again[0].reason,
+                    judge_reason=alone.reason,
                 )
                 vetoed += 1
-                logger.info("Judge vetoed sentence %d (%s)", i + 1, again[0].reason)
+                logger.info("Judge vetoed sentence %d (%s)", i + 1, alone.reason)
         logger.info(
             "Judge: %d of %d failed sentence(s) rescued, %d of %d confirmation(s) vetoed",
             rescued,
@@ -325,6 +348,18 @@ class Verifier:
         started = time.perf_counter()
         try:
             return self._code_judge(items)
+        finally:
+            self.judge_seconds += time.perf_counter() - started
+            self.judge_calls += 1
+
+    def _follow_up(self, item: JudgeItem, unanchored: Sequence[str]) -> JudgeOutcome | None:
+        """The judge's follow-up on ``item`` naming ``unanchored`` (D-085); None when there is
+        nothing to name, the judge cannot follow up, or the call failed."""
+        if not unanchored or not isinstance(self._code_judge, FollowsUp):
+            return None
+        started = time.perf_counter()
+        try:
+            return self._code_judge.follow_up(item, unanchored)
         finally:
             self.judge_seconds += time.perf_counter() - started
             self.judge_calls += 1
