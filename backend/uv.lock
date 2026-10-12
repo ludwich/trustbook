@@ -2135,7 +2135,11 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "httpx" }]
+requires-dist = [
+    { name = "httpx" },
+    { name = "pyyaml", marker = "extra == 'eval'" },
+]
+provides-extras = ["eval"]
 
 [package.metadata.requires-dev]
 dev = [

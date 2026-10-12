@@ -14,10 +14,9 @@ import httpx
 
 from trustbook_cli import __version__, commands
 from trustbook_cli.client import DEFAULT_BASE_URL, ApiError, TrustbookClient, TrustbookError
-from trustbook_cli.output import EXIT_ERROR, EXIT_OK, Output
+from trustbook_cli.output import EXIT_ERROR, EXIT_INTERRUPTED, EXIT_OK, Output
 from trustbook_cli.redact import Redactor, saved_secrets
 
-EXIT_INTERRUPTED = 130
 SEARCH_LIMIT = 10
 
 Handler = Callable[[commands.Context, argparse.Namespace], int]
@@ -60,7 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="trustbook",
         description="Trustbook from the command line: spaces, sources and grounded answers.",
-        epilog="Exit codes: 0 ok, 1 error, 2 refused (not in the sources), 3 a source failed.",
+        epilog="Exit codes: 0 ok, 1 error, 2 refused (not in the sources), 3 a source failed, "
+        "4 eval: a target was missed.",
         allow_abbrev=False,
     )
     parser.add_argument("--version", action="version", version=f"trustbook-cli {__version__}")

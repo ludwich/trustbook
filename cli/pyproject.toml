@@ -9,6 +9,12 @@ dependencies = [
     "httpx",
 ]
 
+[project.optional-dependencies]
+# `trustbook eval`: the eval runner reads YAML question and corpus files.
+eval = [
+    "pyyaml",
+]
+
 [project.scripts]
 trustbook = "trustbook_cli.main:main"
 

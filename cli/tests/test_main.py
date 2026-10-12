@@ -236,6 +236,32 @@ def test_eval_runner_lookup(tmp_path: Path) -> None:
     assert command[1:] == [str(runner), "--base-url=http://x", "--space", "S"]
 
 
+def test_eval_without_pyyaml_is_a_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(eval_cmd, "EVAL_MODULES", {"trustbook_no_such_module": "PyYAML"})
+    code, out, err = run(FakeApi(), "eval", "--space", "S", "--questions", "q.yaml", "--json")
+    doc = json.loads(out)
+    assert code == 1 and doc["schema"] == "trustbook.error/1"
+    assert 'pip install "trustbook-cli[eval]"' in doc["message"]
+    assert "PyYAML" in err and "Traceback" not in err
+    eval_cmd.check_eval_dependencies(lambda _name: object())  # installed: no error
+
+
+@pytest.mark.parametrize(
+    ("runner_code", "cli_code"),
+    [(0, 0), (1, 4), (2, 1), (130, 130), (-2, 130), (3, 1), (-9, 1)],
+)
+def test_eval_exit_codes_follow_the_cli_contract(runner_code: int, cli_code: int) -> None:
+    assert eval_cmd.cli_exit_code(runner_code) == cli_code
+
+
+def test_eval_maps_the_runners_exit_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = tmp_path / "runner.py"
+    runner.write_text("import sys\nprint('report')\nsys.exit(int(sys.argv[-1]))\n")
+    monkeypatch.setenv("TRUSTBOOK_EVAL_RUNNER", str(runner))
+    assert run(FakeApi(), "eval", "--questions", "q.yaml", "1")[:2] == (4, "report\n")
+    assert run(FakeApi(), "eval", "--questions", "q.yaml", "2")[0] == 1  # not "refused"
+
+
 def test_version() -> None:
     code, out, _err = run(FakeApi(), "--version")
     assert code == 0 and out.startswith("trustbook-cli ")

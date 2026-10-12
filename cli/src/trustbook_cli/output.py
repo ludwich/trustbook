@@ -14,6 +14,8 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_REFUSED = 2  # Trustbook refused to answer: not in the sources (or no sources)
 EXIT_FAILED_SOURCE = 3  # a source failed to read or index
+EXIT_TARGET_MISSED = 4  # `trustbook eval`: a --min-*/--max-* target was missed
+EXIT_INTERRUPTED = 130
 
 SCHEMA_ASK = "trustbook.ask/1"
 SCHEMA_SPACES = "trustbook.spaces/1"

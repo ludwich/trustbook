@@ -418,7 +418,7 @@ def test_eval_runs_the_runner_with_the_base_url(
     )
     monkeypatch.setenv("TRUSTBOOK_EVAL_RUNNER", str(runner))
     run = cli("eval", "--space", "Smoke", "--questions", "q.yaml", "--help")
-    assert run.code == 1  # the runner's own exit code
+    assert run.code == 4  # the runner's 1 (a target missed), mapped to the CLI's codes
     assert run.out.strip() == (
         "--base-url http://127.0.0.1:8484 --space Smoke --questions q.yaml --help"
     )

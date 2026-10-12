@@ -346,6 +346,7 @@ def gate_log(ctx: Context, args: argparse.Namespace) -> int:
 
 
 def eval_run(ctx: Context, args: argparse.Namespace) -> int:
+    eval_cmd.check_eval_dependencies()
     runner = eval_cmd.find_runner(ctx.env)
     return eval_cmd.run_eval(
         runner,

@@ -1,12 +1,28 @@
 """``trustbook eval``: run the evaluation runner (``eval/runner.py``) with the same base URL.
 
 The runner ships in the image (``/app/eval``) and in a checkout of the repository; a CLI installed
-with pip has no runner, so ``TRUSTBOOK_EVAL_RUNNER`` can point at one.
+with pip has no runner, so ``TRUSTBOOK_EVAL_RUNNER`` can point at one. The runner reads YAML, so
+outside the image it needs the ``eval`` extra (``pip install "trustbook-cli[eval]"``).
+
+The runner's exit codes are mapped to the CLI's (D-087), where 2 means "refused":
+
+======  ===================================================  ======
+Runner  Meaning                                              CLI
+======  ===================================================  ======
+0       report written, every target met                     0
+1       a ``--min-*``/``--max-*`` target missed, or a setup  4
+        job did not end as expected
+2       invalid input or the API unreachable                 1
+130     interrupted                                          130
+other   anything else (a crash, killed by a signal)          1
+======  ===================================================  ======
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -15,8 +31,43 @@ from pathlib import Path
 from typing import IO
 
 from trustbook_cli.client import TrustbookError
+from trustbook_cli.output import EXIT_ERROR, EXIT_INTERRUPTED, EXIT_OK, EXIT_TARGET_MISSED
 
 IMAGE_RUNNER = Path("/app/eval/runner.py")
+# eval/runner.py's exit codes.
+RUNNER_OK = 0
+RUNNER_TARGET_MISSED = 1
+RUNNER_INTERRUPTED = 130
+EVAL_MODULES = {"yaml": "PyYAML"}
+INSTALL_HINT = 'pip install "trustbook-cli[eval]"'
+
+
+def check_eval_dependencies(find_spec: Callable[[str], object | None] | None = None) -> None:
+    """Fail early, with an install hint, if a module the runner imports is missing.
+
+    The runner runs with this Python, so it sees the same packages.
+
+    :raises TrustbookError: PyYAML (the ``eval`` extra) is not installed.
+    """
+    find = find_spec or importlib.util.find_spec
+    missing = [package for module, package in EVAL_MODULES.items() if find(module) is None]
+    if missing:
+        raise TrustbookError(
+            f"`trustbook eval` needs {', '.join(missing)}, which is not installed. Install the "
+            f"CLI with its eval extra: {INSTALL_HINT} "
+            '(from a checkout of the repository: pip install "./cli[eval]").'
+        )
+
+
+def cli_exit_code(runner_code: int) -> int:
+    """The CLI's exit code for the runner's (the table in this module's docstring)."""
+    if runner_code == RUNNER_OK:
+        return EXIT_OK
+    if runner_code == RUNNER_TARGET_MISSED:
+        return EXIT_TARGET_MISSED
+    if runner_code in (RUNNER_INTERRUPTED, -signal.SIGINT):
+        return EXIT_INTERRUPTED
+    return EXIT_ERROR
 
 
 def find_runner(env: Mapping[str, str], cwd: Path | None = None) -> Path:
@@ -62,7 +113,7 @@ def run_eval(
     out: Callable[[str], None],
     err: Callable[[str], None],
 ) -> int:
-    """Run the runner with this Python; its exit code is returned unchanged.
+    """Run the runner with this Python and return its exit code, mapped by :func:`cli_exit_code`.
 
     Its stdout and stderr are passed on line by line through ``out`` and ``err`` (the CLI's
     redacting writers), so its progress still shows while it runs.
@@ -81,4 +132,4 @@ def run_eval(
         pump.start()
         _pump(proc.stdout, out)
         pump.join()
-        return proc.wait()
+        return cli_exit_code(proc.wait())
