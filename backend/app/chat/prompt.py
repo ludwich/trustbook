@@ -17,6 +17,7 @@ from typing import Any
 
 from app.capabilities.adapters.base import ChatMessage
 from app.chunking.headings import heading_syntax
+from app.chunking.transcript import clock
 from app.grounding.code_checks import unescape_markdown
 from app.retrieval.parents import OutlineBlock, outline_text
 from app.retrieval.service import RetrievedChunk
@@ -189,13 +190,6 @@ def labelled(chunks: Sequence[RetrievedChunk]) -> dict[str, RetrievedChunk]:
     return {label(i): chunk for i, chunk in enumerate(chunks)}
 
 
-def _seconds(value: object) -> str:
-    total = int(value) if isinstance(value, int | float) else 0
-    hours, rest = divmod(max(0, total), 3600)
-    minutes, seconds = divmod(rest, 60)
-    return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
-
-
 def describe_locator(locator: Mapping[str, object]) -> str:
     """Where a chunk is in its source, in a few words (``p. 3–4``, ``lines 12–58`` …)."""
     file = locator.get("file")
@@ -211,7 +205,7 @@ def describe_locator(locator: Mapping[str, object]) -> str:
             low, high = min(numbers), max(numbers)
             return f"p. {low}" if low == high else f"p. {low}–{high}"
     if "start_s" in locator:
-        span = f"{_seconds(locator.get('start_s'))}–{_seconds(locator.get('end_s'))}"
+        span = f"{clock(locator.get('start_s'))}–{clock(locator.get('end_s'))}"
         speaker = locator.get("speaker")
         return f"{span}, {speaker}" if isinstance(speaker, str) and speaker else span
     heading = locator.get("heading")
