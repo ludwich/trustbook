@@ -522,3 +522,55 @@ Other checks:
   that passes in one run can regenerate or come out partially verified in the next (ref-near-10: verified,
   partially verified, verified).
 - **Refresh estimates.** Refresh time estimates still assume a full re-read (incremental refresh is much faster).
+
+---
+
+## Gate 3b — CLI for agents and transcript windows
+
+**Image:** `ghcr.io/ludwich/trustbook:phase-3b-rc` · **PR:** `phase-3b → phase-3` (stacked on Gate 3; merged only after you pass Gate 3 and then 3b)
+
+**What it adds:**
+- `trustbook` CLI (`docs/cli.md`) in the image and pip-installable from the repo, plus a Claude Code skill
+  (`skills/trustbook/SKILL.md`). It uses only the HTTP API, so every answer goes through the same grounding and
+  refusal as the UI. JSON contract `trustbook.*/1`; exit codes 0 ok · 1 error · 2 refused · 3 failed source ·
+  4 eval target missed (D-087..D-090).
+- Transcript windows (D-091): for a transcript chunk among the top 3, up to ~2,000 tokens of what was said just
+  before and after it (timestamps, speakers when known), shown to the model as context it may not cite.
+  Citations stay on the chunk's own timestamps.
+
+### Setup
+1. In `.env` set `TRUSTBOOK_IMAGE_TAG=phase-3b-rc`, then `docker compose pull` and `docker compose up -d`.
+2. The `Smoke` space from Gate 3 can stay (no re-index needed: no chunker change).
+
+### Checklist (Windows PowerShell)
+
+| # | Check | How to verify | Expected |
+|---|---|---|---|
+| 1 | CLI in the image | `docker compose exec -T app trustbook --version` then `docker compose exec -T app trustbook spaces create CLI --json` | A version; one JSON line with `"schema":"trustbook.space/1"` |
+| 2 | Add a folder and wait | `docker compose exec -T app trustbook sources add folder trustbook-eval/requests --space CLI --wait --json` | Progress on stderr; JSON with the source `ready`; exit 0 (`$LASTEXITCODE`) |
+| 3 | Cited answer | `$r = docker compose exec -T app trustbook ask "How does requests encode the username and password for Basic auth?" --space CLI --json \| ConvertFrom-Json; $r.verdict; $r.citations \| Select-Object n,file,lines,text` | `verified` (or `partially_verified`); citations into `src/requests/auth.py` with lines and the cited text; `$LASTEXITCODE` 0. The conversation ("CLI: …") is in the UI with the same answer |
+| 4 | Refusal is exit 2 | `docker compose exec -T app trustbook ask "What is the capital of Mongolia?" --space CLI --json; $LASTEXITCODE` | `"verdict":"refused"`, `refusal.reason` `not_in_sources`, exit code 2 |
+| 5 | Failed source is exit 3 | `docker compose exec -T app trustbook sources add url https://example.invalid/page --space CLI --wait --json; $LASTEXITCODE` | The source ends `failed` with a plain-English reason; exit code 3 |
+| 6 | CLI on Windows, outside the container | `pip install "git+https://github.com/ludwich/trustbook@phase-3b#subdirectory=cli"` (Python ≥ 3.12), then `trustbook ask "What does should_strip_auth check?" --space Smoke --json \| ConvertFrom-Json` and `trustbook sources add folder C:\Users\<you>\trustbook-eval\requests --browse-root C:/Users/<you> --space CLI2 --json` (create `CLI2` first) | Same JSON as inside the container; the absolute Windows path is mapped to `trustbook-eval/requests` |
+| 7 | No keys in output | With a hosted endpoint configured (any API key), run `trustbook spaces list --json`, an `ask`, and a failing command (`trustbook ask x --space nope`) | The key never appears in stdout or stderr |
+| 8 | Claude Code skill | Copy `skills/trustbook/` to `%USERPROFILE%\.claude\skills\trustbook\`. In Claude Code (CLI on PATH, app running) ask: "Using Trustbook space Smoke: how does requests encode Basic auth credentials?" then "Using Trustbook space Smoke: what is the capital of Mongolia?" | First: an answer with Trustbook's citations (file and lines). Second: Claude says it is not in your sources; it does not retry, rephrase, switch space or answer from its own knowledge |
+| 9 | Transcript windows | Add a YouTube video with captions (or upload a short audio file) to a space; ask about something said in the middle. Open the citation | The citation's time span is that chunk's own (the viewer opens at it). The message's diagnostics (`Invoke-RestMethod http://localhost:8484/api/spaces/<id>/conversations/<cid>/messages`) show `window_tokens` > 0 and `windows` listing the neighbours |
+| 10 | Gate 3 still holds | The Gate 3 command (Gate 3 #1) on this image | Same criteria as Gate 3 |
+
+### Builder results (dev workbench, before handing over)
+
+| Check | Result |
+|---|---|
+| Quality bar: backend (ruff, mypy --strict, pytest), eval, `cli/` (ruff, mypy --strict, 54 tests), frontend | pass |
+| Golden prompts: the eval corpus (no transcripts) gives byte-identical answer prompts | pass (`test_prompt_golden.py`) |
+| Grounding isolation: a fact only in a transcript window, citing the child, fails; no window text reaches the checker, judge or layer 5; citations keep the child's own times | pass (`test_grounding_isolation.py`, `test_api_grounding.py`) |
+| CLI end-to-end on a local build of this branch (`cli/e2e/cli_e2e.sh`, also run by the release job before publishing): space, paste + `--wait`, cited answer (exit 0), refusal (exit 2), delete | pass |
+| `sources add url https://example.invalid/page --wait` | source `failed` ("Trustbook could not reach this site."), exit 3 |
+| Gate 3 command (run 1 settings: Qwen3.6-35B-A3B, temperature 0, seed 42) on this branch's image | precision 100% (38/38), refusals 23/23, false refusals 0/22 (code 0/13), p95 48.6 s, cited ranges 26/26; window tokens 0 (no transcripts in the corpus); memory peak 4.58 GiB |
+
+### Known limits
+- No reader sets speakers yet (speech-to-text and YouTube captions have none), so window lines show only times
+  until diarization lands (backlog).
+- Grounding does not check times written in transcript prose: the model is told not to state a time only the
+  window shows, but a wrong time inside a sentence is not caught (D-091).
+- The CLI starts a new conversation per `ask` (no follow-ups yet).

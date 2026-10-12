@@ -99,7 +99,15 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] Gate 3 attempt 8 passes; GATES.md Gate 3 results + approval list; `phase-3-rc` from the final commit; PR #4 left open
 - [x] `docker image prune -f` and test containers removed at the end of the overnight run (2026-10-12)
 
-## Phase 3b (branch `phase-3b`, after the Gate 3 runs pass): CLI for agents + transcript windows
+## Phase 3b (branch `phase-3b`, stacked on phase-3): CLI for agents + transcript windows — built, Gate 3b waiting
+- [x] CLI package `cli/` (D-087), JSON contract + exit codes (D-088), folder paths (D-089), skill (D-090),
+  review fixes (SSE line splitting, eval extra and exit codes, no tracebacks, partial adds reported)
+- [x] Transcript windows, non-citable (D-091); golden prompts unchanged for the eval corpus
+- [x] Release: sub-phase images and the CLI end-to-end test (D-092); CLI installed into the app venv
+- [x] Quality bar (backend, eval, cli, frontend) green; local image: CLI e2e PASS, failed URL → exit 3
+- [ ] CI + `phase-3b-rc`; PR phase-3b → phase-3; Gate 3b in GATES.md (checklist written)
+
+### Original Phase 3b scope
 - `trustbook` CLI (in the image: `docker compose exec app trustbook …`; pip-installable from the repo), talks to the HTTP API (default http://127.0.0.1:8484, `--base-url`), reuses the eval runner's client
 - Commands: spaces list|create|delete; sources add folder|url|file|paste|search; sources list|status|refresh|remove; ask "<q>" --space X; queue; gate-log; eval
 - `--json` everywhere with a stable documented schema (ask: answer, verdict, citations with source/file/lines/text, removed statements); exit codes 0 ok · 2 refused · 3 failed source · 1 error; `--wait` on adds (progress on stderr)
