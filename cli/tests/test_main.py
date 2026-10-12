@@ -183,6 +183,55 @@ def test_unreachable_api() -> None:
     assert err.startswith("trustbook: error: ")
 
 
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_bad_base_url_is_an_error_document_not_a_traceback(json_mode: bool) -> None:
+    out, err = io.StringIO(), io.StringIO()
+    argv = ["--base-url", "http://[::1", "spaces", "list"] + (["--json"] if json_mode else [])
+    code = main(argv, stdout=out, stderr=err)
+    assert code == 1
+    assert "Traceback" not in err.getvalue()
+    assert err.getvalue().startswith("trustbook: error: InvalidURL: ")
+    if json_mode:
+        doc = json.loads(out.getvalue())
+        assert doc["schema"] == "trustbook.error/1" and doc["message"].startswith("InvalidURL: ")
+    else:
+        assert out.getvalue() == ""
+
+
+def test_unexpected_errors_are_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_args: Any) -> int:
+        raise RuntimeError("token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 leaked")
+
+    monkeypatch.setattr("trustbook_cli.commands.spaces_list", boom)
+    for extra in (["--json"], []):
+        code, out, err = run(FakeApi(), "spaces", "list", *extra)
+        assert code == 1 and "abcdefghijklmnop" not in out + err and "Traceback" not in err
+        assert "RuntimeError: token" in err
+
+
+def test_add_url_failing_part_way_lists_what_was_created() -> None:
+    def api(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/spaces":
+            return httpx.Response(200, json=[SPACE])
+        url = json.loads(request.content)["url"]
+        if url == "https://bad.test":
+            return httpx.Response(400, json={"detail": "Not a web address."})
+        return httpx.Response(201, json={**SOURCE, "id": "u1", "title": url, "status": "queued"})
+
+    argv = ("sources", "add", "url", "https://a.test", "https://bad.test", "https://c.test")
+    code, out, err = run(api, *argv, "--space", "Acme", "--json")
+    doc = json.loads(out)
+    assert code == 1 and doc["schema"] == "trustbook.error/1" and doc["http_status"] == 400
+    assert [(s["id"], s["title"], s["status"]) for s in doc["created"]] == [
+        ("u1", "https://a.test", "queued")
+    ]
+    assert "already added before the error: https://a.test (u1)" in err
+    code, out, _err = run(
+        api, "sources", "add", "url", "https://bad.test", "--space", "Acme", "--json"
+    )
+    assert code == 1 and "created" not in json.loads(out)
+
+
 def test_text_output_survives_a_narrow_console_encoding() -> None:
     sentences = [
         {"text": "größe returns 1 → ok.", "citations": [cit(1, "k1", file="pump.py", start_line=9)]}

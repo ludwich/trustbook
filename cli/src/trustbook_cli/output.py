@@ -81,9 +81,30 @@ class Output:
         """Progress and hints (stderr, both modes)."""
         self._write(self.stderr, text if text.endswith("\n") else text + "\n")
 
-    def error(self, message: str, http_status: int | None = None) -> None:
-        """An error: a ``trustbook.error/1`` document on stdout (JSON mode), always on stderr."""
+    def error(
+        self,
+        message: str,
+        http_status: int | None = None,
+        *,
+        created: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """An error: a ``trustbook.error/1`` document on stdout (JSON mode), always on stderr.
+
+        ``created``: sources added before the error (``sources add`` with several items); the
+        document gets a ``created`` list and stderr names them, so nobody adds them twice.
+        """
         if self.json_mode:
-            doc = {"schema": SCHEMA_ERROR, "message": message, "http_status": http_status}
+            doc: dict[str, Any] = {
+                "schema": SCHEMA_ERROR,
+                "message": message,
+                "http_status": http_status,
+            }
+            if created:
+                doc["created"] = created
             self.result(doc, message)
         self.note(f"trustbook: error: {message}")
+        if created:
+            names = ", ".join(
+                f"{s.get('title') or s.get('origin')} ({s.get('id')})" for s in created
+            )
+            self.note(f"trustbook: already added before the error: {names}")

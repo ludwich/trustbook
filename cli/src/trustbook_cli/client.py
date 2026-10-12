@@ -23,7 +23,13 @@ DEFAULT_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 
 
 class TrustbookError(Exception):
-    """Invalid input or an unusable API answer."""
+    """Invalid input or an unusable API answer.
+
+    ``created``: sources a ``sources add`` with several items had already added when it failed
+    (reported in the error document so they are not added again); None otherwise.
+    """
+
+    created: list[dict[str, Any]] | None = None
 
 
 class ApiError(TrustbookError):

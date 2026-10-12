@@ -234,7 +234,14 @@ def add_folder(ctx: Context, args: argparse.Namespace) -> int:
 
 def add_url(ctx: Context, args: argparse.Namespace) -> int:
     space = _space(ctx, args)
-    created = [ctx.client.add_url(str(space["id"]), url) for url in args.urls]
+    created: list[dict[str, Any]] = []
+    try:
+        for url in args.urls:  # one request per URL: a later one can fail after others were added
+            created.append(ctx.client.add_url(str(space["id"]), url))
+    except TrustbookError as exc:
+        if created:
+            exc.created = [source_out(s) for s in created]
+        raise
     return _report_sources(ctx, space, _finish(ctx, args, space, created))
 
 

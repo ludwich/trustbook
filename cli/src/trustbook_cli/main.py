@@ -195,21 +195,26 @@ def main(
         return exc.code if isinstance(exc.code, int) else EXIT_OK
     out.json_mode = bool(args.json)
     base_url = args.base_url or os.environ.get("TRUSTBOOK_URL") or DEFAULT_BASE_URL
-    api = TrustbookClient(base_url, client=client)
-    ctx = commands.Context(
-        client=api, out=out, env=os.environ, stdin=stdin or sys.stdin, sleep=sleep,
-        base_url=base_url,
-    )  # fmt: skip
+    api: TrustbookClient | None = None
     try:
+        api = TrustbookClient(base_url, client=client)  # a bad --base-url fails here
+        ctx = commands.Context(
+            client=api, out=out, env=os.environ, stdin=stdin or sys.stdin, sleep=sleep,
+            base_url=base_url,
+        )  # fmt: skip
         code: int = args.handler(ctx, args)
         return code
     except ApiError as exc:
-        out.error(str(exc), exc.http_status)
+        out.error(str(exc), exc.http_status, created=exc.created)
     except TrustbookError as exc:
-        out.error(str(exc))
+        out.error(str(exc), created=exc.created)
     except KeyboardInterrupt:
         out.error("interrupted")
         return EXIT_INTERRUPTED
+    except Exception as exc:  # never a raw traceback: one (redacted) error document, exit 1
+        out.error(f"{type(exc).__name__}: {exc}")
     finally:
-        api.close()
+        if api is not None:
+            with contextlib.suppress(Exception):
+                api.close()
     return EXIT_ERROR
