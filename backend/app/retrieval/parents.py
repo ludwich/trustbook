@@ -16,6 +16,12 @@ of parent context:
   its member names. It holds no values, no line numbers and no chunk labels. It is an
   :class:`OutlineBlock`, never a chunk, so nothing in it can be cited, become a premise, a judge
   item or a layer 5 anchor: a fact only the outline shows cannot verify (it fails closed).
+- **Transcript windows** (D-090), NOT citable: for each of the first :data:`EXPAND_TOP` ranked
+  context chunks of a transcript, the neighbouring chunks of its source (by ordinal: -1, +1, -2,
+  +2), with their times and speakers, as one :class:`TranscriptWindow`. The child itself and any
+  neighbour that is already a numbered chunk are only named by their times, never repeated. A
+  window is never a chunk: citations go to the child's own times, and a fact only a window shows
+  cannot verify (it fails closed).
 
 Everything is read from ``space.db`` rows (the parent keys and structure records stored at chunk
 time); nothing is fetched. Any error gives no expansion (the caller logs it).
@@ -27,13 +33,15 @@ import hashlib
 import math
 import re
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 from sqlalchemy import Engine
 
 from app.chunking.header import split_header
 from app.chunking.structure import Import, Structure, key_file, module_key
+from app.chunking.transcript import clock
+from app.grounding.code_checks import unescape_markdown
 from app.retrieval.definitions import code_file
 from app.retrieval.fusion import CONTEXT_TOKENS
 from app.retrieval.store import ChunkRow, chunks_at_ordinals
@@ -46,6 +54,10 @@ EXPANSION_TOKENS = 900  # promoted tokens per answer
 OUTLINE_BLOCK_TOKENS = 120  # outline tokens per file
 OUTLINE_TOKENS = 300  # outline tokens per prompt
 OUTLINE_NAMES = 24  # names on one outline line (module names, class members)
+WINDOW_TOKENS = 2_000  # one transcript window's span (the child included), chunk tokens
+WINDOW_ANSWER_TOKENS = 2_400  # prompt tokens all transcript windows of an answer add
+WINDOW_REACH = 2  # neighbours on each side of a transcript child
+WINDOW_PLACEHOLDER = "(numbered chunk above)"
 
 ExpansionKind = Literal["section_previous", "class_head"]
 SECTION_PREVIOUS: ExpansionKind = "section_previous"
@@ -117,13 +129,70 @@ class Promotion:
 
 
 @dataclass(frozen=True)
+class WindowPart:
+    """One line of a transcript window: a chunk of the transcript, by its times and speaker.
+
+    ``text`` None: the chunk is a numbered chunk of the prompt (the child or a numbered
+    neighbour), named by its times only. ``tokens``: what the line adds to the prompt.
+    """
+
+    chunk_id: str
+    ordinal: int
+    start_s: object
+    end_s: object
+    speaker: str | None
+    text: str | None
+    tokens: int
+
+    def label(self) -> str:
+        """``[0:12–2:10] Anna:`` (without the speaker when it has none)."""
+        span = f"[{clock(self.start_s)}–{clock(self.end_s)}]"
+        return f"{span} {self.speaker}:" if self.speaker else span
+
+    def render(self) -> str:
+        body = WINDOW_PLACEHOLDER if self.text is None else self.text
+        return f"{self.label()} {body}"
+
+
+@dataclass(frozen=True)
+class TranscriptWindow:
+    """What was said around the numbered transcript chunks of one source, in time order.
+
+    Never a chunk: no label, never cited, never a premise, judge item or anchor (D-090).
+    ``tokens``: what the window adds to the prompt (:func:`outline_tokens` of its title and
+    labels, plus each shown neighbour's stored token count).
+    """
+
+    source_id: str
+    title: str
+    parts: tuple[WindowPart, ...]
+    tokens: int
+
+    @property
+    def chunk_ids(self) -> tuple[str, ...]:
+        """The neighbours whose text the window shows, in time order."""
+        return tuple(p.chunk_id for p in self.parts if p.text is not None)
+
+    @property
+    def numbered_ids(self) -> tuple[str, ...]:
+        """The numbered chunks the window names by their times only."""
+        return tuple(p.chunk_id for p in self.parts if p.text is None)
+
+    def render(self) -> str:
+        return "\n".join([self.title, *(f"  {part.render()}" for part in self.parts)])
+
+
+@dataclass(frozen=True)
 class Expansion:
-    """What :func:`expand` adds: promoted chunks (in child rank order) and the outline."""
+    """What :func:`expand` adds: promoted chunks (in child rank order), the outline and the
+    transcript windows."""
 
     promoted: tuple[Promotion, ...] = ()
     outline: tuple[OutlineBlock, ...] = ()
     promoted_tokens: int = 0
     outline_tokens: int = 0
+    windows: tuple[TranscriptWindow, ...] = ()
+    window_tokens: int = 0
 
 
 FileRowsLookup = Callable[[str, str], Sequence[ChunkRow]]
@@ -635,6 +704,158 @@ def outline(
     return blocks
 
 
+# --- transcript windows (D-090) ------------------------------------------------------------
+
+
+def window_text(windows: Sequence[TranscriptWindow]) -> str:
+    """The windows as the prompt shows them (without their heading), separated by blank lines."""
+    return "\n\n".join(window.render() for window in windows)
+
+
+def window_fingerprint(windows: Sequence[TranscriptWindow]) -> str | None:
+    """A short hash of the window text (None without a window)."""
+    if not windows:
+        return None
+    return hashlib.sha256(window_text(windows).encode("utf-8")).hexdigest()[:16]
+
+
+def _is_transcript(locator: dict[str, object]) -> bool:
+    return "start_s" in locator
+
+
+def transcript_children(chunks: Sequence[Child], *, top: int = EXPAND_TOP) -> list[Child]:
+    """The context chunks that get a transcript window: among the first ``top`` ranked context
+    chunks (the same slice as :func:`children`, never an extra or a promotion), those of a
+    transcript with a known position in their source."""
+    ranked = [c for c in chunks if c.definition_of is None][:top]
+    return [c for c in ranked if _is_transcript(c.locator) and c.ordinal >= 0]
+
+
+def _speaker(locator: dict[str, object]) -> str | None:
+    speaker = locator.get("speaker")
+    return " ".join(speaker.split()) or None if isinstance(speaker, str) else None
+
+
+def _part(
+    chunk_id: str, ordinal: int, locator: dict[str, object], text: str | None, tokens: int
+) -> WindowPart:
+    """A window line; its ``tokens`` are its label (or placeholder) plus ``tokens`` of text."""
+    shown = None if text is None else " ".join(unescape_markdown(text).split())
+    # A numbered chunk's line names only its times: its header carries the speaker.
+    speaker = None if shown is None else _speaker(locator)
+    bare = WindowPart(
+        chunk_id, ordinal, locator.get("start_s"), locator.get("end_s"), speaker, None, 0
+    )
+    if shown is None:
+        return replace(bare, tokens=outline_tokens(f"  {bare.render()}\n"))
+    cost = outline_tokens(f"  {bare.label()} \n") + max(0, tokens)
+    return replace(bare, text=shown, tokens=cost)
+
+
+def _title(title: str) -> str:
+    return " ".join(title.split()) or "Untitled"
+
+
+def _window_tokens(title: str, parts: Iterable[WindowPart]) -> int:
+    return outline_tokens(f"{title}\n") + sum(p.tokens for p in parts)
+
+
+def _merged(windows: Sequence[TranscriptWindow]) -> list[TranscriptWindow]:
+    """Windows of one source whose ordinals overlap or touch, joined into one block in time
+    order (each chunk once); blocks keep the order of their first window."""
+    merged: list[TranscriptWindow] = []
+    for window in windows:
+        low = min(p.ordinal for p in window.parts)
+        high = max(p.ordinal for p in window.parts)
+        for i, block in enumerate(merged):
+            b_low = min(p.ordinal for p in block.parts)
+            b_high = max(p.ordinal for p in block.parts)
+            if block.source_id == window.source_id and low <= b_high + 1 and b_low <= high + 1:
+                parts = {p.chunk_id: p for p in (*block.parts, *window.parts)}
+                ordered = tuple(sorted(parts.values(), key=lambda p: p.ordinal))
+                merged[i] = TranscriptWindow(
+                    block.source_id, block.title, ordered, _window_tokens(block.title, ordered)
+                )
+                break
+        else:
+            merged.append(window)
+    # A join can make two blocks touch: join again until nothing changes.
+    return merged if len(merged) == len(windows) else _merged(merged)
+
+
+def transcript_windows(
+    engine: Engine,
+    context: Sequence[Child | ChunkRow],
+    kids: Sequence[Child],
+    *,
+    allowed_source_ids: Iterable[str],
+    max_tokens: int = CONTEXT_TOKENS,
+) -> list[TranscriptWindow]:
+    """One window per transcript child (``kids``, best first), merged per source.
+
+    ``context``: every numbered chunk of the prompt (the context chunks and the promotions).
+    Neighbours are added whole, in the order -1, +1, -2, +2; a direction stops at the source's
+    end or at the first neighbour that does not fit, so a window never has a gap. A neighbour
+    fits when the window's span stays within :data:`WINDOW_TOKENS` (stored token counts, the
+    child included), all windows add at most :data:`WINDOW_ANSWER_TOKENS` to the prompt, and the
+    prompt stays within ``max_tokens`` (:func:`fit_free`: a window never displaces a chunk). A
+    neighbour that is a numbered chunk is named by its times only, and one an earlier window
+    shows costs nothing. A child without a neighbour to show gets no window.
+    """
+    allowed = list(allowed_source_ids)
+    numbered = {c.chunk_id for c in context}
+    used = sum(max(0, c.token_count) for c in context)
+    spent = 0
+    shown: set[str] = set()
+    windows: list[TranscriptWindow] = []
+    for child in kids:
+        o = child.ordinal
+        offsets = [d for step in range(1, WINDOW_REACH + 1) for d in (-step, step)]
+        rows = chunks_at_ordinals(engine, child.source_id, [o + d for d in offsets], allowed)
+        title = _title(next(iter(rows.values())).source_title) if rows else ""
+        own = _part(child.chunk_id, o, child.locator, None, 0)
+        base = _window_tokens(title, [own])
+        span = max(0, child.token_count)
+        parts: dict[int, WindowPart] = {o: own}
+        cost = base  # what this window adds (title and the child's line included)
+        stopped: set[int] = set()
+        for d in offsets:
+            sign = 1 if d > 0 else -1
+            row = rows.get(o + d)
+            if sign in stopped:
+                continue
+            if row is None or not _is_transcript(row.locator):
+                stopped.add(sign)
+                continue
+            if row.chunk_id in numbered:
+                part = _part(row.chunk_id, row.ordinal, row.locator, None, 0)
+            else:
+                part = _part(row.chunk_id, row.ordinal, row.locator, row.text, row.token_count)
+            extra = 0 if row.chunk_id in shown else part.tokens
+            size = max(0, row.token_count)
+            if (
+                span + size > WINDOW_TOKENS
+                or spent + cost + extra > WINDOW_ANSWER_TOKENS
+                or not fit_free(used, cost + extra, max_tokens=max_tokens)
+            ):
+                stopped.add(sign)
+                continue
+            parts[row.ordinal] = part
+            span += size
+            cost += extra
+        if not any(p.text is not None for p in parts.values()):
+            continue
+        ordered = tuple(parts[k] for k in sorted(parts))
+        windows.append(TranscriptWindow(child.source_id, title, ordered, cost))
+        shown.update(p.chunk_id for p in ordered if p.text is not None)
+        spent += cost
+        used += cost
+    return [
+        TranscriptWindow(w.source_id, w.title, w.parts, _window_tokens(w.title, w.parts))
+        for w in _merged(windows)
+    ]
+
+
 def expand(
     engine: Engine,
     chunks: Sequence[Child],
@@ -645,31 +866,45 @@ def expand(
     outline_on: bool = True,
     max_tokens: int = CONTEXT_TOKENS,
 ) -> Expansion:
-    """Promotions and the outline for the context ``chunks`` (see the module docstring).
+    """Promotions, the outline and the transcript windows for the context ``chunks`` (see the
+    module docstring).
 
     ``ranked``: the reranked candidates; a promoted chunk that was ranked keeps its score, and a
     class head over :data:`HEAD_UNGATED_TOKENS` is promoted only when it was ranked.
     """
     expanded = children(chunks)
-    if not expanded:
-        return Expansion()
-    scores = {c.chunk_id: c.score for c in ranked}
-    promoted = promotions(
-        engine,
-        chunks,
-        expanded,
-        scores,
-        file_rows=file_rows,
-        allowed_source_ids=allowed_source_ids,
-        max_tokens=max_tokens,
-    )
+    promoted: list[Promotion] = []
     blocks: list[OutlineBlock] = []
-    if outline_on:
-        context: list[Child | ChunkRow] = [*chunks, *(p.row for p in promoted)]
-        blocks = outline(expanded, context, file_rows=file_rows)
+    if expanded:
+        scores = {c.chunk_id: c.score for c in ranked}
+        promoted = promotions(
+            engine,
+            chunks,
+            expanded,
+            scores,
+            file_rows=file_rows,
+            allowed_source_ids=allowed_source_ids,
+            max_tokens=max_tokens,
+        )
+        if outline_on:
+            context: list[Child | ChunkRow] = [*chunks, *(p.row for p in promoted)]
+            blocks = outline(expanded, context, file_rows=file_rows)
+    windows: list[TranscriptWindow] = []
+    kids = transcript_children(chunks)
+    if kids:
+        # After the promotions, which keep first claim on the free budget.
+        windows = transcript_windows(
+            engine,
+            [*chunks, *(p.row for p in promoted)],
+            kids,
+            allowed_source_ids=allowed_source_ids,
+            max_tokens=max_tokens,
+        )
     return Expansion(
         promoted=tuple(promoted),
         outline=tuple(blocks),
         promoted_tokens=sum(max(0, p.row.token_count) for p in promoted),
         outline_tokens=sum(b.tokens for b in blocks),
+        windows=tuple(windows),
+        window_tokens=sum(w.tokens for w in windows),
     )
