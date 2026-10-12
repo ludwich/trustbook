@@ -527,7 +527,7 @@ Other checks:
 
 ## Gate 3b — CLI for agents and transcript windows
 
-**Image:** `ghcr.io/ludwich/trustbook:phase-3b-rc` · **PR:** `phase-3b → phase-3` (stacked on Gate 3; merged only after you pass Gate 3 and then 3b)
+**Image:** `ghcr.io/ludwich/trustbook:phase-3b-rc` · **PR:** `phase-3b → main` (#5; rebased onto `main` after Gate 3 passed)
 
 **What it adds:**
 - `trustbook` CLI (`docs/cli.md`) in the image and pip-installable from the repo, plus a Claude Code skill
