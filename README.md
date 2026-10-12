@@ -20,10 +20,10 @@ You need Docker (or Podman) with Compose, about 12 GB of free disk space and at 
 the app container (Docker Desktop: Settings → Resources). With Podman, use podman-compose 1.1 or newer (or Podman's docker-compose provider).
 
 > **Memory.** Trustbook needs the most memory while it indexes: the embedding, reranking and answer-checking
-> models and the document parser all run inside the container. In the Gate 3 run (indexing the `requests`
-> repository and its documentation, then answering 45 questions) the container peaked at **5.4 GB** and
-> typically used about 4.4 GB. If the container has less, indexing can be killed part-way and the source shows
-> as failed.
+> models and the document parser all run inside the container. In the Gate 3 runs the container indexed the
+> `requests` repository and its documentation, then answered 45 questions. It peaked at **5.4–7.1 GB** (it varies
+> from run to run) and typically used about 4.5 GB. Give it at least 8 GB; **10 GB is recommended**. With less,
+> indexing can be killed part-way and the source shows as failed.
 >
 > - **Docker Desktop on Windows** usually runs on WSL 2. There the memory limit is not under Settings →
 >   Resources; it is set in `%UserProfile%\.wslconfig`. WSL 2 gets half of your RAM by default. To give it

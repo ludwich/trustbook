@@ -25,6 +25,11 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
    Attempt 4 (p3i, 36d17db): runs 1, 2 and real-use PASS (code false refusals 0/1/0, precision 100%, p95 42.7/42.6/44.6 s);
    Qwen3.8 reference 79.4% precision, p95 84.5 s. Run 2's one refusal was a double-backtick parse bug, fixed in D-083,
    so the final runs are on the next image (p3j).
+   Attempt 5 (p3j): pass; reference code-02 showed layer 5 skipped unbackticked names → D-084. Attempt 6 (p3k): pass
+   (ref-near-10 the one code FR) → D-085. Attempt 7 (p3l): pass, 0 FR; reference showed the citation choice dropping
+   the `__bool__` chunk → D-086. **Attempt 8 (p3m, 9708373): runs 1 / 2 / real-use all pass, 0 false refusals,
+   precision 100%, p95 48.6 / 47.8 / 50.6 s — final, in GATES.md.** Stacked work started: phase-3b (CLI, skill,
+   transcript windows, D-087..D-092) and phase-4 (Ideation backend D-093..D-101, frontend in progress).
 4. Stop when Phase 4 is done or blocked on a decision only Ludwig can make. Summary at the top of docs/GATES.md:
    what waits for him (Gate 3 → 3b → 4) and how to test each.
 
@@ -50,8 +55,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
 ## 3b. Gate 3 failure fixes (Ludwig, 2026-10-11)
 - [x] F1 BLOCKING: bare `raise` in ingest handler `finally` failed every successful job (fixed `2a4924a`, job-status test)
-- [~] F2 Wrong citations from function-level chunks (code-02, docs-04, ref-near-05): fix chunk boundaries/retrieval; never widen the key — list believed-correct citations in GATES.md for approval
-- [~] F3 code-05 answers again; split oversized table chunks (ref-near-10); ref-near-07
+- [x] F2 Wrong citations from function-level chunks (code-02, docs-04, ref-near-05): fix chunk boundaries/retrieval; never widen the key — list believed-correct citations in GATES.md for approval
+- [x] F3 code-05 answers again; split oversized table chunks (ref-near-10); ref-near-07
   - [x] chunking (D-056): data literals split by element into named ~150-token parts; `locator.kind`;
     document files chunked on whole lines (line locators claim only lines the chunk holds); `CHUNKER_VERSION` 4
   - [x] retrieval (D-059–062): content-ordered ties, callee definitions, agreement guard; chat (D-063/064): judge confirms checker passes
@@ -73,22 +78,23 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
       over 45 questions; seeded on/off run of the changed questions (D-077 integration check)
     - [x] D-069 claim replay keeps false passes at 0 (also outline-only and promoted-sibling claims); D-078 parity
       numbers filled
-- [~] Latency: judge calls per answer in diagnostics + eval report (D-080, done in slice B); judge calls/answer and
-  p95 in GATES.md (round 2b table added, to fill); p95 ≤ 60 s with Qwen3.6 (strict judge now also runs on prose
+- [x] Latency: judge calls per answer in diagnostics + eval report (D-080, done in slice B); judge calls/answer and
+  p95 in GATES.md (filled from attempt 8); p95 ≤ 60 s with Qwen3.6 (strict judge now also runs on prose
   and borderline passes): 3 Qwen3.6 runs (one real-use) + 1 Qwen3.8-27B run
-- [ ] F4 Run the full gate command 3× on the workbench; all 3 must pass; report all 3 in GATES.md
+- [x] F4 Run the full gate command 3× on the workbench; all 3 must pass; report all 3 in GATES.md
 - [x] F5 Eval runs use temperature 0 + fixed seed (per-request generation override used only by the runner; SPEC's 0.2 default unchanged)
-- [~] F6 Runner `--chat-endpoint` / `--chat-model` overrides (done); model name in the report header (done); gate run with a stronger reference model (Qwen3.8-27B-UD-Q4_K_XL, chosen by Ludwig) alongside Qwen3.6, both in GATES.md
+- [x] F6 Runner `--chat-endpoint` / `--chat-model` overrides (done); model name in the report header (done); gate run with a stronger reference model (Qwen3.8-27B-UD-Q4_K_XL, chosen by Ludwig) alongside Qwen3.6, both in GATES.md
 
-- [~] A (runner `--app-default` done) One of the 3 workbench gate runs uses the app default (temperature 0.2, no seed), labelled "real-use" in GATES.md
+- [x] A (runner `--app-default` done) One of the 3 workbench gate runs uses the app default (temperature 0.2, no seed), labelled "real-use" in GATES.md
 - [x] B e2e + eval assert JOB status (done/failed) and the Queue UI state for every source type (paste, upload, URL, YouTube, search, folder); URL/YouTube success opt-in via `E2E_INTERNET=1` (D-067)
 - [x] C Calibration version bumped now (v6) and tied to CHUNKER_VERSION + embedding revision so chunking/embedding changes always re-calibrate (D-057, `Calibration.pipeline`)
-- [ ] D docs/MODELS.md (per-model Gate 3 results + recommended minimum chat model); README memory note (Docker Desktop/WSL memory, Trustbook's use while indexing)
+- [x] D docs/MODELS.md (per-model Gate 3 results + recommended minimum chat model); README memory note (Docker Desktop/WSL memory, Trustbook's use while indexing)
 
 ## 4. Gate
 - [x] CI green, PR `phase-3 → main` (#4), `:phase-3-rc` published from `92a8b12` (e2e gate passes)
 - [x] GATES.md Gate 3 checklist incl. per-category false refusals and p95 latency
-- [ ] `docker image prune -f`; stop and summarise (Gate 3 attempt 1 failed; fixing)
+- [x] Gate 3 attempt 8 passes; GATES.md Gate 3 results + approval list; `phase-3-rc` from the final commit; PR #4 left open
+- [ ] `docker image prune -f` at the end of the overnight run
 
 ## Phase 3b (branch `phase-3b`, after the Gate 3 runs pass): CLI for agents + transcript windows
 - `trustbook` CLI (in the image: `docker compose exec app trustbook …`; pip-installable from the repo), talks to the HTTP API (default http://127.0.0.1:8484, `--base-url`), reuses the eval runner's client

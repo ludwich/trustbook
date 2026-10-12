@@ -254,8 +254,208 @@ Other checks:
 
 Undo #5 with `git -C …/requests reset --hard HEAD~1`.
 
-### Builder results (dev workbench, 8 CPUs, before handing over)
+### Builder results: final runs (attempt 8, code `9708373`, image `phase-3-rc`)
 
+**Setup:**
+- **Machine:** dev workbench, 8 CPUs, no GPU. The chat model ran on a llama-server on the LAN, one model loaded at
+  a time.
+- **Data:** a fresh `Smoke` space, indexed by the gate command's `--setup` (`requests` at 6e83187 plus the four doc
+  pages; 5/5 ingest jobs ended as expected).
+- **Questions:** 45, made of 15 smoke questions and the 30-question refusal set. 22 are answerable (13 of them
+  code questions) and 23 are not.
+- **Answer key:** unchanged; nothing was widened.
+- **Run settings:**
+  - Runs 1 and 2: temperature 0 and seed 42 (the runner's default).
+  - Real-use: `--app-default`, the app's own setting of temperature 0.2 with no seed.
+  - Reference: `--chat-endpoint http://192.168.155.52:8080 --chat-model Qwen3.8-27B-UD-Q4_K_XL`, otherwise like
+    run 1.
+- **Nondeterminism:** llama-server is not deterministic even at temperature 0 with a fixed seed (identical prompts
+  gave different completions, D-077). Each run is therefore one sample, and runs 1 and 2 differ.
+
+| Run | Model | Precision | Correct refusals | False refusals docs / code / multi | Code false refusals (≤ 1) | p50 / p95 | Over 60 s | Cited ranges valid | Result |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | Qwen3.6-35B-A3B UD-Q4_K_XL, 0 / seed 42 | **100% (38/38)** | **23/23** | 0/10 · 0/10 · 0/2 | **0/13** | 21.1 s / **48.6 s** | 1/45 | 26/26 | **pass** |
+| 2 | Qwen3.6-35B-A3B UD-Q4_K_XL, 0 / seed 42 | **100% (36/36)** | **23/23** | 0/10 · 0/10 · 0/2 | **0/13** | 19.9 s / **47.8 s** | 0/45 | 27/27 | **pass** |
+| real-use | Qwen3.6-35B-A3B UD-Q4_K_XL, 0.2 (app default) | **100% (39/39)** | **23/23** | 0/10 · 0/10 · 0/2 | **0/13** | 19.0 s / **50.6 s** | 1/45 | 26/26 | **pass** |
+| reference | Qwen3.8-27B UD-Q4_K_XL (dense), 0 / seed 42 | 77.4% (48/62) | 23/23 | 0/10 · 0/10 · 0/2 | 0/13 | 35.0 s / 85.3 s | 11/44 | 45/45 | comparison only: fails precision and p95 |
+
+The reference run has 44 timed answers: ref-near-05 got a 500 "proxy error" from the model server, which is not an answer. Its first attempt also failed: the server did not reply within 30 s while loading the model. It was re-run alone on the same data.
+
+**The questions you named at the failed gate.** All three were answered in all three Qwen3.6 runs, and every
+citation was inside the answer key:
+
+| Question | Run 1 | Run 2 | Real-use |
+|---|---|---|---|
+| code-05 (Basic auth encoding) | verified, 77.7 s (regenerated, 9 judge calls) | verified, 46.0 s | verified, 45.5 s |
+| ref-near-10 (`requests.codes` 429 names) | verified, 47.8 s (regenerated) | partially verified, 58.1 s (regenerated) | verified, 21.3 s |
+| ref-near-07 (SOCKS DNS on the proxy) | verified, 25.3 s | verified, 25.0 s | verified, 33.5 s |
+
+**Memory:** the container peaked at **6.91 GiB** during setup and run 1. Across attempts the peak was 5.0–7.1 GiB
+and there were no OOMs. The README now says 8 GB minimum and 10 GB recommended, and shows how to set the WSL 2
+limit (`.wslconfig`).
+
+### Latency and judge calls (round 2b, D-077..D-080)
+
+Every run's report has a "Latency and judge calls" section (`eval/runner.py`, defined in `eval/format.md`). Notes on
+the table:
+- N = 42: 3 unanswerable questions (`ref-unans-04`, `-05`, `-11`) were refused before any answer call.
+- Parent context and the outline were **on** in every run (the defaults).
+
+| Run | Judge calls / answer: mean / p50 / p95 / max | Answers with 0 / 1 / 2 / ≥3 judge calls | Judge s p50 / p95 (share of answer time) | Answer calls mean / max | Regenerations | First-call prompt tokens p50 / p95 | Promoted / outline tokens p95 | Outline-only failures | Promoted citations |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.95 / 1 / 3 / 9 | 20 / 14 / 4 / 4 | 1.8 s / 8.2 s (10.8%) | 1.05 / 2 | 2/42 | 3160 / 4416 | 217 / 217 | 0 | 0 |
+| 2 | 0.93 / 1 / 3 / 4 | 20 / 13 / 3 / 6 | 1.9 s / 8.0 s (9.5%) | 1.05 / 2 | 2/42 | 3160 / 4416 | 217 / 217 | 0 | 0 |
+| real-use | 0.93 / 1 / 3 / 4 | 20 / 11 / 6 / 5 | 2.4 s / 8.2 s (10.5%) | 1.02 / 2 | 1/42 | 3160 / 4416 | 217 / 217 | 0 | 0 |
+| reference | 1.20 / 1 / 4 / 6 | 20 / 8 / 4 / 9 | 6.1 s / 33.8 s (22.1%) | 1.05 / 2 | 1/41 | 3136 / 4348 | 226 / 217 | 0 | 0 |
+
+**Answers over 60 s:**
+- Run 1, code-05: 77.7 s. Generation took 49.8 s in 2 calls (regenerated), verification 25.3 s, of which the judge
+  took 21.9 s in 9 calls.
+- Real-use, docs-03: 65.4 s. Generation took 52.3 s in 2 calls (regenerated), and the judge 7.8 s in 2 calls.
+
+Both are regenerations, and at most 2 of 45 answers over 60 s keep p95 ≤ 60 s. None of the levers in D-080 was
+needed.
+
+**How to verify:** each row is in that run's report under "Latency and judge calls", and in the `latency` block of
+its sidecar JSON.
+
+### Citations outside the answer key: for your approval
+
+The three Qwen3.6 runs have **no** citation outside the answer key (precision 100%), so there is nothing to approve
+for them. The Qwen3.8-27B reference run's citations outside the key are listed below.
+- **How they were checked:** each was reviewed strictly against its sentence and the source at 6e83187.
+- **Effect on the score:** they count as wrong in its precision. The key was not changed.
+- **Your decision:** whether to accept these as correct is yours to make.
+
+**Summary:** 14 citations. **3 correct** on their own, **5 jointly correct** with the sentence's other citations, **6 correct but about something the question did not ask**, and **0 wrong**. The same review on attempt 7 found 3 wrong ones. One was the `__bool__` citation that D-086 fixed. The other two became joint because the sentences now also cite the chunk that completes them.
+
+#### CORRECT (3)
+
+- **`code-02 [4]`** · `docs/user/quickstart.rst:369-404` (lines 390-402 matter)
+  · Sentence: "The quickstart shows that a 404 response triggers raise_for_status() to raise requests.exceptions.HTTPError, while a 200 response makes raise_for_status() return None."
+  · Cited: `>>> bad_r = requests.get('https://httpbin.org/status/404')` … `>>> bad_r.raise_for_status()` … `requests.exceptions.HTTPError: 404 Client Error` … `since our ``status_code`` for ``r`` was ``200``, when we call ``raise_for_status()`` we get::` / `>>> r.raise_for_status()` / `None`
+  · Reason: The chunk states both outcomes exactly. The sentence is on-question because `ok` calls `raise_for_status()`, as the previous sentence states, citing in-key [1].
+
+- **`ref-near-04 [2]`** · `tests/test_requests.py:2165-2172`
+  · Sentence: "The test test_unconsumed_session_response_closes_connection confirms that closing a stream=True session response via contextlib.closing sets response.raw.closed to True even when response._content_consumed is False."
+  · Cited: `s = requests.session()` / `with contextlib.closing(s.get(httpbin("stream/4"), stream=True)) as response:` / `assert response._content_consumed is False` / `assert response.raw.closed`
+  · Reason: Every element is stated. It answers the question: closing releases the connection even when the body was never read.
+
+- **`ref-near-04 [3]`** · `tests/test_requests.py:2159-2163`
+  · Sentence: "The test test_response_context_manager confirms that exiting a with block on a stream=True response sets response.raw.closed to True."
+  · Cited: `with requests.get(httpbin("stream/4"), stream=True) as response:` / `assert response.raw.closed`
+  · Reason: Stated exactly. The sentence does not claim a Session. It is on-question because leaving the `with` block releases the connection.
+
+#### JOINT (5)
+
+- **`docs-04 [2]`** · `src/requests/utils.py:231-280` (lines 239-243 matter)
+  · Sentence: "In the source code, if the NETRC environment variable is set, Requests uses only that path; otherwise it iterates over the NETRC_FILES tuple (".netrc", "_netrc") prefixed with the home directory."
+  · Cited: `netrc_file = os.environ.get("NETRC")` / `if netrc_file is not None:` / `    netrc_locations = (netrc_file,)` / `else:` / `    netrc_locations = (f"~/{f}" for f in NETRC_FILES)`
+  · Reason: This chunk gives the NETRC-only rule and the `~/` prefix. The tuple values come only from [3], so the sentence is supported by **[2]+[3]**.
+
+- **`docs-04 [3]`** · `src/requests/utils.py:71-146` (line 78 matters)
+  · Sentence: (same as `docs-04 [2]`)
+  · Cited: `NETRC_FILES: Final = (".netrc", "_netrc")`
+  · Reason: This chunk only defines the tuple. The env-var rule and the home prefix come from [2], so the sentence is supported by **[2]+[3]**.
+
+- **`code-02 [2]`** · `src/requests/models.py:835-843`
+  · Sentence: "Response.__bool__ and Response.__nonzero__ both simply return self.ok, so a Response object is truthy whenever the status code is less than 400."
+  · Cited: `def __bool__(self) -> bool:` / `"""Returns True if :attr:`status_code` is less than 400.` … `return self.ok`
+  · Reason: This chunk covers `__bool__`, which is what makes a Response truthy, and the "< 400" rule. `__nonzero__` comes only from [3], so the sentence is supported by **[2]+[3]**. Note: the sentence is about truthiness and is only next to the question's subject, which is how `ok` is computed.
+
+- **`code-02 [3]`** · `src/requests/models.py:845-853`
+  · Sentence: (same as `code-02 [2]`)
+  · Cited: `def __nonzero__(self) -> bool:` … `return self.ok`
+  · Reason: This chunk covers `__nonzero__` only. The `__bool__` method, and with it truthiness, comes from [2], so the sentence is supported by **[2]+[3]**.
+
+- **`ref-near-01 [3]`** · `src/requests/models.py:912-973` (lines 937, 949 matter)
+  · Sentence: "iter_lines() passes that chunk_size to iter_content(), which uses it as the size for each read from the raw stream (self.raw.stream(chunk_size, ...) or self.raw.read(chunk_size))."
+  · Cited: `yield from self.raw.stream(chunk_size, decode_content=True)` … `chunk = self.raw.read(chunk_size)`
+  · Reason: This chunk gives the read size. The handoff `self.iter_content(chunk_size=chunk_size, ...)` is in the in-key **[1]** (`models.py:1008-1009`). The sentence is supported by **[1]+[3]**. In a7 this pair was WRONG; the in-key [1] is now cited.
+
+#### OFF-QUESTION (6)
+
+- **`docs-03 [5]`** · `src/requests/sessions.py:752-829` (lines 793-799 matter)
+  · Sentence: "Cookies received in responses are automatically extracted and stored in the session's cookie jar via extract_cookies_to_jar."
+  · Cited: `# Persist cookies` … `extract_cookies_to_jar(self.cookies, request, r.raw)`
+  · Reason: Supported, but the sentence is about cookies the server sets. The question asks about cookies passed to one request, which are not persisted.
+
+- **`docs-03 [6]`** · `tests/test_requests.py:390-394`
+  · Sentence: "Cookies set by a response (e.g., via a /cookies/set endpoint) are persisted in the session and sent on subsequent requests, as shown by test_cookie_sent_on_redirect."
+  · Cited: `s.get(httpbin("cookies/set?foo=bar"))` / `r = s.get(httpbin("redirect/1"))` / `assert "Cookie" in r.json()["headers"]`
+  · Reason: Supported, but the sentence is about server-set cookies, not cookies passed per request.
+
+- **`docs-05 [5]`** · `HISTORY.md:360-412` (lines 360-366 matter)
+  · Sentence: "Requests added Brotli compression support in version 2.26.0 (2021-07-13)."
+  · Cited: `2.26.0 (2021-07-13)` … `- Requests now supports Brotli compression, if either the `brotli` or` / `` `brotlicffi` package is installed. (#5783)``
+  · Reason: The version and date are stated. The question asks which encodings are decoded and what to install, and the sentence gives a version history fact instead.
+
+- **`code-01 [3]`** · `docs/user/quickstart.rst:552-567` (lines 565-566 matter)
+  · Sentence: "If a request exceeds this limit, a TooManyRedirects exception is raised."
+  · Cited: "If a request exceeds the configured number of maximum redirections, a `TooManyRedirects` exception is raised."
+  · Reason: Supported, and also by the in-key [1] (`sessions.py:484-485`). It only restates the question's premise; the default limit is given in the previous sentence.
+
+- **`code-05 [3]`** · `src/requests/auth.py:85-89`
+  · Sentence: "The `HTTPBasicAuth` class declares its `username` and `password` attributes with the type `bytes | str`."
+  · Cited: `username: bytes | str` / `password: bytes | str`
+  · Reason: The type annotations are stated exactly, but they say nothing about the encoding, which is latin1 then base64 in `_basic_auth_str`.
+
+- **`code-05 [4]`** · `tests/test_requests.py:554-570`
+  · Sentence: "The test `test_set_basicauth` verifies that for inputs such as `("user", "pass")`, `("имя".encode(), "пароль".encode())`, `(42, 42)`, and `(None, None)`, the prepared request's `Authorization` header equals `_basic_auth_str(username, password)`."
+  · Cited: `("user", "pass"),` / `("имя".encode(), "пароль".encode()),` / `(42, 42),` / `(None, None),` … `assert p.headers["Authorization"] == _basic_auth_str(username, password)`
+  · Reason: Every input and the assertion are stated, but the sentence names only the helper, not the encoding the question asks about.
+
+#### WRONG (0)
+
+None.
+
+
+#### All 14 at a glance
+
+| id | [n] | location | verdict |
+|---|---|---|---|
+| docs-03 | [5] | src/requests/sessions.py:793-799 | OFF-QUESTION |
+| docs-03 | [6] | tests/test_requests.py:390-394 | OFF-QUESTION |
+| docs-04 | [2] | src/requests/utils.py:239-243 | JOINT (with [3]) |
+| docs-04 | [3] | src/requests/utils.py:78 | JOINT (with [2]) |
+| docs-05 | [5] | HISTORY.md:360-366 | OFF-QUESTION |
+| code-01 | [3] | docs/user/quickstart.rst:565-566 | OFF-QUESTION |
+| code-02 | [2] | src/requests/models.py:835-843 | JOINT (with [3]) |
+| code-02 | [3] | src/requests/models.py:845-853 | JOINT (with [2]) |
+| code-02 | [4] | docs/user/quickstart.rst:390-402 | CORRECT |
+| code-05 | [3] | src/requests/auth.py:85-89 | OFF-QUESTION |
+| code-05 | [4] | tests/test_requests.py:557-560, 570 | OFF-QUESTION |
+| ref-near-01 | [3] | src/requests/models.py:937, 949 | JOINT (with in-key [1]) |
+| ref-near-04 | [2] | tests/test_requests.py:2165-2172 | CORRECT |
+| ref-near-04 | [3] | tests/test_requests.py:2159-2163 | CORRECT |
+
+**Counts:** CORRECT 3 · JOINT 5 · OFF-QUESTION 6 · WRONG 0.
+
+### Attempt history (round 2c, after the failed Gate 3)
+
+Each attempt ran all four runs on a fresh image from the branch head. Every fix is logged in `docs/DECISIONS.md`;
+none loosened a threshold, a layer or the answer key.
+
+| Attempt | Image (commit) | Runs 1 / 2 / real-use: code false refusals | Precision | p95 | Qwen3.8 reference | What it found → fix |
+|---|---|---|---|---|---|---|
+| 3 | p3h (93b4419) | **2** / 0 / 0 (code-04, ref-near-10) | — | — | 77.8% | a failed rescue's feedback did not say where a name is; the judge named lines for only one excerpt → **D-082** |
+| 4 | p3i (36d17db) | 0 / **1** / 0 | 100% | 42.7 / 42.6 / 44.6 s | 79.4%, p95 84.5 s | ref-near-10 used ``double backticks``, read as two spans → **D-083** |
+| 5 | p3j (cabb3de) | 0 / 0 / 0 (run 2: 1 docs, ref-near-07) | 97.7 / 100 / 100% | 50.0 / 46.1 / 42.1 s | 79.0%, p95 86.6 s | the reference cited `Response.__bool__` without backticks to a chunk without it, and layer 5 checked only backticked names → **D-084** |
+| 6 | p3k (75fc3f8) | **1** / 0 / 0 (ref-near-10) | 100 / 100 / 97.4% | 41.1 / 43.1 / 41.2 s | 79.0%, p95 89.2 s | the judge said "supported" but its lines lacked `requests.codes`, which a cited chunk holds → **D-085** (ask once for those lines) |
+| 7 | p3l (eae63e0) | 0 / 0 / 0 (no false refusals at all) | 100 / 100 / 100% | 41.5 / 44.5 / 47.7 s | 77.8%, p95 88.7 s | the citation choice dropped the `__bool__` chunk after verification; its guard was an old copy of layer 5 → **D-086** |
+| **8** | **p3m (9708373)** | **0 / 0 / 0 (no false refusals at all)** | **100 / 100 / 100%** | **48.6 / 47.8 / 50.6 s** | 77.4%, p95 85.3 s; 0 wrong citations | final |
+
+Attempt 6 passed the criteria. The fixes after it addressed the question you named (ref-near-10) and a citation
+defect found in the reference run.
+
+**Claim replay after each grounding change** (trustbook-g3, Qwen3.6, as recorded in D-082..D-085):
+- 0 of 41 base false claims passed, with forced confirmation and with the real checker.
+- 0 of 33 promoted-sibling and outline-only false claims passed.
+- True claims passed: 20 of 21 forced, 19 of 21 real, and 4 of 4 extra.
+
+### Earlier builder runs (before round 2)
+
+Before the failed gate (attempt 1 was your Gate 3 run):
 Chat endpoint: Ludwig's llama-server, `Qwen3.6-35B-A3B-UD-Q4_K_XL`. 45 questions (15 smoke + 30 refusal set). Fresh
 `Smoke` space, re-indexed in 80 s (tree-sitter: 993 chunks).
 
@@ -284,62 +484,14 @@ Other checks:
 | Memory during the run | 6.3 GB, no OOM |
 | CI on `phase-3` | see PR checks |
 
-### Round 2b: parent context and latency (D-077..D-080; to be filled at the gate)
-
-Every run's report has a "Latency and judge calls" section (`eval/runner.py`, defined in `eval/format.md`); its
-numbers go in this table. N is the answers that reached generation; answers refused before any answer call are
-listed apart. "Over 60 s" is flagged in the report only when the computed p95 is over 60 s (at most 2 of 45 over
-60 s guarantee p95 ≤ 60 s; 3 can still give a p95 under 60 s).
-
-| Run | Model, temperature | Parent context / outline | Precision | Refusals | Code FR | Latency p50 / p95 | Over 60 s | Judge calls / answer: mean / p95 / max (0 / 1 / 2 / ≥3) | Judge s p50 / p95 (share) | Answer calls mean / max | Regenerations | First-call prompt tokens p50 / p95 | Promoted / outline tokens p95 | Outline-only failures (regenerated) | Promoted citations (correct) |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| pre-gate on | Qwen3.6, 0 / seed 42, changed questions only | on / on | | | | | | | | | | | | | |
-| pre-gate off | Qwen3.6, 0 / seed 42, changed questions only | off / off | | | | | | | | | | | | | |
-| 1 | Qwen3.6, 0 / seed 42 | on / on | | | | | | | | | | | | | |
-| 2 | Qwen3.6, 0 / seed 42 | on / on | | | | | | | | | | | | | |
-| real-use | Qwen3.6, 0.2 (app default) | on / on | | | | | | | | | | | | | |
-| reference | Qwen3.8-27B, 0 / seed 42 | on / on | | | | | | | | | | | | | |
-
-**How to verify:** each row's numbers are in that run's report under "Latency and judge calls" (and the
-`latency` block of its sidecar, version 4). The switches are `retrieval.parent_context` / `retrieval.outline`
-(`PUT /api/settings` with `{"retrieval": {...}}`, no restart); the run's sidecar records them as
-`retrieval_settings`. `--compare` lists questions whose outline alone changed separately ("outline only").
-**If the computed p95 is over 60 s,** the levers are, in order and never a threshold (D-080): outline off if
-outline-only failures caused regenerations; `EXPANSION_TOKENS` 900 → 500 and `EXPAND_TOP` 3 → 2; parent context
-off (recorded in D-077).
-
-**Pre-gate integration check (merged slices A and B; one check, not a gate run, see D-077 "Integration check").**
-This was run live in `trustbook-g3` on a scratch copy of the Smoke space, re-chunked with `p3-treesitter-6`. It
-used Qwen3.6 at temperature 0 with seed 42. Each question ran twice, in opposite order: run 1 was OFF then ON, run
-2 was ON then OFF. "Promoted / outline" is the ON context. "prompt" is the estimated first-call prompt tokens
-(characters / 4). Citations are the union over all four answers; every one is a child's own lines.
-
-| Question | Promoted / outline tokens | Run 1 OFF | Run 1 ON | Run 2 ON | Run 2 OFF | Citations |
-|---|---|---|---|---|---|---|
-| ref-near-03 | 0 / 0 | verified, 22.4 s, judge 2, prompt 2901 | verified, 17.5 s, judge 2, prompt 2901 | verified, 34.0 s, judge 1, prompt 2901 | verified, 13.4 s, judge 2, prompt 2901 | HISTORY.md:159-199 |
-| ref-near-10 | 0 / 20 | refused (regen), 20.6 s, judge 1, prompt 2005 | verified, 17.5 s, judge 1, prompt 2077 | refused (regen), 32.5 s, judge 1, prompt 2077 | verified (regen), 31.7 s, judge 2, prompt 2005 | status_codes.py:77-85 |
-| code-02 | 1 / 113 | verified, 34.8 s, judge 3, prompt 1468 | verified, 41.0 s, judge 2, prompt 1821 | verified, 27.3 s, judge 2, prompt 1821 | verified, 41.8 s, judge 2, prompt 1468 | models.py:859-872 |
-| code-05 | 1 / 119 | verified, 37.5 s, judge 5, prompt 2854 | verified, 41.5 s, judge 4, prompt 3048 | verified, 37.1 s, judge 4, prompt 3048 | verified, 37.3 s, judge 3, prompt 2854 | auth.py:34-75, auth.py:111-113 |
-| docs-04 | 0 / 0 | verified, 22.1 s, judge 1, prompt 3540 | verified (regen), 74.0 s, judge 3, prompt 3540 | refused (regen), 82.6 s, judge 4, prompt 3540 | verified, 14.9 s, judge 1, prompt 3540 | authentication.rst:36-67, web "netrc Authentication" |
-| ref-near-07 | 0 / 0 | verified, 16.9 s, judge 2, prompt 4348 | verified, 21.8 s, judge 1, prompt 4348 | verified, 22.9 s, judge 1, prompt 4348 | refused (regen), 39.5 s, judge 2, prompt 4348 | web "SOCKS", advanced.rst:661-703 |
-| multi-02 | 0 / 0 | verified, 52.2 s, judge 2, prompt 2651 | partial, 43.2 s, judge 1, prompt 2651 | partial, 48.5 s, judge 3, prompt 2651 | partial, 41.5 s, judge 3, prompt 2651 | web "Transport Adapters", advanced.rst:968-1003, sessions.py:870-881 |
-| code-01 | 2 / 209 | verified, 24.2 s, judge 1, prompt 3087 | verified, 23.8 s, judge 1, prompt 3638 | verified, 13.0 s, judge 1, prompt 3638 | verified, 24.3 s, judge 1, prompt 3087 | sessions.py:442-503 |
-| code-03 | 0 / 113 | verified, 28.0 s, judge 1, prompt 2872 | verified, 36.7 s, judge 2, prompt 3013 | verified, 28.3 s, judge 2, prompt 3013 | verified, 25.4 s, judge 1, prompt 2872 | adapters.py:201-221, adapters.py:70-82 |
-| code-04 | 1 / 116 | verified, 40.3 s, judge 2, prompt 3628 | verified, 42.9 s, judge 2, prompt 3832 | verified, 46.2 s, judge 2, prompt 3832 | verified, 36.6 s, judge 2, prompt 3628 | sessions.py:154-184, sessions.py:309-332, web "Custom Headers" |
-
-Totals over the 20 answers per arm:
-- **OFF:** p50 29.9 s, max 52.2 s, 0 answers over 60 s, 1.95 judge calls per answer (max 5).
-- **ON:** p50 35.4 s, max 82.6 s, 2 answers over 60 s, 2.0 judge calls per answer (max 4).
-- Each arm regenerated 3 times. No answer cited a promoted chunk, and `outline_only` was 0 for every answer.
-
-Both answers over 60 s are docs-04, which gets no expansion. Its OFF and ON prompts are byte-identical, and four
-direct calls with that prompt gave four different completions. The same holds for ref-near-03, ref-near-07 and
-multi-02, so their OFF/ON differences are noise from llama-server, not effects of the expansion.
-
-Claim replay (D-077): there were 0 false passes out of 41 base false claims, OFF and ON, with the real checker and
-with forced confirmation. There were also 0 out of 33 outline-only and promoted-sibling false claims.
-
 ### Known limits
-- Big data tables (e.g. `status_codes.py`) are single chunks, and answers about one entry can be missed
-  (ref-near-10).
-- Refresh time estimates still assume a full re-read (incremental refresh is much faster).
+- **Prose rescue.** A correct paraphrase of technical prose that HHEM scores below 0.5 (ref-near-07 in attempt 5,
+  run 2: 0.36) fails. The judge rescues only sentences that cite code (D-064), because for prose the deterministic
+  rescue gates cannot tell a negated or role-swapped claim from a true one. Expect an occasional docs false refusal.
+- **Answer key and other supporting places.** Precision counts only citations into places the answer key lists. A
+  model that also cites supporting tests or implementation (Qwen3.8-27B) scores lower without being wrong; see
+  "Citations outside the answer key".
+- **Nondeterminism.** llama-server answers differ from run to run even at temperature 0 with seed 42. A question
+  that passes in one run can regenerate or come out partially verified in the next (ref-near-10: verified,
+  partially verified, verified).
+- **Refresh estimates.** Refresh time estimates still assume a full re-read (incremental refresh is much faster).
