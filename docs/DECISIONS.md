@@ -1625,8 +1625,10 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     included; progress and notes go to stderr. One line: Windows PowerShell 5.1's `ConvertFrom-Json` reads it
     without `Out-String`; ASCII: any console code page decodes it.
   - Every document names its `schema` with a version: `trustbook.ask/1`, `spaces/1`, `space/1`, `sources/1`,
-    `source/1`, `search/1`, `jobs/1`, `gate_log/1`, `deleted/1`, `error/1` (`{message, http_status}`). A version
-    changes only when a field is removed or changes meaning; fields may be added. Fields: `docs/cli.md`.
+    `source/1`, `search/1`, `jobs/1`, `gate_log/1`, `deleted/1`, `error/1` (`{message, http_status}`, plus
+    `created` when `sources add url A B` failed after adding some: the sources already added, so an agent does not
+    retry them blindly). A version changes only when a field is removed or changes meaning; fields may be added.
+    Fields: `docs/cli.md`.
   - `trustbook.ask/1`: `{space{id,name}, question, conversation_id, message_id, verdict, answer,
     sentences[{text, citations[n]}], citations[{n, source, source_id, origin, chunk_id, file, lines, pages,
     start_s, end_s, speaker, heading, symbol, text}], removed_statements[{text, reason}], refusal, latency_s}`.
@@ -1639,8 +1641,17 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
       `diagnostics.failed_sentences`; empty for a refusal.
     - The gate's fixed small-talk reply counts as a refusal with reason `chitchat` (nothing was answered from the
       sources).
-  - Exit codes: 0 ok; 1 error (also usage errors: argparse's own 2 would read as "refused"); 2 `ask` refused;
-    3 a source failed (`sources add … --wait`, `status`, `list`); 130 interrupted.
+  - Exit codes: 0 ok; 1 error (also usage errors: argparse's own 2 would read as "refused"; and any unexpected
+    exception, e.g. a malformed `--base-url`, as a redacted `error/1`, never a traceback); 2 `ask` refused;
+    3 a source failed (`sources add … --wait`, `status`, `list`); 4 `eval`: a target was missed; 130 interrupted.
+  - `trustbook eval` maps `eval/runner.py`'s codes, whose 2 ("unreachable or bad input") would collide with
+    "refused": runner 0 → 0; 1 (a `--min-*`/`--max-*` target missed, or a setup job not as expected) → 4, a
+    result rather than an error, so scripts can tell "ran and failed the gate" from "could not run"; 2 → 1;
+    130 (or killed by SIGINT) → 130; anything else (a crash) → 1. The runner run directly keeps 0/1/2/130.
+    It needs PyYAML: the optional extra `trustbook-cli[eval]`; without it `eval` stops up front with an
+    `error/1` naming the install command (exit 1).
+  - The chat route's SSE data is ASCII-only JSON, and the shared client splits the stream only at CRLF, LF and CR
+    (`sse_lines`): httpx's `iter_lines` also splits at U+2028/U+2029/U+0085 and cut such events in half.
   - Destructive commands (`spaces delete`, `sources remove`) need `--yes`. `sources add search` without `--pick`
     only lists results (SPEC §7.1: the user ticks results); `--pick` takes numbers or URLs.
   - Safety net for secrets: all output passes a redactor that masks the key values in `settings.json` (when the
@@ -1667,7 +1678,8 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   and the exit code, and:
   - exit 2 means "not in the sources": report it (with `refusal.message` and `suggestion`) and stop. Never retry,
     rephrase, split the question, switch space on its own, or answer from its own knowledge or by reading files;
-  - never present `removed_statements` as facts; say when an answer is partially verified;
+  - never present `removed_statements` as facts; say when an answer is partially verified, and when it is
+    `unverified` (the grounding checker is turned off, so nothing was checked against the cited passages);
   - cite with the citation fields; add or remove sources only when the user asks.
 - **Consequences:** Gate 3b checks on Ludwig's laptop that the agent gives a cited answer and reports a refusal
   without retrying.

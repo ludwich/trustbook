@@ -10,5 +10,8 @@ trustbook spaces list
 trustbook ask "How do I configure proxies?" --space Smoke --json
 ```
 
+`trustbook eval` (the evaluation runner) also needs PyYAML: install the `eval` extra,
+`pip install "trustbook-cli[eval]"` (from a checkout: `pip install "./cli[eval]"`).
+
 The image ships it too: `docker compose exec app trustbook …`. Full reference, JSON schemas and exit
 codes: [docs/cli.md](../docs/cli.md). Licensed under Apache-2.0.

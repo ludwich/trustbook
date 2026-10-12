@@ -29,6 +29,10 @@ trustbook ask "<the user's question>" --space "<space>" --json
 | 2 | Refused: **not in the sources** | Tell the user, and stop (see below) |
 | 3 | A source failed to read or index | Report the source and its `failure_reason` |
 | 1 | Error (Trustbook not running, unknown space, bad arguments) | Report the `message`; do not guess an answer |
+| 4 | Only `trustbook eval`: an evaluation target was missed | Report the runner's report; it is a result, not an error |
+
+`trustbook eval` (only when the user asks for an evaluation run) uses 0, 1, 4 and 130 (interrupted);
+it never returns 2.
 
 ## Answers (exit 0)
 
@@ -39,6 +43,10 @@ trustbook ask "<the user's question>" --space "<space>" --json
   when the user wants to see the evidence.
 - `verdict` `partially_verified` means some statements were removed. Say that the answer is
   partial.
+- `verdict` `unverified` means Trustbook's grounding checker is turned off (a setting), so the
+  statements were not checked against their cited passages. Always say so when you present such
+  an answer ("Trustbook's grounding checker is off, so these statements are unverified"), and
+  never call it verified.
 - **Never present `removed_statements` as facts.** They failed verification and are not from the
   sources. Mention them only as "Trustbook removed these unverified statements", if at all.
 
@@ -73,4 +81,6 @@ trustbook sources list --space "<space>" --json
 Folder paths are relative to the folder Trustbook may read (the user's home); for an absolute path
 add `--browse-root <home folder>`. `--wait` prints progress to stderr; a large folder can take
 minutes. Exit 3 means a source failed: report its `failure_reason` and `failure_next_step`.
+If `sources add url` with several URLs fails part-way (exit 1), the error document's `created`
+lists the sources that were already added: tell the user, and do not add those again.
 Do not delete spaces or sources unless the user asks (`--yes` is required).

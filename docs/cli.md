@@ -17,7 +17,12 @@ D-089 (the skill).
 | Windows / macOS / Linux, Python 3.12+ | `pip install "git+https://github.com/ludwich/trustbook@main#subdirectory=cli"` (or `pipx install …`, `uv tool install …`) |
 | A checkout of the repo | `pip install ./cli`; the backend's environment has it already (`uv run --project backend trustbook …`) |
 
-The package is `trustbook-cli` (Apache-2.0); its only dependency is `httpx`.
+The package is `trustbook-cli` (Apache-2.0); its only dependency is `httpx`. `trustbook eval`
+also needs PyYAML (MIT), as the optional extra `eval`: `pip install "trustbook-cli[eval]"`, from a
+checkout `pip install "./cli[eval]"`, from GitHub
+`pip install "trustbook-cli[eval] @ git+https://github.com/ludwich/trustbook@main#subdirectory=cli"`.
+The image and the backend's environment have it. Without it `trustbook eval` stops with an error
+(exit 1) that says how to install it.
 
 ## Options and environment
 
@@ -52,7 +57,7 @@ The package is `trustbook-cli` (Apache-2.0); its only dependency is `httpx`.
 | `ask QUESTION` | Asks in a new conversation; `-` reads the question from stdin | `trustbook.ask/1` |
 | `queue` | The processing queue (all spaces) | `trustbook.jobs/1` |
 | `gate-log [--limit N]` | The gate's recent decisions in a space | `trustbook.gate_log/1` |
-| `eval ARGS…` | Runs `eval/runner.py` with the same base URL; all arguments go to the runner, and its Markdown report and exit codes are its own | – |
+| `eval ARGS…` | Runs `eval/runner.py` with the same base URL; all arguments go to the runner, and its Markdown report is its own (needs the `eval` extra outside the image) | – |
 
 Every `sources add`, `status` and `refresh` takes `--wait`: it polls until each source is ready or
 failed, prints progress to stderr (`[12s] auth.py: indexing 40%`), and with `--timeout SECONDS`
@@ -80,10 +85,13 @@ read-only at `/host` (`TRUSTBOOK_BROWSE_ROOT` in `.env`).
 | 1 | Error: bad arguments, unknown space or source, API unreachable or an API error |
 | 2 | `ask` was refused: the answer is not in the sources (`refusal.reason` says why) |
 | 3 | A source failed (after `--wait`, or in `sources list` / `status`): `failure_reason` says why |
+| 4 | `eval`: a `--min-*` / `--max-*` target was missed, or a setup job did not end as expected |
 | 130 | Interrupted (Ctrl-C) |
 
-`eval` returns the runner's own codes (0 report written, 1 a target missed or a setup job did not end as
-expected, 2 invalid input or API unreachable, 130 interrupted).
+`eval` maps the runner's exit codes to these, so 2 keeps meaning "refused": runner 0 (report
+written, targets met) → 0; runner 1 (a target missed) → 4; runner 2 (invalid input, API
+unreachable) → 1; 130 → 130; anything else (a crash) → 1. `eval/runner.py` run directly keeps its
+own codes (0, 1, 2, 130).
 
 ## JSON output
 
@@ -122,8 +130,9 @@ Shown indented; the CLI writes it on one line.
 }
 ```
 
-- `verdict`: `verified`, `partially_verified` (some statements were removed), `unverified`, or
-  `refused`.
+- `verdict`: `verified`, `partially_verified` (some statements were removed), `unverified` (the
+  grounding checker is turned off, so statements were not checked against their cited passages:
+  say so when showing the answer), or `refused`.
 - `answer`: the sentences joined, each followed by its citation numbers. `sentences[].citations`
   holds the numbers; `citations[]` describes each number once.
 - A citation's locator fields are `null` when they don't apply: `file` + `lines` + `symbol` for
@@ -152,7 +161,7 @@ Shown indented; the CLI writes it on one line.
 | `trustbook.jobs/1` | `jobs[]`: `{id, kind, title, space_id, space_name, status, progress, position, error, created_at, started_at, finished_at, eta_seconds}`, `summary {queued, running, paused, eta_seconds, workers}` |
 | `trustbook.gate_log/1` | `space {id, name}`, `entries[]`: `{id, created, input, decision, confidence, user_correction}` |
 | `trustbook.deleted/1` | `kind` (`space` or `source`), `id`, `name` |
-| `trustbook.error/1` | `message`, `http_status` (the API's status code, `null` when there was no response) |
+| `trustbook.error/1` | `message`, `http_status` (the API's status code, `null` when there was no response); `created` only when a `sources add` with several items failed part-way: the sources already added before the error (as in `trustbook.sources/1`), so don't add them again |
 
 Source `status`: `queued`, `reading`, `indexing`, `ready`, `failed`; `progress` is 0–1 or `null`.
 
