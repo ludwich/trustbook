@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.db.models import Source
+from app.ideation.marker import is_idea_brief
 from app.ingest import errors
 from app.ingest.browse_root import BrowsePathError, BrowseRootMissingError, resolve_in_root
 from app.ingest.errors import fail
@@ -79,6 +80,8 @@ def parse_upload(
     if looks_binary(data):
         raise fail(errors.UNSUPPORTED_FILE)
     text = decode_text(data)
+    if is_idea_brief(text):
+        raise fail(errors.IDEA_BRIEF)
     if ext in HTML_UPLOADS:
         markdown = html_to_markdown(text)
         if not markdown.strip():

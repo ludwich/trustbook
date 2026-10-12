@@ -18,6 +18,7 @@ from app.api.deps import ServicesDep
 from app.capabilities.adapters.factory import build_search_adapter
 from app.capabilities.http import space_context
 from app.db.models import Chunk, Source
+from app.ideation.marker import IDEA_BRIEF_REASON, is_idea_brief, is_idea_brief_bytes
 from app.ingest import errors
 from app.ingest.browse_root import BrowsePathError, BrowseRootMissingError, resolve_in_root
 from app.ingest.errors import IngestError, fail
@@ -146,6 +147,8 @@ def add_paste(space_id: str, body: PasteCreate, services: ServicesDep) -> Source
     text = normalise_text(body.text)
     if not text.strip():
         raise HTTPException(status_code=422, detail="Paste some text first.")
+    if is_idea_brief(text):
+        raise HTTPException(status_code=422, detail=IDEA_BRIEF_REASON)
     title = body.title or _paste_title(text)
     snapshot = text_snapshot(text, title)
     source = services.ingest.create(
@@ -173,6 +176,8 @@ def add_uploads(
         def prepare(folder: Path, upload: UploadFile = upload, ext: str = ext) -> None:
             if ext not in UPLOAD_EXTENSIONS:
                 raise fail(errors.UNSUPPORTED_FILE)
+            if _is_brief(upload.file):
+                raise fail(errors.IDEA_BRIEF)
             _copy_limited(upload.file, folder / f"original.{ext}")
 
         created.append(
@@ -186,6 +191,13 @@ def add_uploads(
             )
         )
     return [services.ingest.out(s) for s in created]
+
+
+def _is_brief(file: BinaryIO) -> bool:
+    """Whether an upload is a Trustbook idea brief (its start is read, then the file rewound)."""
+    head = file.read(1024)
+    file.seek(0)
+    return is_idea_brief_bytes(head)
 
 
 def _create_web(services: ServicesDep, space_id: str, url: str, kind: str, title: str) -> Source:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.ideation.marker import IDEA_BRIEF_NEXT_STEP, IDEA_BRIEF_REASON
+
 
 class IngestError(Exception):
     """A source could not be processed. ``reason`` and ``next_step`` are shown to the user."""
@@ -42,6 +44,12 @@ REFRESH = "Press Refresh to try again."
 UNSUPPORTED_FILE = (
     "Trustbook can't read this type of file.",
     "Upload a PDF, Word, PowerPoint, Excel, text, Markdown, CSV, JSON, HTML or audio file.",
+)
+# Idea briefs are never sources (SPEC §10, D-099).
+IDEA_BRIEF = (IDEA_BRIEF_REASON, IDEA_BRIEF_NEXT_STEP)
+TRUSTBOOK_FOLDER = (
+    "This is a Trustbook data folder. Its files are never used as sources.",
+    "Link a folder with your own files instead.",
 )
 EMPTY_FILE = ("This file is empty.", "Check the file and upload it again.")
 NO_TEXT = ("No text was found in this file.", "Check that the file contains text.")
@@ -157,6 +165,11 @@ SHORT_TEXT_CHARS = 300
 def fail(pair: tuple[str, str]) -> IngestError:
     """Build an :class:`IngestError` from a (reason, next step) pair."""
     return IngestError(pair[0], pair[1])
+
+
+def skipped_briefs_warning(count: int) -> str:
+    noun = "file" if count == 1 else "files"
+    return f"{count} {noun} skipped: Trustbook idea briefs are never used as sources."
 
 
 def skipped_secrets_warning(count: int) -> str:
