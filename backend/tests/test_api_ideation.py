@@ -247,6 +247,30 @@ def test_finish_now_mid_session_and_continue(env: Env, monkeypatch: pytest.Monke
     assert again["current_node_id"] == waiting and calls == []  # the waiting question is kept
 
 
+def test_gate4_e2e_flow_is_mid_session_at_finish(env: Env) -> None:
+    """The flow of frontend/e2e/ideation.spec.ts (Finish now mid-session), on the server's
+    next-branch order: TB-SEEDS4 keeps a question waiting after dismiss, accept, answer, skip."""
+    env.sources()
+    sid = env.create(f"{IDEA} TB-SEEDS4")["id"]
+    session = env.turn(sid)
+    titles = [n["title"] for n in session["nodes"]]
+    assert titles == [
+        "Who it is for",
+        "What your sources say about guided",
+        "How it is paid for",
+        "Risks and open problems",
+    ]
+    risks = session["nodes"][3]["id"]
+    assert env.client.post(env.url(f"/sessions/{sid}/nodes/{risks}/dismiss")).status_code == 200
+    session = env.answer(sid, current(session)["id"], "accept")
+    assert current(session)["title"] == "What your sources say about guided"
+    session = env.answer(sid, current(session)["id"], "answer", "Sell at the kiosk TB-BRANCH")
+    assert current(session)["title"] == "How it is paid for"
+    session = env.answer(sid, current(session)["id"], "skip")
+    assert current(session)["title"].startswith("Follow-up on Sell at the kiosk")
+    assert session["progress"] == {"resolved": 3, "open": 1} and session["complete"] is False
+
+
 def test_resume_after_restart(
     make_client: AppFactory, fake_providers: ProviderRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> None:

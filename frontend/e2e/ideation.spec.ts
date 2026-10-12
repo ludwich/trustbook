@@ -17,29 +17,30 @@ import {
  * (TRUSTBOOK_MOCK_LLM=1) and the real bundled retrieval and grounding checker.
  *
  * The mock (ARCHITECTURE "Test hooks", D-093) seeds three branches ("Who it is for", "What your
- * sources say about <word>", "Risks and open problems"), recommends the source sentence sharing
- * most words with the idea and the branch (cited), and opens one new branch under a branch whose
- * answer contains TB-BRANCH. The server picks the next branch before the model call, so after
- * accepting, typing, skipping and dismissing a seed a session with three seeds would already be
- * complete. The puffin sentence below therefore carries TB-BRANCH: accepting it (the accepted
- * text is the recommendation) opens a branch too, and a question is still waiting when Finish now
- * is pressed.
+ * sources say about <word>", "Risks and open problems"), or four when the idea contains TB-SEEDS4
+ * ("How it is paid for" before the risks). It recommends the source sentence sharing most words
+ * with the idea and the branch (cited), and opens one new branch under a branch whose answer
+ * contains TB-BRANCH. The server picks the next branch before the model call: the open one, else
+ * the first tentative branch under the last answered one, else the first tentative one in tree
+ * order (backend/app/ideation/map.py, next_node).
+ *
+ * Mid-session test, with four seeds: dismiss "Risks", accept "Who it is for" (→ "What your
+ * sources say"), type an answer with TB-BRANCH (→ "How it is paid for"; the answer opens
+ * "Follow-up on …" under the branch it answered), skip (→ "Follow-up on …"). So 3 resolved and 1
+ * open when Finish now is pressed. The complete test uses three seeds and no hooks.
  */
 
 const TITLE = "Gull Island visitor guide";
 const BEST = "Guided puffin walks on Gull Island suit birdwatchers who arrive on the morning ferry";
 const TEXT = [
   "Gull Island has a colony of puffins that nest on the north cliffs from May to August.",
-  `${BEST}, and the harbour office calls the route TB-BRANCH on its maps.`,
+  `${BEST}.`,
   "The ferry to Gull Island leaves the harbour twice a day in summer.",
   "The island hostel has twelve beds and serves breakfast from seven.",
 ].join("\n\n");
-/** Same facts without the hook: answers decide where the map grows. */
-const PLAIN_TEXT = TEXT.replace(
-  ", and the harbour office calls the route TB-BRANCH on its maps",
-  "",
-);
 const IDEA = "Guided puffin walks on Gull Island for birdwatchers";
+/** The same idea with the mock hook for a fourth seed, so the session stays mid-session. */
+const IDEA_FOUR_SEEDS = `${IDEA} TB-SEEDS4`;
 /** A made-up word that is only ever typed into the interview, so only the brief holds it. */
 const BRIEF_ONLY = "Kestrelmoss";
 const TURN_TIMEOUT = 90_000;
@@ -116,11 +117,11 @@ async function mapRows(page: Page): Promise<string[][]> {
     );
 }
 
-async function startIdea(page: Page): Promise<string> {
+async function startIdea(page: Page, idea = IDEA): Promise<string> {
   await openIdeation(page);
   const box = page.getByRole("textbox", { name: "I have an idea" });
   await expect(box).toBeEnabled();
-  await box.fill(IDEA);
+  await box.fill(idea);
   await page.getByRole("button", { name: "Start" }).click();
   return questionAfter(page, null);
 }
@@ -158,14 +159,15 @@ test("Gate 4: a cited recommendation, accept / answer / skip / dismiss, resume, 
   await openSpace(page, spaceId);
 
   // 1. Start an idea: the map is seeded and the first question has a cited recommendation.
-  const first = await startIdea(page);
+  const first = await startIdea(page, IDEA_FOUR_SEEDS);
+  expect(first).toContain("Who it is for");
   const card = page.getByTestId("question-card");
   await expect(citedSentences(card).first()).toBeVisible();
   await expect(citedSentences(card).first()).toContainText(BEST);
   await expect(card.getByTestId("answer-badge")).toHaveAttribute("data-badge", "verified");
   const map = page.getByTestId("branch-map");
-  await expect(page.getByTestId("map-node")).toHaveCount(3);
-  await expect(map.getByTestId("map-progress")).toHaveText("0 resolved, 3 open");
+  await expect(page.getByTestId("map-node")).toHaveCount(4);
+  await expect(map.getByTestId("map-progress")).toHaveText("0 resolved, 4 open");
   await expect(page.locator("[data-testid='map-node'][data-current='true']")).toHaveCount(1);
 
   // The citation opens the source viewer at the passage.
@@ -181,11 +183,12 @@ test("Gate 4: a cited recommendation, accept / answer / skip / dismiss, resume, 
   // 2. Dismiss a seed that was not asked yet.
   await map.getByRole("button", { name: /^Dismiss branch “Risks and open problems”/ }).click();
   await expect(map.getByText("Risks and open problems")).toHaveCount(0);
-  await expect(map.getByTestId("map-progress")).toHaveText("0 resolved, 2 open");
+  await expect(map.getByTestId("map-progress")).toHaveText("0 resolved, 3 open");
 
-  // 3. Accept the recommendation (it opens a branch: see the note at the top).
+  // 3. Accept the recommendation; the next seed is asked.
   await card.getByRole("button", { name: "Accept recommendation" }).click();
   const second = await questionAfter(page, first);
+  expect(second).toContain("What your sources say about guided");
   const thread = page.getByRole("list", { name: "Interview so far" });
   await expect(thread.getByTestId("accepted-tag")).toHaveCount(1);
 
@@ -194,11 +197,17 @@ test("Gate 4: a cited recommendation, accept / answer / skip / dismiss, resume, 
   await page.getByRole("textbox", { name: "Your answer" }).fill(answer);
   await page.getByRole("button", { name: "Answer" }).click();
   const third = await questionAfter(page, second);
+  expect(third).toContain("How it is paid for");
   await expect(thread).toContainText(`${BRIEF_ONLY} kiosk`);
+  // TB-BRANCH opened a branch under the answered one.
+  await expect(
+    map.getByTestId("map-node-title").filter({ hasText: /^Follow-up on Sell tickets/ }),
+  ).toHaveCount(1);
 
   // 5. Skip one; another branch still waits (mid-session).
   await page.getByRole("button", { name: "Skip" }).click();
   const waiting = await questionAfter(page, third);
+  expect(waiting).toContain("Follow-up on Sell tickets");
   await expect(thread.locator("[data-answer-source='skipped']")).toHaveCount(1);
   await expect(map.getByTestId("map-progress")).toHaveText("3 resolved, 1 open");
   await expect(map.getByTestId("map-complete")).toHaveCount(0);
@@ -243,7 +252,7 @@ test("Gate 4: a full session runs to Complete and its brief has cited anchors an
   request,
 }) => {
   spaceId = await createSpace(request, "E2E ideation complete");
-  const src = await pasteSource(request, spaceId, TITLE, PLAIN_TEXT);
+  const src = await pasteSource(request, spaceId, TITLE, TEXT);
   await waitForReady(request, spaceId, [src]);
   await openSpace(page, spaceId);
 
