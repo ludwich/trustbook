@@ -1765,3 +1765,15 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     prompts (first attempt, with outline, regeneration) taken at `eae63e0`. Only the sidecar gains fields, which
     are 0 or null there.
   - Not measured live: no gate corpus has a transcript, so no latency or quality number yet.
+
+### D-092 Sub-phase branches and tags publish images too (phase-3b)
+- **Context:** Phase 3b (CLI and transcript windows) is a sub-phase between Gates 3 and 4, on a stacked branch
+  `phase-3b` (PR into `phase-3`), and Ludwig tests it from `phase-3b-rc`. The release workflow accepted only
+  `phase-<number>`, so a push of `phase-3b` failed at "Compute image tags".
+- **Decision:** the release workflow accepts `phase-<number>` with an optional single letter: branch `phase-3b`
+  publishes `:phase-3b-rc`, tag `phase-3b` publishes `:phase-3b` and `:latest`, as for whole phases. The tag is
+  only set after Ludwig passes the gate, so `:latest` never moves before a gate.
+- **CLI end-to-end:** the release job runs `cli/e2e/cli_e2e.sh` against the image it is about to publish (mock chat
+  model, real bundled models), before the Playwright specs. It creates a space, pastes a source with `--wait`, asks
+  an answerable question (exit 0, a verified answer whose first citation's text holds the fact), asks an
+  unanswerable one (exit 2, `refused`, no citations), and deletes the space. Nothing is published unless it passes.

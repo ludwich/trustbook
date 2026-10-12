@@ -1,6 +1,7 @@
 # Release images (SPEC §14):
 #   push to branch phase-N  -> ghcr.io/<owner>/trustbook:phase-N-rc
 #   push of tag    phase-N  -> ghcr.io/<owner>/trustbook:phase-N and :latest
+# N is a number, optionally with one letter for a sub-phase: phase-3b (D-092).
 # Full image with baked, pinned models (BAKE_MODELS=1), linux/amd64 only.
 name: Release
 
@@ -43,8 +44,8 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
         run: |
           image="ghcr.io/${OWNER,,}/trustbook"
-          if [[ ! "$REF_NAME" =~ ^phase-([0-9]+)$ ]]; then
-            echo "::error::'$REF_NAME' is not of the form phase-<N>"
+          if [[ ! "$REF_NAME" =~ ^phase-([0-9]+[a-z]?)$ ]]; then
+            echo "::error::'$REF_NAME' is not of the form phase-<N> or phase-<N><letter>"
             exit 1
           fi
           phase="phase-${BASH_REMATCH[1]}"
@@ -115,6 +116,10 @@ jobs:
           done
           docker logs trustbook-e2e | tail -50
           exit 1
+
+      # Phase 3b: the `trustbook` CLI inside the image, against the same app (D-092).
+      - name: Run the CLI end-to-end test
+        run: bash cli/e2e/cli_e2e.sh trustbook-e2e
 
       - uses: actions/setup-node@v7
         with:

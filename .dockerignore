@@ -38,3 +38,4 @@ frontend/dist
 models/
 eval/tests/
 docs/
+cli/e2e
