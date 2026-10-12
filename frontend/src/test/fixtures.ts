@@ -5,6 +5,8 @@ import type {
   Citation,
   Conversation,
   Field,
+  IdeationNode,
+  IdeationSession,
   Job,
   JobList,
   Message,
@@ -419,4 +421,52 @@ export function chunk(over: Partial<Chunk> & Pick<Chunk, "id">): Chunk {
     locator: {},
     ...over,
   };
+}
+
+// ---- Phase 4: ideation ----------------------------------------------------------
+
+export function ideationNode(over: Partial<IdeationNode> & Pick<IdeationNode, "id">): IdeationNode {
+  return {
+    parent_id: null,
+    ordinal: 0,
+    depth: 0,
+    title: `Branch ${over.id}`,
+    status: "tentative",
+    origin: "seed",
+    question: null,
+    recommendation: null,
+    final_answer: null,
+    answer_source: null,
+    asked_at: null,
+    answered_at: null,
+    dismissible: over.status === undefined || over.status === "tentative",
+    ...over,
+  };
+}
+
+/** Progress and completion as the server computes them (tentative and open count as open). */
+export function withProgress(session: IdeationSession): IdeationSession {
+  const live = session.nodes.filter((n) => n.status !== "dismissed");
+  const resolved = live.filter((n) => n.status === "resolved").length;
+  const open = live.length - resolved;
+  return { ...session, progress: { resolved, open }, complete: live.length > 0 && open === 0 };
+}
+
+export function ideationSession(over: Partial<IdeationSession> = {}): IdeationSession {
+  return withProgress({
+    id: "is_1",
+    title: "Puffin walks",
+    idea: "Guided puffin walks on Gull Island for birdwatchers",
+    status: "active",
+    progress: { resolved: 0, open: 0 },
+    complete: false,
+    created_at: "2026-10-10T09:00:00Z",
+    updated_at: "2026-10-10T09:00:00Z",
+    finished_at: null,
+    brief_at: null,
+    nodes: [],
+    current_node_id: null,
+    risks: [],
+    ...over,
+  });
 }
