@@ -39,5 +39,5 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] Frontend: Ideation tab (entry, question card, branch map, finish/export/continue, resume, running state; D-102)
 - [x] Real-model check (Qwen3.6): recommendations cite sources, briefs never in chat (D-103)
 - [x] Quality bar green; Playwright 25/25 incl. `ideation.spec.ts`; CLI e2e on the image
-- [ ] CI + `phase-4-rc`; PR phase-4 → phase-3b; Gate 4 in GATES.md (written)
+- [x] CI + `phase-4-rc` (336cb1b); PR #6 phase-4 → phase-3b; Gate 4 in GATES.md — waiting for Ludwig
 - Backlog: `trustbook ideas` CLI command; "Suggest ideas" (SPEC §16, out of scope)
