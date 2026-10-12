@@ -147,7 +147,7 @@ OUTLINE_ONLY = [
     "`urlparse` is imported from `.compat`.",  # import origin
     "`HTTPAdapter` also has an `init_poolmanager` method.",  # member name
     "The module defines `DEFAULT_POOLSIZE`.",  # module constant
-    "HTTPAdapter subclasses BaseAdapter.",  # no backticks: the checker and judge decide
+    "HTTPAdapter subclasses BaseAdapter.",  # no backticks: layer 5 checks the names too (D-084)
 ]
 
 
@@ -239,8 +239,9 @@ def test_outline_only_facts_fail_and_reach_no_premise_or_judge_item(
     assert all(text in chunk_texts for text in searched) and searched
     prompts = [m["content"] for call in judge.chat.calls for m in call]
     assert_no_outline_text(found, [p for p, _ in checker.pairs] + prompts + searched)
-    # Four name the outline's names in backticks (layer 5 reports them missing).
-    assert outcome.diagnostics.outline_only == [4, 4]
+    # All five name the outline's names, with or without backticks (layer 5 reports them
+    # missing, D-084).
+    assert outcome.diagnostics.outline_only == [5, 5]
 
 
 def test_the_regeneration_feedback_says_an_outline_only_name_is_in_no_chunk(

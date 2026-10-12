@@ -1518,3 +1518,25 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   - The source side was already handled (`normalize_inline` removed ``x`` first), so the claim replay's
     double-backtick source texts read the same.
   - Nothing that a single-backtick sentence was checked on changes.
+
+### D-084 Layer 5 also checks code names written without backticks
+- **Finding (Gate 3, attempt 5, Qwen3.8-27B reference run, code-02):** "Response.__bool__ and Response.__nonzero__
+  both simply return self.ok, so a Response object is truthy whenever the status code is less than 400." It cited
+  only `Response.__nonzero__` (models.py 845-853) and was verified, but `__bool__` is not in that chunk.
+  - Layer 5 checked only backticked names.
+  - The checker scored the sentence above the confirmation bound, so the judge, whose anchors do include
+    unbackticked identifiers, was never asked.
+  - The Qwen3.6 runs backtick names and were not affected. Nothing was wrong in them, but the rule cannot depend
+    on the model's formatting.
+- **Decision:** for a sentence citing a file chunk (the same scope as the literal check, D-044), layer 5 checks
+  every code-shaped name written without backticks, using the same test as for a backticked name (`name_in`,
+  D-042/D-072). Code-shaped means the judge's `identifier` anchors (`_is_identifier`): snake_case, dotted names,
+  inner capitals and UPPER_CASE with a digit or underscore. Prose words, plain acronyms (HTTP, URLs) and quoted
+  strings are not names. A missing name fails the sentence, and the regeneration feedback says where the name is
+  (D-074).
+- **Consequences:**
+  - Stricter, never looser. The outline-only test now catches its fifth sentence ("HTTPAdapter subclasses
+    BaseAdapter.") in layer 5.
+  - Claim replay (trustbook-g3, Qwen3.6): 0 of 41, 0 of 33 and 0 of 41 false claims passed (forced base, forced
+    extra, real). True claims passed 20 of 21, 4 of 4 and 19 of 21; none lost (judge noise gave one more).
+  - Gate 3 was re-run on this code (attempt 6).

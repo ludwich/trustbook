@@ -50,7 +50,12 @@ from app.grounding.code_checks import (
     missing_identifiers,
     missing_literals,
 )
-from app.grounding.code_judge import JudgeItem, JudgeOutcome, is_code_chunk
+from app.grounding.code_judge import (
+    JudgeItem,
+    JudgeOutcome,
+    is_code_chunk,
+    missing_plain_identifiers,
+)
 from app.retrieval.service import RetrievedChunk
 
 logger = logging.getLogger("trustbook.grounding")
@@ -362,6 +367,9 @@ class Verifier:
         missing = missing_identifiers(text, (c.text for c in cited))
         problems = [f"`{name}` is not in the cited chunks" for name in missing]
         if any("file" in chunk.locator for chunk in cited):
+            plain = missing_plain_identifiers(text, [c.text for c in cited])
+            missing.extend(plain)
+            problems.extend(f"{name} is not in the cited chunks" for name in plain)
             literals = missing_literals(text, (c.text for c in cited))
             missing.extend(literals)
             problems.extend(f"{literal} is not in the cited code" for literal in literals)

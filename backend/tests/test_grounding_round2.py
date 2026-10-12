@@ -313,19 +313,21 @@ def test_a_name_elsewhere_in_the_cited_chunk_does_not_save_a_confirmation() -> N
 
 
 def test_a_pass_naming_something_absent_from_every_cited_chunk_is_vetoed() -> None:
-    sentence = "When max_retries is left at its default, Requests uses DEFAULT_RETRIES."
+    # A quoted string: only the judge's anchors check it (an unquoted name fails layer 5, D-084).
+    sentence = 'When max_retries is left at its default, Requests uses the "retry-forever" policy.'
     narrow = verdicts((1, True, [("c1", 164, 165)]))
     check, calls = confirm(sentence, [adapter_chunk()], narrow, alone=narrow)
     assert not check.passed and check.vetoed and calls == 2
-    assert check.missing == ("DEFAULT_RETRIES",)
-    assert check.judge_reason == "not in the cited chunks: DEFAULT_RETRIES"
+    assert check.missing == ("retry-forever",)
+    assert check.judge_reason == "not in the cited chunks: retry-forever"
 
 
 def test_a_failed_rescue_names_what_no_cited_chunk_holds_for_the_feedback() -> None:
     # D-082 (gate run ref-near-10): a sentence that failed only the checker and that the judge
     # does not rescue gets the names no cited chunk holds, so the regeneration feedback can say
     # where they are. The sentence fails either way, and nothing is asked again.
-    sentence = "When max_retries is left at its default, Requests uses DEFAULT_RETRIES."
+    # A quoted string: only the judge's anchors check it (an unquoted name fails layer 5, D-084).
+    sentence = 'When max_retries is left at its default, Requests uses the "retry-forever" policy.'
     chat = ScriptedChat(verdicts((1, True, [("c1", 164, 165)])))
     verifier = Verifier(
         lambda pairs: [0.1 for _ in pairs],
@@ -335,8 +337,8 @@ def test_a_failed_rescue_names_what_no_cited_chunk_holds_for_the_feedback() -> N
     )
     check = verifier.check([(sentence, [adapter_chunk()])]).checks[0]
     assert not check.passed and not check.vetoed and len(chat.calls) == 1
-    assert check.missing == ("DEFAULT_RETRIES",)
-    assert check.judge_reason == "not in the cited chunks: DEFAULT_RETRIES"
+    assert check.missing == ("retry-forever",)
+    assert check.judge_reason == "not in the cited chunks: retry-forever"
 
 
 def test_the_judge_is_asked_for_a_line_for_every_name_from_each_excerpt() -> None:
@@ -683,3 +685,29 @@ def test_double_backtick_code_spans_are_read_whole() -> None:
     assert missing_identifiers(sentence, [chunk]) == []
     assert missing_identifiers("Use ``too_many`` and ``slow_down``.", [chunk]) == ["slow_down"]
     assert normalize_inline("It is ``200 OK`` and `x`.") == "It is 200 OK and x."
+
+
+def test_layer_5_checks_code_names_written_without_backticks() -> None:
+    # D-084 (Gate 3 reference run, code-02): "Response.__bool__ and Response.__nonzero__ both
+    # simply return self.ok" cited only the __nonzero__ chunk and was verified.
+    nonzero = code(
+        "n",
+        "File: src/requests/models.py · Response.__nonzero__ (lines 845-853)\n"
+        "    def __nonzero__(self) -> bool:\n"
+        '        """Returns True if :attr:`status_code` is less than 400."""\n'
+        "        return self.ok\n",
+        845,
+        853,
+        "src/requests/models.py",
+        "Response.__nonzero__",
+    )
+    verifier = Verifier(lambda pairs: [0.9 for _ in pairs], threshold=0.5, files=SNAPSHOT)
+    both = "Response.__bool__ and Response.__nonzero__ both simply return self.ok."
+    check = verifier.check([(both, [nonzero])]).checks[0]
+    assert not check.passed and check.missing == ("Response.__bool__",)
+    assert check.problems == ("Response.__bool__ is not in the cited chunks",)
+    one = "Response.__nonzero__ simply returns self.ok."
+    assert verifier.check([(one, [nonzero])]).checks[0].passed
+    # Prose words, plain acronyms and capitalised words are not code names.
+    prose = "The Response object is truthy when the HTTP status is OK."
+    assert verifier.check([(prose, [nonzero])]).checks[0].passed

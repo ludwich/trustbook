@@ -53,7 +53,7 @@ import queue
 import re
 import threading
 import time
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -76,6 +76,7 @@ from app.grounding.code_checks import (
     _VALUE_CONSTANT,
     CODE_SPAN,
     _occurs,
+    name_in,
     quoted_in,
     unescape_markdown,
     verbatim,
@@ -532,6 +533,15 @@ def code_anchors(sentence: str) -> list[Anchor]:
     anchors.extend(Anchor("constant", m.group(1)) for m in _VALUE_CONSTANT.finditer(rest))
     anchors.extend(Anchor("character", m.group(1).lower()) for m in _CHARACTER.finditer(rest))
     return list(dict.fromkeys(anchors))
+
+
+def missing_plain_identifiers(text: str, chunk_texts: Iterable[str]) -> list[str]:
+    """Code-shaped names that ``text`` writes without backticks (``Response.__bool__``,
+    ``trust_env``, ``HTTPAdapter``: the judge's ``identifier`` anchors) and that no chunk of
+    ``chunk_texts`` holds, by layer 5's test for a backticked name (D-084)."""
+    texts = [unescape_markdown(without_location(t)) for t in chunk_texts]
+    names = [a.text for a in code_anchors(text) if a.kind == "identifier"]
+    return [name for name in names if not name_in(name, texts)]
 
 
 def _string_literals(text: str) -> list[str]:
