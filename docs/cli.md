@@ -6,8 +6,8 @@ It talks only to the public HTTP API (default `http://127.0.0.1:8484`), so every
 same six grounding layers and the same refusal as in the UI: the CLI cannot get an answer the UI
 would not give. Questions asked here appear as normal conversations (titled `CLI: …`) in the UI.
 
-Decisions: D-086 (package, shared client), D-087 (JSON and exit codes), D-088 (folder paths),
-D-089 (the skill).
+Decisions: D-087 (package, shared client), D-088 (JSON and exit codes), D-089 (folder paths),
+D-090 (the skill).
 
 ## Install
 

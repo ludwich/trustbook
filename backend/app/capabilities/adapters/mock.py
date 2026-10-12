@@ -16,7 +16,7 @@ Test hooks (docs/ARCHITECTURE.md, "Test hooks"):
   that only the prompt's code outline shows (D-077), citing ``c1``. The outline is not a chunk, so
   the sentence fails layer 5 and is removed. Without an outline nothing is added.
 - A question containing ``TB-WINDOW-FACT`` gets one extra sentence quoted from a transcript
-  window (D-090): the first sentence of a neighbour's line with a word no numbered chunk has,
+  window (D-091): the first sentence of a neighbour's line with a word no numbered chunk has,
   citing ``c1``. The window is not a chunk, so the sentence fails verification and is removed.
   Without a window nothing is added.
 

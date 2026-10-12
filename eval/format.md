@@ -118,7 +118,7 @@ listed separately, and answers from an API without these diagnostics are counted
 | Latency p50 / p95 | As in the main table. |
 | Prompt tokens of the first answer call: p50 / p95 | Estimated by the app (characters / 4). |
 | Promoted tokens, Outline tokens: p50 / p95 | The parent context (D-077): citable chunks promoted for the top children, and the non-citable code outline. |
-| Transcript window tokens: p50 / p95 | The non-citable transcript windows (D-090): what was said around the top transcript chunks (`diagnostics.window_tokens`). 0 for answers without a transcript chunk in the top 3. |
+| Transcript window tokens: p50 / p95 | The non-citable transcript windows (D-091): what was said around the top transcript chunks (`diagnostics.window_tokens`). 0 for answers without a transcript chunk in the top 3. |
 | Outline-only failures | Failed sentences whose missing name or literal only the outline shows (`diagnostics.outline_only`, per pass), the answers they are in, and how many of those answers were regenerated. |
 | Window-only failures | Failed sentences that miss a name, or use a content word, that a transcript window shows and no numbered chunk has (`diagnostics.window_only`, per pass), the answers they are in, and how many of those answers were regenerated. |
 | Citations to promoted chunks | Citations (deduplicated per answer) of chunks listed in `diagnostics.expansions`, and how many of them are correct. |
@@ -243,7 +243,7 @@ another name gets `.json` appended). It holds ids and numbers, never question te
 written anywhere else, so a private set stays wherever you keep it. The only answer text is
 `failed_sentences` (version 3, D-076): the sentences of a refused or partially verified answer that
 failed verification, and why, each capped at 300 characters. Version 4 (D-080) adds the latency,
-judge-call and parent context numbers; version 5 (D-090) the transcript window numbers.
+judge-call and parent context numbers; version 5 (D-091) the transcript window numbers.
 
 ```json
 {"version": 5, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
@@ -317,7 +317,7 @@ retrieval, each answer call, each verification pass, citation choice, the gate, 
 for), `promoted_tokens`, `outline_tokens`, `outline_fingerprint` (a hash of the outline;
 `retrieval_fingerprint` still covers only the numbered chunks), `outline_only` (per pass) and
 `promoted_cited` ([kept sentences citing a promoted chunk, those also citing another chunk]).
-Version 5 adds, per question, the transcript windows (D-090): `windows` (per window block, the
+Version 5 adds, per question, the transcript windows (D-091): `windows` (per window block, the
 numbered chunks it names by their times only, the neighbours whose text it shows, in time order, and
 its prompt tokens), `window_tokens`, `window_fingerprint` (a hash of the windows' text; `null`
 without one) and `window_only` (per pass); versions 1 to 4 lack them.

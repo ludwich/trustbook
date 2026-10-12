@@ -1,4 +1,4 @@
-"""What the CLI writes: exit codes, versioned JSON documents and plain text (D-087).
+"""What the CLI writes: exit codes, versioned JSON documents and plain text (D-088).
 
 With ``--json`` stdout holds exactly one JSON document (ASCII-only, so any console code page reads
 it), errors included; progress and notes go to stderr. Everything passes the redactor.

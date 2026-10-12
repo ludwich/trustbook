@@ -16,7 +16,7 @@ of parent context:
   its member names. It holds no values, no line numbers and no chunk labels. It is an
   :class:`OutlineBlock`, never a chunk, so nothing in it can be cited, become a premise, a judge
   item or a layer 5 anchor: a fact only the outline shows cannot verify (it fails closed).
-- **Transcript windows** (D-090), NOT citable: for each of the first :data:`EXPAND_TOP` ranked
+- **Transcript windows** (D-091), NOT citable: for each of the first :data:`EXPAND_TOP` ranked
   context chunks of a transcript, the neighbouring chunks of its source (by ordinal: -1, +1, -2,
   +2), with their times and speakers, as one :class:`TranscriptWindow`. The child itself and any
   neighbour that is already a numbered chunk are only named by their times, never repeated. A
@@ -158,7 +158,7 @@ class WindowPart:
 class TranscriptWindow:
     """What was said around the numbered transcript chunks of one source, in time order.
 
-    Never a chunk: no label, never cited, never a premise, judge item or anchor (D-090).
+    Never a chunk: no label, never cited, never a premise, judge item or anchor (D-091).
     ``tokens``: what the window adds to the prompt (:func:`outline_tokens` of its title and
     labels, plus each shown neighbour's stored token count).
     """
@@ -704,7 +704,7 @@ def outline(
     return blocks
 
 
-# --- transcript windows (D-090) ------------------------------------------------------------
+# --- transcript windows (D-091) ------------------------------------------------------------
 
 
 def window_text(windows: Sequence[TranscriptWindow]) -> str:

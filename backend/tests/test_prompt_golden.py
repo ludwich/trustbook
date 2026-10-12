@@ -1,7 +1,7 @@
-"""The answer prompt without transcript windows is byte-identical to the pre-D-090 one.
+"""The answer prompt without transcript windows is byte-identical to the pre-D-091 one.
 
 The Smoke and eval corpora have no transcripts, so their prompts must not change when windows
-are added (D-090). The hashes were taken from the prompt code before windows existed; any change
+are added (D-091). The hashes were taken from the prompt code before windows existed; any change
 to the rendering of chunks, the outline or the regeneration section shows up here.
 """
 
@@ -70,7 +70,7 @@ FAILED = [
     FailedSentence('Anna said "Friday".', ("c4",), (("Friday", ("c2", "c3")),)),
 ]
 QUESTION = "  How does   HTTPAdapter send a request?\n"
-# SHA-256 of the JSON messages, taken at commit eae63e0 (before D-090).
+# SHA-256 of the JSON messages, taken at commit eae63e0 (before D-091).
 FIRST = "1a1e5d07e238ff7029110850d21a13a9317bc0d7eb0c0d88645322ad2ccd35ef"
 WITH_OUTLINE = "a1d4a22a410a2a943ab5cb49bc3c4f42e5a770c77c671fd537892bb650e59395"
 REGENERATION = "f5d93362afa55b1cd1ec2c69377b77cb566017687eb114c9cf1af2c4d41be868"

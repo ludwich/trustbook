@@ -9,7 +9,7 @@
     fail, with a checker that passes everything and with a word-overlap checker.
 (d) The D-074 feedback says such a name is in none of the chunks.
 (e) A promoted chunk is cited with its own locator only.
-(f) Transcript windows (D-090) the same way: a fact only a window shows fails, citing the child;
+(f) Transcript windows (D-091) the same way: a fact only a window shows fails, citing the child;
     no window line reaches a premise, a judge item or prompt, or a layer 5 search; a citation
     carries the cited chunk's own times.
 """
@@ -44,7 +44,7 @@ from tests.parent_helpers import AllFiles, adapters_specs, add_rows, meeting_spe
 APP = Path(app.__file__).parent
 BANNED_EXACT = frozenset({"structure", "parent_key", "OutlineBlock", "expansion", "outline"})
 BANNED_PARTS = ("outline", "parent_key", "expansion", "promot")
-# Transcript windows (D-090). Not the bare word "window": grounding has its own support windows.
+# Transcript windows (D-091). Not the bare word "window": grounding has its own support windows.
 BANNED_PARTS += ("transcript_window", "transcriptwindow", "window_tokens")
 BANNED_MODULES = ("app.retrieval.parents", "app.chunking.structure")
 PIPELINE_HELPERS = ("check_sentences", "failed_sentences")
@@ -308,7 +308,7 @@ def test_a_promoted_chunk_is_cited_with_its_own_locator(found: Retrieval) -> Non
     assert json.dumps(citation.locator).count("::") == 0  # no parent key in a locator
 
 
-# --- transcript windows (D-090) ---------------------------------------------------------------
+# --- transcript windows (D-091) ---------------------------------------------------------------
 
 
 def transcript_retrieval(

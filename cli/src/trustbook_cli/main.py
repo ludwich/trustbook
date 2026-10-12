@@ -1,4 +1,4 @@
-"""``trustbook``: command line entry point (argument parsing, errors and exit codes, D-087)."""
+"""``trustbook``: command line entry point (argument parsing, errors and exit codes, D-088)."""
 
 from __future__ import annotations
 

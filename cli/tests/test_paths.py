@@ -1,4 +1,4 @@
-"""Folder paths typed on Linux, macOS or Windows become the API's browse-root path (D-088)."""
+"""Folder paths typed on Linux, macOS or Windows become the API's browse-root path (D-089)."""
 
 from __future__ import annotations
 

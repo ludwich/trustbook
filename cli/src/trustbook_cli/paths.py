@@ -1,4 +1,4 @@
-"""Folder paths for ``sources add folder`` (D-088).
+"""Folder paths for ``sources add folder`` (D-089).
 
 The API takes a path relative to the browse root, the home folder mounted read-only at ``/host``
 (SPEC §4). The CLI also accepts Windows separators and an absolute path, which is mapped onto the

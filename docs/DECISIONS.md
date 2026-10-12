@@ -1592,7 +1592,7 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   - The regression test reproduces code-02: it fails on the old guard and passes on the new one.
   - Gate 3 was re-run on this code (attempt 8).
 
-### D-086 The `trustbook` CLI is its own package and shares one API client with the eval runner
+### D-087 The `trustbook` CLI is its own package and shares one API client with the eval runner
 - **Context:** Phase 3b adds a command line for scripts and agents (Claude Code). It must be in the image
   (`docker compose exec app trustbook …`), pip-installable on a laptop without the backend's dependencies, and
   unable to bypass grounding or refusal. The eval runner already had an HTTP client and an SSE parser.
@@ -1619,7 +1619,7 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   - No new bundled third-party code (`httpx` was already a dependency; hatchling is build-only).
   - Backlog: an MCP server can wrap the same client.
 
-### D-087 The CLI's JSON contract and exit codes
+### D-088 The CLI's JSON contract and exit codes
 - **Decision:**
   - With `--json`, stdout holds exactly one JSON document, on one line and ASCII-only (`\uXXXX` escapes), errors
     included; progress and notes go to stderr. One line: Windows PowerShell 5.1's `ConvertFrom-Json` reads it
@@ -1658,7 +1658,7 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     CLI can read it: `TRUSTBOOK_DATA`, `/data`, `~/Trustbook`) and well-known key shapes. It does not mask code
     such as `api_key = settings.api_key`, which cited passages may quote.
 
-### D-088 Folder paths on the command line
+### D-089 Folder paths on the command line
 - **Context:** the API takes a folder relative to the browse root (`normalise_relative`, POSIX). On a Windows
   laptop people type `C:\Users\anna\code\app`; in the container the same folder is `/host/code/app`.
 - **Decision:**
@@ -1671,7 +1671,7 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Consequences:** `trustbook sources add folder C:\Users\anna\x --browse-root C:/Users/anna` and
   `docker compose exec app trustbook sources add folder /host/x` both link `x`.
 
-### D-089 The Claude Code skill: a refusal is final
+### D-090 The Claude Code skill: a refusal is final
 - **Context:** an agent that gets "not in the sources" is inclined to retry with other words, try another space
   or answer from its own knowledge, which defeats the point of a grounded notebook.
 - **Decision:** `skills/trustbook/SKILL.md` (frontmatter `name`, `description`) tells the agent to use `--json`
@@ -1684,7 +1684,7 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Consequences:** Gate 3b checks on Ludwig's laptop that the agent gives a cited answer and reports a refusal
   without retrying.
 
-### D-090 Transcript windows: what was said around a transcript child, with times and speakers, never citable
+### D-091 Transcript windows: what was said around a transcript child, with times and speakers, never citable
 - **Context:** Ludwig (product owner): in parent/child retrieval, a transcript child gets a window of about
   1–2k tokens with speakers and timestamps as parent context; citations go only to the child's own times.
   - D-077 had planned transcript neighbours as **citable** promotions within the same 900 tokens.

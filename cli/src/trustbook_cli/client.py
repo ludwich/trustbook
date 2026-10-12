@@ -1,6 +1,6 @@
 """HTTP client for the Trustbook API: requests, errors and Server-Sent Events.
 
-Shared by the ``trustbook`` CLI and the eval runner (``eval/runner.py``, D-086). Only the public
+Shared by the ``trustbook`` CLI and the eval runner (``eval/runner.py``, D-087). Only the public
 HTTP API is used (docs/ARCHITECTURE.md), so nothing here can bypass grounding or refusal.
 """
 

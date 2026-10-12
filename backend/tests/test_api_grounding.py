@@ -186,7 +186,7 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
         "outline_tokens": 0,
         "outline_fingerprint": None,
         "promoted_cited": [0, 0],
-        # Transcript windows (D-090): none without a transcript.
+        # Transcript windows (D-091): none without a transcript.
         "windows": [],
         "window_tokens": 0,
         "window_fingerprint": None,
@@ -583,7 +583,7 @@ def test_the_outline_changes_only_the_outline_fingerprint(
     assert off["retrieval_fingerprint"] != on["retrieval_fingerprint"]
 
 
-# --- transcript windows (D-090) ---------------------------------------------------------------
+# --- transcript windows (D-091) ---------------------------------------------------------------
 
 WINDOW_QUESTION = "When will we ship the release on Friday?"
 FILLER = (

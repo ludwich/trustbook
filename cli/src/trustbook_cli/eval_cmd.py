@@ -4,7 +4,7 @@ The runner ships in the image (``/app/eval``) and in a checkout of the repositor
 with pip has no runner, so ``TRUSTBOOK_EVAL_RUNNER`` can point at one. The runner reads YAML, so
 outside the image it needs the ``eval`` extra (``pip install "trustbook-cli[eval]"``).
 
-The runner's exit codes are mapped to the CLI's (D-087), where 2 means "refused":
+The runner's exit codes are mapped to the CLI's (D-088), where 2 means "refused":
 
 ======  ===================================================  ======
 Runner  Meaning                                              CLI

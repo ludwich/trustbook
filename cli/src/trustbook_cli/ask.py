@@ -1,4 +1,4 @@
-"""``trustbook ask``: one question in a fresh conversation, as the UI asks it (D-087).
+"""``trustbook ask``: one question in a fresh conversation, as the UI asks it (D-088).
 
 The answer comes from the chat route's event stream, so it passed the same six grounding layers
 and refusal as in the UI; the CLI only reshapes it. Each cited passage's text is read from the

@@ -1,4 +1,4 @@
-"""The ``trustbook`` CLI (cli/, D-086..D-088) against the real API: every command through
+"""The ``trustbook`` CLI (cli/, D-087..D-089) against the real API: every command through
 FastAPI's TestClient, the mock chat model and queued jobs run in-thread while ``--wait`` sleeps."""
 
 from __future__ import annotations

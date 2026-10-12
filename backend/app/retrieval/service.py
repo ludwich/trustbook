@@ -100,7 +100,7 @@ class Retrieval:
     ``ranked``: every reranked candidate, best first (promoted chunks never enter it).
     ``source_ids``: the sources searched. ``outline``: the non-citable code outline (D-077,
     D-079); never a chunk, never a premise, judge item or anchor. ``transcript_windows``: what was
-    said around the top transcript chunks (D-090); not citable either, in the same way.
+    said around the top transcript chunks (D-091); not citable either, in the same way.
     """
 
     chunks: list[RetrievedChunk]
@@ -353,7 +353,7 @@ def with_parents(
     max_tokens: int = CONTEXT_TOKENS,
 ) -> tuple[list[RetrievedChunk], tuple[OutlineBlock, ...], tuple[TranscriptWindow, ...]]:
     """``chunks`` plus the chunks promoted as parent context, the code outline (D-077) and the
-    transcript windows (D-090).
+    transcript windows (D-091).
 
     See :mod:`app.retrieval.parents`. Promoted chunks go after every other chunk, in the order of
     the children they were promoted for, and only into the free part of ``max_tokens``; the
@@ -413,7 +413,7 @@ def retrieve(
     """Run the full retrieval for ``query`` over the enabled, ready sources of a space.
 
     ``parent_context`` / ``outline``: the D-077 kill switches (``retrieval`` in settings). Off,
-    no chunk is promoted and neither an outline nor a transcript window (D-090) is built;
+    no chunk is promoted and neither an outline nor a transcript window (D-091) is built;
     ``outline`` off keeps the promotions and the windows.
     """
     allowed = list(source_ids) if source_ids is not None else usable_source_ids(engine)

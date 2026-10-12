@@ -134,7 +134,7 @@ COPY backend/app /app/app
 COPY eval /app/eval
 RUN chmod -R a+rX /app/app /app/static /app/searxng /app/eval
 
-# --- The `trustbook` CLI (D-086): `docker compose exec app trustbook …`; the eval runner imports
+# --- The `trustbook` CLI (D-087): `docker compose exec app trustbook …`; the eval runner imports
 # its API client. Installed from a copy of cli/ (a wheel, not editable), without dependencies
 # (httpx is already in the environment).
 RUN --mount=type=cache,id=trustbook-uv,target=/root/.cache/uv \

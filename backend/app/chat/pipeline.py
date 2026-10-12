@@ -26,7 +26,7 @@ Citation numbers are given after removal, in order of first use among the kept s
 
 Parent context (D-077, D-079): the retrieval's promoted chunks are ordinary numbered chunks; its
 code outline goes into the prompt after the chunks and nowhere else. No check reads it: it is not
-a chunk, so nothing only the outline shows can verify. Transcript windows (D-090) go after the
+a chunk, so nothing only the outline shows can verify. Transcript windows (D-091) go after the
 outline, the same way: citations always carry the cited child's own times. The diagnostics count
 such failures (``outline_only``, ``window_only``) and record the time, judge calls and answer
 calls of each step (D-080).
@@ -346,7 +346,7 @@ def noncitable_only(
     *,
     words: bool = False,
 ) -> int:
-    """Diagnostics only (D-077, D-090): failed sentences missing a name or literal that the
+    """Diagnostics only (D-077, D-091): failed sentences missing a name or literal that the
     non-citable ``text`` shows and no labelled chunk holds. With ``words`` (transcript windows,
     whose prose layer 5 does not check), also failed sentences using a content word that ``text``
     has and no labelled chunk has. Never used to decide a sentence."""
@@ -386,7 +386,7 @@ def window_only(
     chunks: Mapping[str, RetrievedChunk],
     windows: str,
 ) -> int:
-    """Failed sentences stating something only a transcript window shows (D-090): a missing
+    """Failed sentences stating something only a transcript window shows (D-091): a missing
     name, or a content word no labelled chunk has. ``windows``: the windows' text without the
     numbered chunks' placeholders."""
     return noncitable_only(sentences, checked, chunks, windows, words=True)

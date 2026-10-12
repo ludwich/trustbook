@@ -32,7 +32,7 @@ run and restore it afterwards, also on an error or Ctrl-C. ``--compare A.json B.
 per-question differences between two sidecars and exits.
 
 Only ``httpx``, ``PyYAML`` and the CLI's API client (``cli/``, package ``trustbook-cli``, installed
-with the backend and in the image; D-086) are used. The runner talks to the API contract in
+with the backend and in the image; D-087) are used. The runner talks to the API contract in
 ``docs/ARCHITECTURE.md`` ("Phase 1: sources, index, retrieval and chat").
 """
 
@@ -94,7 +94,7 @@ EXIT_INTERRUPTED = 130
 
 
 # Invalid input or an unusable API answer (exit code 2). The shared client's errors are kinds of
-# it: ApiError (an HTTP error status) and ApiUnreachableError (no connection, D-086).
+# it: ApiError (an HTTP error status) and ApiUnreachableError (no connection, D-087).
 EvalError = TrustbookError
 
 
@@ -582,7 +582,7 @@ class QuestionResult:
     outline_fingerprint: str | None = None
     outline_only: list[int] | None = None
     promoted_cited: list[int] | None = None
-    # Transcript windows (D-090) from ``diagnostics``; None when not sent.
+    # Transcript windows (D-091) from ``diagnostics``; None when not sent.
     windows: list[dict[str, Any]] | None = None
     window_tokens: int | None = None
     window_fingerprint: str | None = None
@@ -1087,7 +1087,7 @@ def _ratio_json(r: Ratio) -> dict[str, Any]:
 
 
 # 4: wf-2's version 3 plus the D-080 latency fields and the D-077 parent context fields.
-# 5: the D-090 transcript window fields (``windows``, ``window_tokens``, ``window_fingerprint``,
+# 5: the D-091 transcript window fields (``windows``, ``window_tokens``, ``window_fingerprint``,
 # ``window_only``) per question and ``window_tokens`` / ``window_only`` in ``latency``.
 SIDECAR_VERSION = 5
 FAILED_TEXT_CHARS = 300  # the app caps failed sentences at this; the runner does too
@@ -2705,7 +2705,7 @@ def outline_same(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
 
 
 def windows_same(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
-    """Same transcript windows (D-090)? None when either sidecar predates
+    """Same transcript windows (D-091)? None when either sidecar predates
     ``window_fingerprint`` (version 5)."""
     if "window_fingerprint" not in a or "window_fingerprint" not in b:
         return None

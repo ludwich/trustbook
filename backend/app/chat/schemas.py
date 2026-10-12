@@ -120,7 +120,7 @@ class ExpansionOut(BaseModel):
 
 
 class WindowOut(BaseModel):
-    """A transcript window (D-090): the numbered chunks it names by their times only (its
+    """A transcript window (D-091): the numbered chunks it names by their times only (its
     children, and any neighbour that is also numbered), the neighbours whose text it shows (time
     order) and the prompt tokens it adds. Never citable."""
 
@@ -160,7 +160,7 @@ class Diagnostics(BaseModel):
     and no chunk holds. ``promoted_cited``: [kept sentences citing a promoted chunk, those of them
     also citing another chunk].
 
-    Transcript windows (D-090): ``windows`` (see :class:`WindowOut`), ``window_tokens`` (their
+    Transcript windows (D-091): ``windows`` (see :class:`WindowOut`), ``window_tokens`` (their
     prompt tokens), ``window_fingerprint`` (a hash of their text; None: no window) and
     ``window_only``: per verification pass, how many failed sentences miss a name, or use a word,
     that a window shows and no chunk holds.

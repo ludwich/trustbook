@@ -203,7 +203,7 @@ def test_the_sidecar_v5_keeps_numbers_and_ids(tmp_path: Path) -> None:
     assert row["expansions"] == [{"chunk_id": "src1-c1", "kind": "class_head", "referrer": "x"}]
     assert row["outline_fingerprint"] == "of-1" and row["outline_tokens"] == 85
     assert row["promoted_citations"] == {"n": 1, "correct": 1}
-    # Transcript windows (D-090): ids and numbers only.
+    # Transcript windows (D-091): ids and numbers only.
     assert row["windows"] == [
         {"source_id": "src2", "numbered": ["t3"], "chunk_ids": ["t2"], "tokens": 40}
     ]
