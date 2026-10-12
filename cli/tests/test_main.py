@@ -307,6 +307,7 @@ def test_eval_maps_the_runners_exit_code(tmp_path: Path, monkeypatch: pytest.Mon
     runner = tmp_path / "runner.py"
     runner.write_text("import sys\nprint('report')\nsys.exit(int(sys.argv[-1]))\n")
     monkeypatch.setenv("TRUSTBOOK_EVAL_RUNNER", str(runner))
+    monkeypatch.setattr(eval_cmd, "EVAL_MODULES", {"json": "json"})  # PyYAML may be absent here
     assert run(FakeApi(), "eval", "--questions", "q.yaml", "1")[:2] == (4, "report\n")
     assert run(FakeApi(), "eval", "--questions", "q.yaml", "2")[0] == 1  # not "refused"
 
