@@ -587,3 +587,68 @@ Other checks:
 - Grounding does not check times written in transcript prose: the model is told not to state a time only the
   window shows, but a wrong time inside a sentence is not caught (D-091).
 - The CLI starts a new conversation per `ask` (no follow-ups yet).
+
+---
+
+## Gate 4 — Ideation
+
+**Image:** `ghcr.io/ludwich/trustbook:phase-4-rc` · **PR:** `phase-4 → phase-3b` (stacked: merged only after Gates 3 and 3b pass, then this one)
+
+**Criteria (SPEC §14):** a full session on a sample idea produces a brief with cited anchors and open questions;
+"Finish now" mid-session works; briefs never appear in chat citations.
+
+**What it adds (SPEC §10, D-093..D-103):**
+- **Ideation tab.** Type an idea under "I have an idea". Trustbook asks one question at a time, each with a
+  recommended answer that you can accept, skip or answer yourself.
+- **Recommendations.** The recommendation first states what your sources say, cited and checked like a chat
+  answer: a cited sentence that fails the checks is removed (shown in "Unverified, not from your sources") and is
+  never relabelled. Then come the model's own sentences, marked "Suggestion".
+- **Branch map.** Shown beside the interview: dashed branches are not asked yet, solid ones are answered, × removes
+  a seed, the header reads "X resolved, Y open", and the session is "Complete" when nothing is open.
+- **Sessions and the brief.** Sessions resume after a reload. "Finish now" writes the brief
+  (`ideas/<session>/brief.md`): the Q&A with accepted recommendations marked, cited anchors, risks, open questions
+  and a Mermaid mindmap. Export downloads it.
+- **Briefs never become a source.** Linking a folder skips them. Uploading or pasting a brief, or linking a
+  Trustbook data or space folder, is refused.
+
+### Setup
+1. **Back up first.** Copy your `Trustbook` data folder. Opening a space with this image migrates its `space.db` to
+   version 6, and older images (`phase-3-rc`, `phase-3b-rc`) cannot open a migrated space.
+2. In `.env` set `TRUSTBOOK_IMAGE_TAG=phase-4-rc`, then `docker compose pull` and `docker compose up -d`. Chat
+   model: your Qwen3.6 llama-server as before.
+
+### Checklist
+
+| # | Check | How to verify | Expected |
+|---|---|---|---|
+| 1 | Start a session | In `Smoke`, open **Ideation**. Type: "A small command-line tool, built on the requests library, that downloads a list of URLs with retries, Basic auth and a progress bar." | Stages show; then the first question with a recommended answer, and 3–4 dashed branches on the map |
+| 2 | Cited recommendation | Go through the questions until one about retries or authentication | Its recommendation starts with a sentence citing your sources (click the citation: the viewer opens on the cited lines, e.g. `docs/user/advanced.rst`), followed by sentences tagged **Suggestion** |
+| 3 | Answer, accept, skip, dismiss | Accept one recommendation, type your own answer to another, skip one, remove a dashed seed with × | The map updates (solid = answered); the header shows "X resolved, Y open"; an answer can add a new branch |
+| 4 | Resume | Reload the page (or switch to Chat and back) | The same question and map |
+| 5 | Finish now mid-session (Gate 4) | With branches still open, press **Finish now**, then **Export Markdown** | The brief has the idea, the Q&A ("accepted recommendation" marked, skipped marked), **Cited anchors** (source + lines), open risks, **Open questions** (the open and skipped branches) and a `mindmap` block (paste it into mermaid.live to see it) |
+| 6 | Full session (Gate 4) | **Continue**, answer or skip until the map says **Complete**, then Finish | The brief has cited anchors; open questions list only skipped branches |
+| 7 | Briefs never in chat (Gate 4) | In **Chat** in the same space, ask about something only your answers and the brief say (e.g. "What did we decide about output file naming for the URL downloader?") | Refused ("not in your sources") or answered only from your real sources; never a citation to a brief. The source list is unchanged |
+| 8 | Brief not ingested | Link a folder that contains an exported brief (or upload the `.md`) | The brief is skipped (folder) or refused (upload), with a plain-English reason |
+| 9 | Request log | Settings → Request log | Every ideation call is listed (seed, turns, judge) |
+| 10 | Earlier gates | Chat, the CLI (Gate 3b #3–#4) and the Gate 3 command still work on this image | As before |
+
+### Builder results (dev workbench, before handing over)
+
+| Check | Result |
+|---|---|
+| Quality bar: backend (ruff, mypy --strict, full pytest), eval, cli, frontend (lint, typecheck, 197 Vitest tests) | pass |
+| Playwright on a local build of this branch, mock chat model: `ideation.spec.ts` covers (a) a cited recommendation and its viewer, accept/answer/skip/dismiss, reload, Finish now mid-session (3 resolved, 1 open), the brief's sections and mindmap, and chat never citing the brief; (b) a full session to Complete | 2/2 pass; the whole suite 25/25 (2 internet-only specs skipped) |
+| CLI end-to-end on the same image | pass |
+| **Real model** (Qwen3.6-35B-A3B on llama-server, `Smoke` space, the idea in #1; seed + 4 turns + Finish) | Turns took 7–27 s. Turn 1 had a verified cited sentence (README). Turn 3 was partly cited: "by default, Requests does not retry failed connections… retries with backoff using urllib3.util.Retry" cites `docs/user/advanced.rst` 1032–1056, and the model's 502/503/504 choice is a Suggestion. The brief's Cited anchors list both and Open questions lists the skipped branch |
+| Real model, Gate 4 #7 | the source list stayed at 5 sources. `trustbook ask "What did we decide about the output file naming and the target user audience of the CLI URL downloader?"` returned refused, `not_in_sources`, exit 2 |
+| First real-model attempt (before D-103) | 0 cited sentences, and one turn failed: reasoning used the whole token budget. Fixed in D-103 by reporting the sources first and not thinking before a turn's JSON |
+
+### Known limits
+- **One call per turn.** The next question is chosen before the model's reply, so a new branch from your answer is
+  asked one turn later (D-093).
+- **No reasoning in turns.** Turns run without thinking (D-103). Questions are good with Qwen3.6, but a model that
+  only works well when it reasons may ask plainer questions.
+- **Unchecked parts.** Questions, branch titles and risks are not checked against sources. They make no claims about
+  them, and the prompt forbids it.
+- **Not in this phase.** "Suggest ideas" from the sources is out of scope (SPEC §16), and there is no CLI command
+  for ideation yet (backlog).

@@ -32,3 +32,12 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - Never `git commit -a` while agents edit the tree; stage explicit paths.
 - ML work outside CI: `UV_PROJECT_ENVIRONMENT=<scratch>/mlvenv uv sync --frozen --extra ml`.
 - Build test images from committed HEAD only: `git archive HEAD | docker build -f docker/app.Dockerfile -`.
+
+## Phase 4 (branch `phase-4`, stacked on phase-3b): Ideation — built, Gate 4 waiting
+- [x] Backend: schema v6, map, prompt, engine (per-sentence grounded recommendations), service, API + SSE, brief,
+  estimate, shared `api/grounded.py`, isolation guards (D-093..D-101)
+- [x] Frontend: Ideation tab (entry, question card, branch map, finish/export/continue, resume, running state; D-102)
+- [x] Real-model check (Qwen3.6): recommendations cite sources, briefs never in chat (D-103)
+- [x] Quality bar green; Playwright 25/25 incl. `ideation.spec.ts`; CLI e2e on the image
+- [ ] CI + `phase-4-rc`; PR phase-4 → phase-3b; Gate 4 in GATES.md (written)
+- Backlog: `trustbook ideas` CLI command; "Suggest ideas" (SPEC §16, out of scope)
