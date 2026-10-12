@@ -15,6 +15,7 @@ import { SourceViewerProvider } from "@/components/chat/SourceViewer";
 import { EmptyState } from "@/components/common/EmptyState";
 import { QueryError } from "@/components/common/QueryError";
 import { GateLogDialog } from "@/components/gate/GateLogDialog";
+import { IdeationView } from "@/components/ideation/IdeationView";
 import { SourcesPanel } from "@/components/sources/SourcesPanel";
 import { Button } from "@/components/ui/button";
 import {
@@ -176,11 +177,8 @@ function SpaceWorkspace({ spaceId }: { spaceId: string }) {
               <ChatView spaceId={spaceId} onOpenIdeation={() => setTab("ideation")} />
             </TabsContent>
 
-            <TabsContent value="ideation" className="pt-2">
-              <EmptyState icon={<IconBulb />} title="I have an idea">
-                Talk an idea through one question at a time and get a written brief. Ideas never
-                become sources. Coming in a later phase.
-              </EmptyState>
+            <TabsContent value="ideation" className="flex min-h-0 flex-col pt-2">
+              <IdeationView spaceId={spaceId} />
             </TabsContent>
           </Tabs>
         </section>
