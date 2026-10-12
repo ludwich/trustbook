@@ -1914,3 +1914,27 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Alternatives:** remembering the selected session in local storage (more state, stale after deletes);
   re-attaching to the running stream (needs server-side fan-out of events); turn state in React state (lost on
   tab switch).
+
+### D-103 Ideation turns: report the sources first, then suggest; no thinking before the JSON
+- **Finding (real model, before handing over):** a session on the `Smoke` space (requests code and docs, Qwen3.6-35B-A3B
+  on llama-server) with the idea "a command-line tool, built on requests, that downloads URLs with retries, Basic
+  auth and a progress bar" had two problems.
+  - **No citations.** Every recommendation was an uncited suggestion. The one cited sentence mixed the model's own
+    choice ("a total of 3 attempts, a backoff factor of 0.1") into a sentence citing `advanced.rst`, and the judge
+    correctly vetoed it. The brief's "Cited anchors" was empty, which fails Gate 4's "brief with cited anchors".
+  - **Empty replies.** With thinking on, a turn's reasoning used the whole 4,096-token budget twice (about 50 s
+    each), and the reply was empty: "The chat model's reply could not be used".
+- **Decision:**
+  1. **The recommendation has two parts.** First, when chunks bear on the question, 1–2 sentences that only report
+     what the chunks state, in their words, citing them. Then the model's own suggestion, in separate uncited
+     sentences that hold every choice (numbers, settings, designs). Sentences about the chunks themselves ("the
+     chunks do not say…") are not allowed. Grounding is unchanged: a cited sentence still passes every layer or is
+     removed (D-094).
+  2. **Seed and turn calls ask the model not to think first** (`think=False`, through `generate_structured`). A
+     turn is a short structured reply. Chat answers keep thinking, so the chat request and Gate 3 are unchanged.
+- **Measured (same space and idea, 4 turns + finish):**
+  - **Before:** 0 cited sentences; turns of 26–61 s, and one turn failed with an empty reply.
+  - **After:** a verified cited sentence in turn 1 (README) and a partly cited recommendation in turn 3. The latter
+    said "by default, Requests does not retry failed connections… retries with backoff using urllib3.util.Retry",
+    citing `advanced.rst` 1032–1056, followed by the model's own 502/503/504 suggestion, uncited. Turns took
+    7–27 s, and the brief's "Cited anchors" lists both.

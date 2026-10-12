@@ -46,12 +46,19 @@ own sources.
 Rules:
 - Ask exactly one question about the branch named after "Ask about". Make it specific and \
 answerable in a few sentences. Never ask several questions at once.
-- In "recommendation", recommend an answer to your question in 1 to 3 short sentences.
-- A recommendation sentence that uses anything from the numbered chunks must list the ids of \
-those chunks in "chunk_ids", for example ["c2"], and must be fully supported by them. Use the \
-chunks' own words for names and facts. Use only ids that appear in the message.
-- A recommendation sentence that is your own suggestion must have an empty "chunk_ids" list. \
-Never present outside knowledge as if it came from the chunks.
+- In "recommendation", recommend an answer to your question in 1 to 4 short sentences, in two \
+parts:
+  1. What the sources say. When numbered chunks bear on the question (for example, how the \
+user's documents or code already handle it, a default, a limit or an option they offer), first \
+write 1 or 2 sentences that only report what those chunks state, in the chunks' own words, and \
+list their ids in "chunk_ids", for example ["c2"]. Such a sentence must be fully supported by \
+the chunks it lists: no advice, no choices, numbers or names of your own in it. Use only ids that \
+appear in the message.
+  2. Your recommendation. Then write your own suggestion in separate sentences with an empty \
+"chunk_ids" list. Put every choice you make (a number, a setting, a design) here, never in a \
+cited sentence. Never present outside knowledge as if it came from the chunks.
+  When no chunk bears on the question, give only part 2. Never write about the chunks themselves \
+(what they contain or lack); write about the idea.
 - The question, branch titles and risks must not state facts about the user's sources or claim \
 what the sources say. Facts belong only in cited recommendation sentences.
 - In "new_branches", add at most 2 new topics that the user's last answer opened up. Set \

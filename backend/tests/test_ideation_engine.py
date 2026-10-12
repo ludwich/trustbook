@@ -189,6 +189,7 @@ def test_cited_recommendation_passes_and_is_numbered() -> None:
     result, queries = run_turn(chat, retrieval(chunk(1, HOSTEL), chunk(2, FERRY)))
     assert queries == [f"{IDEA}\nWhen it runs"]
     assert chat.calls[0]["schema"] == TURN_SCHEMA
+    assert chat.calls[0]["think"] is False  # D-103: no thinking before a turn's JSON
     asked = result.asked
     assert asked is not None and asked.question == "When should the trip run?"
     rec = asked.recommendation
@@ -277,6 +278,7 @@ def test_seed_call() -> None:
     parsed = engine.seed(IDEA, chat_adapter=lambda: chat)
     assert parsed.title == "Bird trips" and parsed.branches == ["Who", "When", "Cost"]
     assert len(chat.calls) == 2 and chat.calls[0]["schema"] == SEED_SCHEMA
+    assert [c["think"] for c in chat.calls] == [False, False]  # the retry too (D-103)
 
 
 # --- mock hooks ------------------------------------------------------------------------------

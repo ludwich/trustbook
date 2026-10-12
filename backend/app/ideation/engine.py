@@ -79,7 +79,7 @@ def seed(
     """The idea's title and its 3-4 first branches (one call, one retry on unusable JSON)."""
     on_stage("generating")
     return generate_structured(
-        chat_adapter(), seed_messages(idea), SEED_SCHEMA, parse_seed, calls=calls
+        chat_adapter(), seed_messages(idea), SEED_SCHEMA, parse_seed, calls=calls, think=False
     )
 
 
@@ -247,6 +247,7 @@ def turn(
         TURN_SCHEMA,
         lambda text: parse_turn(text, labels.keys(), expect_question=target is not None),
         calls=meter,
+        think=False,  # D-103: a turn is a short structured reply; thinking used the whole budget
     )
     diagnostics["dropped"] = len(parsed.dropped)
 
