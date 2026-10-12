@@ -75,8 +75,8 @@ class Cli:
 
     def json(self, *argv: str, stdin: str = "") -> Run:
         run = self(*argv, "--json", stdin=stdin)
-        assert run.out.isascii()
-        json.loads(run.out)  # exactly one document
+        assert run.out.isascii() and run.out.count("\n") == 1
+        json.loads(run.out)  # exactly one document, on one line
         return run
 
 

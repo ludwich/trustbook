@@ -103,7 +103,7 @@ def test_answer_with_code_and_transcript_citations() -> None:
     )
     code, out, err = run(api, "--json", "ask", "Wie groß?", "--space", "acme")
     assert code == 0, err
-    assert out.isascii() and out.count("\n}") == 1
+    assert out.isascii() and out.count("\n") == 1 and out.endswith("}\n")
     doc = json.loads(out)
     assert doc["answer"] == "größe returns 1. [1] The pump starts. [2][1]"
     assert doc["sentences"][1]["citations"] == [2, 1]

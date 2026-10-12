@@ -28,8 +28,11 @@ SCHEMA_ERROR = "trustbook.error/1"
 
 
 def json_text(doc: dict[str, Any]) -> str:
-    """One document, indented, ASCII-only (``\\uXXXX`` escapes)."""
-    return json.dumps(doc, ensure_ascii=True, indent=2) + "\n"
+    """One document on one line, ASCII-only (``\\uXXXX`` escapes).
+
+    One line: Windows PowerShell 5.1's ``ConvertFrom-Json`` and line-based tools read it as is.
+    """
+    return json.dumps(doc, ensure_ascii=True, separators=(",", ":")) + "\n"
 
 
 def ascii_safe(text: str, stream: TextIO) -> str:
