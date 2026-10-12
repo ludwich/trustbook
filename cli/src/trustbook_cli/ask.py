@@ -23,6 +23,7 @@ from trustbook_cli.client import (
     TrustbookClient,
     error_detail,
     iter_sse,
+    sse_lines,
 )
 from trustbook_cli.output import EXIT_OK, EXIT_REFUSED, SCHEMA_ASK
 
@@ -160,7 +161,7 @@ def _consume(
                 raise ApiError(
                     f"ask failed: HTTP {resp.status_code}: {error_detail(resp)}", resp.status_code
                 )
-            for ev in iter_sse(resp.iter_lines()):
+            for ev in iter_sse(sse_lines(resp.iter_bytes())):
                 if ev.event in ("status", "message"):
                     continue
                 try:

@@ -6,7 +6,9 @@ HTTP API is used (docs/ARCHITECTURE.md), so nothing here can bypass grounding or
 
 from __future__ import annotations
 
+import codecs
 import html
+import re
 import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -50,9 +52,41 @@ class SseEvent:
     data: str
 
 
+_EOL = re.compile(r"\r\n|\r|\n")
+
+
+def sse_lines(chunks: Iterable[bytes]) -> Iterator[str]:
+    """Split a UTF-8 byte stream into lines at CRLF, LF or CR only: the SSE line endings.
+
+    httpx's ``iter_lines`` uses ``str.splitlines``, which also breaks at U+2028, U+2029, U+0085,
+    form feeds and the like, so an event whose data contains one would be cut in half. Here those
+    stay inside their line. A CRLF split across two chunks is one line ending; a leading BOM is
+    dropped; invalid UTF-8 becomes U+FFFD. Lines are yielded without their line ending.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8-sig")(errors="replace")
+    buffer = ""
+    for chunk in chunks:
+        buffer += decoder.decode(chunk)
+        start = 0
+        for match in _EOL.finditer(buffer):
+            # A CR at the end may be the first half of a CRLF: wait for the next chunk.
+            if match.group() == "\r" and match.end() == len(buffer):
+                break
+            yield buffer[start : match.start()]
+            start = match.end()
+        buffer = buffer[start:]
+    buffer += decoder.decode(b"", final=True)
+    lines = _EOL.split(buffer)
+    if lines and lines[-1] == "":
+        lines.pop()
+    yield from lines
+
+
 def iter_sse(lines: Iterable[str]) -> Iterator[SseEvent]:
     """Parse a ``text/event-stream`` (WHATWG rules, minus ``id``/``retry`` which are unused).
 
+    ``lines``: from :func:`sse_lines` (not httpx's ``iter_lines``, which splits at more than the
+    SSE line endings).
     Data lines are joined with ``\\n``; comment lines (``:``) are ignored; an event without a
     blank line before the end of the stream is still delivered.
     """

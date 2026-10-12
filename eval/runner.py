@@ -62,6 +62,7 @@ from trustbook_cli.client import (
     iter_sse,
     norm_text,
     request_json,
+    sse_lines,
 )
 from trustbook_cli.client import (
     SseEvent as SseEvent,  # re-exported (tests)
@@ -1397,7 +1398,7 @@ def ask(
                     )
                 result.error = f"HTTP {resp.status_code}: {resp.text[:300]}"
                 return result
-            for ev in iter_sse(resp.iter_lines()):
+            for ev in iter_sse(sse_lines(resp.iter_bytes())):
                 if ev.event in ("status", "message"):
                     continue
                 try:

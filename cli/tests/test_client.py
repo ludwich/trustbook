@@ -15,6 +15,7 @@ from trustbook_cli.client import (
     iter_sse,
     norm_text,
     request_json,
+    sse_lines,
 )
 
 
@@ -22,6 +23,33 @@ def test_iter_sse_multiline_comments_crlf_and_unterminated() -> None:
     lines = [": hi", "event: sentence\r\n", "data: a", "data:b", "", "data: last"]
     events = list(iter_sse(lines))
     assert [(e.event, e.data) for e in events] == [("sentence", "a\nb"), ("message", "last")]
+
+
+def test_sse_lines_split_only_at_sse_line_endings() -> None:
+    text = 'event: refused\ndata: {"m":"a\u2028b\u2029c\u0085d\x0ce\x1cf"}\n\n'
+    assert list(sse_lines([text.encode()])) == [
+        "event: refused",
+        'data: {"m":"a\u2028b\u2029c\u0085d\x0ce\x1cf"}',
+        "",
+    ]
+    events = list(iter_sse(sse_lines([text.encode()])))
+    assert [(e.event, e.data) for e in events] == [
+        ("refused", '{"m":"a\u2028b\u2029c\u0085d\x0ce\x1cf"}')
+    ]
+
+
+def test_sse_lines_crlf_cr_bom_and_chunk_boundaries() -> None:
+    raw = "\ufeffa\r\nb\rc\nd\u2028é\r".encode()
+    expected = ["a", "b", "c", "d\u2028é"]
+    assert list(sse_lines([raw])) == expected
+    # Every split point, including inside the BOM, a CRLF and multi-byte characters.
+    for cut in range(1, len(raw)):
+        assert list(sse_lines([raw[:cut], b"", raw[cut:]])) == expected, cut
+    assert list(sse_lines([b"x\r", b"\ny"])) == ["x", "y"]
+    assert list(sse_lines([b"x\r", b"y"])) == ["x", "y"]
+    assert list(sse_lines([b"\n\n"])) == ["", ""]
+    assert list(sse_lines([])) == []
+    assert list(sse_lines([b"bad \xff"])) == ["bad \ufffd"]
 
 
 def test_norm_text_and_find_space() -> None:
