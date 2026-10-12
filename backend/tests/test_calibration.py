@@ -13,12 +13,15 @@ from app.capabilities.audio import wav_bytes
 from app.capabilities.bundled import ModelInfo, ProviderRegistry, RuntimeOptions, TuneResult
 from app.capabilities.cpu import CpuInfo
 from app.capabilities.streams import StreamLayout, choose_streams, stream_candidates
+from app.chunking.dispatch import CHUNKER_VERSION
 from app.config import Paths, ensure_layout
+from app.jobs import calibration
 from app.jobs.calibration import (
     CALIBRATE_KIND,
     CALIBRATION_VERSION,
     SPEECH_SAMPLE,
     CalibrationService,
+    pipeline_key,
     synthetic_chunks,
 )
 from app.jobs.handlers import JobCancelledError, JobContext
@@ -112,6 +115,45 @@ def test_old_calibration_is_redone(
     assert service.ensure_first_run() is None
     paths.calibration_file.write_text(json.dumps({**current.model_dump(), "version": 1}))
     assert service.ensure_first_run() is not None
+
+
+def test_chunker_or_embedding_change_redoes_calibration(
+    paths: Paths,
+    fake_providers: ProviderRegistry,
+    repo: JobRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Item C (D-057): the saved rates name the chunker and embedding model they were measured
+    with; changing either re-runs calibration without anyone bumping CALIBRATION_VERSION."""
+    ensure_layout(paths)
+    write_models_lock(paths.models_dir)  # embeddings at revision "rev-embeddings"
+    service = CalibrationService(paths, fake_providers, repo, clock=Clock())
+    current = service.run(_ctx()[0])
+    assert current.pipeline == pipeline_key("google/embeddinggemma-2", "rev-embeddings")
+    assert f"chunker-{CHUNKER_VERSION}" in current.pipeline
+    assert f"calibration-{CALIBRATION_VERSION}" in current.pipeline
+    assert not service.outdated(current)
+    assert service.ensure_first_run() is None
+
+    monkeypatch.setattr(calibration, "CHUNKER_VERSION", "next-chunker")
+    assert service.outdated(current)
+    monkeypatch.undo()
+    assert not service.outdated(current)
+
+    lock = paths.models_dir / "models.lock.json"
+    original = lock.read_text("utf-8")
+    lock.write_text(original.replace("rev-embeddings", "rev-embeddings-2"))
+    assert service.outdated(current)
+    lock.write_text(original)
+
+    # Saved before v6: no pipeline recorded, so it is outdated even at the current version.
+    legacy = current.model_dump()
+    legacy.pop("pipeline")
+    paths.calibration_file.write_text(json.dumps(legacy))
+    saved = service.read()
+    assert saved is not None and saved.pipeline is None and service.outdated(saved)
+    job = service.ensure_first_run()
+    assert job is not None and job.kind == CALIBRATE_KIND
 
 
 def test_run_without_models(paths: Paths, repo: JobRepository) -> None:
@@ -285,10 +327,15 @@ def test_calibration_picks_streams_and_measures_code_with_them(
     assert (result.runtime.embedding_streams, result.runtime.stream_threads) == (4, 2)
     assert result.notes[0].startswith("Indexing uses 4 parallel streams × 2 threads")
     assert result.embedding_chunks_per_s_code == 128.0  # 32 chunks / 0.25 s (fake clock)
-    # The shared embedder (prose speed) plus 4 replicas with 2 threads each, one thread apiece.
-    assert [r.threads_option for r in loads] == [8, 2, 2, 2, 2]
+    # The shared embedder (prose speed) plus up to 4 replicas with 2 threads each, one thread
+    # apiece. Streams load their replica lazily and pull batches from a shared list, so a stream
+    # that gets no batch never loads one: assert the invariants, not an exact count (it raced).
+    assert loads[0].threads_option == 8
+    replicas = loads[1:]
+    assert 1 <= len(replicas) <= 4
+    assert all(r.threads_option == 2 for r in replicas)
     stream_threads = {name for number, names in threads.items() if number > 0 for name in names}
-    assert stream_threads == {f"embed-stream-{i}" for i in range(4)}
+    assert stream_threads and stream_threads <= {f"embed-stream-{i}" for i in range(4)}
     assert all(len(names) == 1 for number, names in threads.items() if number > 0)
     saved = json.loads(paths.calibration_file.read_text())
     assert saved["runtime"]["embedding_streams"] == 4

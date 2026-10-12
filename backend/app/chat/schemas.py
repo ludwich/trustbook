@@ -12,6 +12,7 @@ Hint = Literal["ideation"]
 GateDecision = Literal["sources", "brainstorm", "chitchat"]
 GATE_DECISIONS: tuple[GateDecision, ...] = ("sources", "brainstorm", "chitchat")
 Stage = Literal["retrieving", "generating", "checking"]
+SentenceMethod = Literal["checker", "code_judge"]
 OverviewStatus = Literal["none", "pending", "ready", "failed"]
 
 MAX_QUESTION_CHARS = 4_000
@@ -49,16 +50,128 @@ class MessageContent(BaseModel):
     hint: Hint | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
+MAX_SEED = 2**32 - 1
+
+
+class Generation(BaseModel):
+    """Per-request generation settings (only the eval runner sends them, F5 / D-055).
+
+    Left out, the answer uses the SPEC default (temperature 0.2, no seed).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    temperature: float | None = Field(default=None, ge=0.0, le=1.0)
+    seed: int | None = Field(default=None, ge=0, le=MAX_SEED)
+
+
+class GenerationUsed(BaseModel):
+    """The temperature and seed the answer call actually used."""
+
+    temperature: float
+    seed: int | None = None
+
+
+class CitationChange(BaseModel):
+    """How Trustbook changed one sentence's citations (chunk ids only, never text).
+
+    ``dropped``: near-copies of a kept citation (D-052 extension). ``swapped``:
+    ``[from, to]`` pairs, a near-copy replaced by the chunk that defines the named symbol.
+    """
+
+    sentence: int
+    dropped: list[str] = Field(default_factory=list)
+    swapped: list[list[str]] = Field(default_factory=list)
+
+
+class FailedSentenceOut(BaseModel):
+    """A sentence of the model's reply that failed verification and why (both capped at 300
+    characters, D-075)."""
+
+    text: str
+    reason: str
+
+
+class Timings(BaseModel):
+    """Where an answer's time went, in seconds (D-080).
+
+    ``generation_s``: each answer call (JSON retries and the regeneration included).
+    ``verification_s``: each verification pass (first reply, regenerated reply).
+    ``citation_s``: choosing the kept sentences' citations (None: not reached). ``gate_s``: the
+    gate router before the answer (None: no gate call). ``total_s``: the answer pipeline from
+    retrieval to the outcome (the gate not included).
+    """
+
+    retrieval_s: float | None = None
+    generation_s: list[float] = Field(default_factory=list)
+    verification_s: list[float] = Field(default_factory=list)
+    citation_s: float | None = None
+    gate_s: float | None = None
+    total_s: float | None = None
+
+
+class ExpansionOut(BaseModel):
+    """A chunk promoted as parent context (D-077): its id, ``section_previous`` or
+    ``class_head``, and the id of the context chunk it was promoted for (``referrer``)."""
+
+    chunk_id: str
+    kind: str
+    referrer: str | None
+
+
 class Diagnostics(BaseModel):
     """Scores behind an answer, for threshold tuning (the eval runner reads them; the UI doesn't).
 
     ``sentence_scores`` follows the model's cited sentences, removed ones included: the grounding
-    checker's best score per sentence, 0.0 when a code check failed, None when the checker is off.
+    checker's best score per sentence, 0.0 when a code check failed or the judge vetoed it, None
+    when the checker is off.
+    ``sentence_methods`` (same order): what passed each sentence, ``checker`` or ``code_judge``
+    (failed the checker, passed on the judge, D-045/D-063); None for failed sentences and when
+    the checker is off.
+    ``judge_vetoed``: indices (same order) of sentences the checker passed and the judge's
+    confirmation failed. ``judge_seconds``: time spent waiting for the judge (None: not called).
+    ``retrieval_fingerprint``: a hash of the ordered context chunk ids (None: no context).
+    ``generation``: what the answer call used (None: no answer call).
+    ``failed_sentences``: the failed sentences of the reply the outcome rests on (the second one
+    after a regeneration, unless it was unusable), with the reason each failed (D-075).
+
+    Latency (D-080): ``judge_calls``: every judge request for the answer (rescues, confirmations,
+    solo re-asks, both passes, citation choice). ``judge_calls_per_pass``: those made by each
+    verification pass (first reply, regenerated reply). ``answer_calls``: answer generation
+    requests (JSON retries and the regeneration included). ``timings``: see :class:`Timings`.
+    ``prompt_tokens`` (estimated, characters / 4) and ``completion_tokens`` (as the endpoint
+    reports them, None when it does not): per answer call.
+
+    Parent context (D-077): ``expansions``: the promoted chunks. ``promoted_tokens`` and
+    ``outline_tokens``: their sizes. ``outline_fingerprint``: a hash of the outline text (None:
+    no outline); ``retrieval_fingerprint`` still covers only the chunks. ``outline_only``: per
+    verification pass, how many failed sentences miss a name or literal that the outline shows
+    and no chunk holds. ``promoted_cited``: [kept sentences citing a promoted chunk, those of them
+    also citing another chunk].
     """
 
     top_rerank: float | None = None
     sentence_scores: list[float | None] = Field(default_factory=list)
     regenerated: bool = False
+    sentence_methods: list[SentenceMethod | None] = Field(default_factory=list)
+    judge_vetoed: list[int] = Field(default_factory=list)
+    judge_seconds: float | None = None
+    citation_changes: list[CitationChange] = Field(default_factory=list)
+    retrieval_fingerprint: str | None = None
+    generation: GenerationUsed | None = None
+    failed_sentences: list[FailedSentenceOut] = Field(default_factory=list)
+    judge_calls: int = 0
+    judge_calls_per_pass: list[int] = Field(default_factory=list)
+    answer_calls: int = 0
+    timings: Timings | None = None
+    prompt_tokens: list[int] = Field(default_factory=list)
+    completion_tokens: list[int | None] = Field(default_factory=list)
+    expansions: list[ExpansionOut] = Field(default_factory=list)
+    promoted_tokens: int = 0
+    outline_tokens: int = 0
+    outline_fingerprint: str | None = None
+    outline_only: list[int] = Field(default_factory=list)
+    promoted_cited: list[int] = Field(default_factory=lambda: [0, 0])
 
 
 class MessageOut(BaseModel):
@@ -90,6 +203,7 @@ class MessageCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     content: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    generation: Generation | None = None
 
     @field_validator("content")
     @classmethod

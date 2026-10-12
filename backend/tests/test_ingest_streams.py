@@ -214,7 +214,7 @@ def test_model_failure_mid_way_fails_cleanly(
     assert _chunks(services, sid) == []
 
 
-def test_refresh_replaces_vectors_without_duplicates(
+def test_refresh_replaces_changed_vectors_without_duplicates(
     stream_client: TestClient, tmp_path: Path
 ) -> None:
     services = services_of(stream_client)
@@ -231,10 +231,68 @@ def test_refresh_replaces_vectors_without_duplicates(
     run_jobs(services)
     first = _chunks(services, sid)
     assert first and _index(services, sid).count() == len(first)
+    # Incremental refresh (SPEC §7.5): only the changed file gets new chunks and vectors.
+    (folder / "m03.py").write_text("def changed(x):\n    return x * 2\n")
     assert stream_client.post(f"/api/spaces/{sid}/sources/{created['id']}/refresh").status_code
     run_jobs(services)
     second = _chunks(services, sid)
-    assert _index(services, sid).count() == len(second) == len(first)
-    assert {c.id for c in first}.isdisjoint({c.id for c in second})
+    assert _index(services, sid).count() == len(second) == len(first) - 29
+    old_ids = {c.id for c in first if json.loads(c.locator)["file"] != "m03.py"}
+    new_ids = {c.id for c in second if json.loads(c.locator)["file"] == "m03.py"}
+    assert old_ids == {c.id for c in second} - new_ids
+    assert len(new_ids) == 1 and new_ids.isdisjoint({c.id for c in first})
     files = [json.loads(c.locator)["file"] for c in second]  # chunk order follows file order
     assert files == sorted(files) and len(set(files)) == 12
+    source = stream_client.get(f"/api/spaces/{sid}/sources").json()[0]
+    assert source["stats"]["changed_files"] == 1
+    assert source["stats"]["unchanged_files"] == 11
+
+
+def test_replicas_are_released_when_no_more_indexing_waits(
+    stream_client: TestClient, replicas: list[Replica]
+) -> None:
+    """Replicas hold ~0.55 GB each; idle indexing must not keep them (D-054)."""
+    services = services_of(stream_client)
+    _paste(stream_client)
+    assert run_jobs(services) == 1
+    assert len(replicas) == 3  # the job used three stream replicas
+    assert services.providers._replicas == {}  # released after the last ingest job
+    services.providers.ingest_embedder(1)  # the next indexing job loads them again
+    assert len(replicas) == 4
+
+
+def test_others_unfinished_counts_only_other_jobs_of_that_kind(
+    stream_client: TestClient,
+) -> None:
+    jobs = services_of(stream_client).jobs
+    first = jobs.enqueue("ingest", "a")
+    jobs.enqueue("ingest", "b")
+    jobs.enqueue("overview", "c")
+    assert jobs.others_unfinished("ingest", first.id) == 1
+
+
+def test_a_successful_ingest_ends_with_the_job_done(stream_client: TestClient) -> None:
+    """Regression (Gate 3): a bare `raise` in `finally` failed every successful ingest job."""
+    services = services_of(stream_client)
+    sid, created = _paste(stream_client)
+    assert run_jobs(services) == 1
+    source = stream_client.get(f"/api/spaces/{sid}/sources").json()[0]
+    assert source["status"] == "ready"
+    job = services.jobs.get(created["job_id"])
+    assert job is not None and job.status == "done", job
+    assert job.error is None
+    listed = {j["id"]: j for j in stream_client.get("/api/jobs").json()["jobs"]}
+    assert listed[created["job_id"]]["status"] == "done"
+
+
+def test_a_failing_ingest_ends_with_the_job_failed(
+    stream_client: TestClient, replicas: list[Replica]
+) -> None:
+    services = services_of(stream_client)
+    sid, created = _paste(stream_client)
+    services.providers.ingest_embedder(1).fail_after = 0  # type: ignore[attr-defined]
+    run_jobs(services)
+    source = stream_client.get(f"/api/spaces/{sid}/sources").json()[0]
+    assert source["status"] == "failed"
+    job = services.jobs.get(created["job_id"])
+    assert job is not None and job.status == "failed"

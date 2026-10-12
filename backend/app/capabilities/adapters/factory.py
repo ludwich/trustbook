@@ -10,12 +10,13 @@ from app.capabilities.adapters.base import (
     SearchAdapter,
     TranscriptionAdapter,
 )
-from app.capabilities.adapters.mock import MockChatAdapter
+from app.capabilities.adapters.mock import MockChatAdapter, MockSearchAdapter
 from app.capabilities.adapters.openai_compatible import OpenAICompatibleAdapter
 from app.capabilities.adapters.search import BraveAdapter, SearxngAdapter, TavilyAdapter
 from app.capabilities.adapters.stt_openai import OpenAITranscriptionAdapter
 from app.capabilities.http import OutboundHttp
 from app.capabilities.registry import EndpointConfig
+from app.config import mock_llm_enabled
 
 
 def _require(value: str | None, what: str) -> str:
@@ -78,7 +79,11 @@ def build_stt_adapter(
 def build_search_adapter(
     provider: str, api_key: str | None, http: OutboundHttp, *, searxng_url: str
 ) -> SearchAdapter:
-    """Search adapter for ``provider`` (searxng, brave or tavily)."""
+    """Search adapter for ``provider`` (searxng, brave, tavily; mock only in test mode)."""
+    if provider == "mock":
+        if not mock_llm_enabled():
+            raise AdapterError("not_configured", "Choose a search service in Settings.")
+        return MockSearchAdapter()
     if provider == "brave":
         return BraveAdapter(http, api_key=_require(api_key, "Brave Search API key"))
     if provider == "tavily":

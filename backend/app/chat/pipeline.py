@@ -5,30 +5,68 @@
    any model call.
 3. Layer 3: numbered chunks, forced-citation JSON, one retry on unusable JSON, sentences without
    valid chunk ids dropped. No sentences returned → ``not_in_sources``; sentences returned but
-   none valid, or unusable JSON twice → ``invalid_output``.
+   none valid, or unusable JSON twice → ``invalid_output``. The model's citations are checked as
+   given (never completed, D-064).
 4. Layers 4 and 5 (:mod:`app.grounding.verify`): every sentence is checked against its cited
-   chunks. More than half failing → one regeneration with the same chunks plus
-   :data:`~app.chat.prompt.REGENERATE_INSTRUCTION`, checked again. Then the refusal rule: more
-   than half failing, or the first sentence failing → refuse (``unsupported``). Otherwise the
-   failing sentences are removed (``partially_verified``) or none fail (``verified``). With the
-   grounding checker off, layer 4 is skipped and the badge is ``unverified``.
+   chunks. When the refusal rule would fire (more than half failing, or the first sentence
+   failing), one regeneration with the same chunks plus
+   :data:`~app.chat.prompt.REGENERATE_INSTRUCTION` and the list of the first reply's failed
+   sentences with their reasons (:func:`failed_sentences`, D-074) is checked again (D-063); its
+   citations are verified as given. Then the refusal
+   rule: more than half failing, or the first sentence failing → refuse (``unsupported``).
+   Otherwise the failing sentences are removed (``partially_verified``) or none fail
+   (``verified``). With the grounding checker off, layer 4 is skipped and the badge is
+   ``unverified``. The judge rescues sentences about code the checker failed and confirms checker
+   passes (D-045, D-063, D-064); ``diagnostics.sentence_methods`` records which passed them and
+   ``diagnostics.failed_sentences`` the failed sentences and why (D-075).
+5. Citations of passing sentences are chosen (:mod:`app.chat.citation_choice`, D-052 and its
+   extension): supporting chunks only, near-copies collapsed, the defining chunk preferred.
 
 Citation numbers are given after removal, in order of first use among the kept sentences.
+
+Parent context (D-077, D-079): the retrieval's promoted chunks are ordinary numbered chunks; its
+code outline goes into the prompt after the chunks and nowhere else. No check reads it: it is not
+a chunk, so nothing only the outline shows can verify. The diagnostics count such failures
+(``outline_only``) and record the time, judge calls and answer calls of each step (D-080).
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 
+from app.chat.citation_choice import choose, upgrade_candidates
 from app.chat.citations import number_citations
-from app.chat.llm import ChatAdapterFactory, generate_structured
+from app.chat.llm import AnswerCall, ChatAdapterFactory, generate_structured
 from app.chat.output import DraftSentence, InvalidOutputError, ParsedAnswer, parse_answer
-from app.chat.prompt import ANSWER_SCHEMA, answer_messages, labelled
-from app.chat.schemas import Badge, Diagnostics, Refusal, RefusalReason, SentenceOut, Stage
+from app.chat.prompt import (
+    ANSWER_SCHEMA,
+    TEMPERATURE,
+    FailedSentence,
+    answer_messages,
+    labelled,
+)
+from app.chat.schemas import (
+    Badge,
+    CitationChange,
+    Diagnostics,
+    ExpansionOut,
+    FailedSentenceOut,
+    Generation,
+    GenerationUsed,
+    Refusal,
+    RefusalReason,
+    SentenceOut,
+    Stage,
+    Timings,
+)
 from app.chat.text import content_terms, question_topic
+from app.grounding.code_checks import name_in, unescape_markdown, without_location
 from app.grounding.verify import Checked, Verifier
+from app.retrieval.parents import outline_fingerprint, outline_text
 from app.retrieval.service import Retrieval, RetrievedChunk
 
 logger = logging.getLogger("trustbook.chat")
@@ -98,18 +136,287 @@ def check_sentences(
     return verifier.check([(s.text, [chunks[i] for i in s.chunk_ids]) for s in sentences])
 
 
+def prune_citations(
+    sentence: DraftSentence, scores: tuple[float | None, ...], threshold: float | None
+) -> tuple[DraftSentence, tuple[float | None, ...]]:
+    """Keep only the cited chunks that support the sentence on their own, when any does (D-052).
+
+    Models over-cite: a sentence verified by one chunk often also cites a loosely related one.
+    When at least one cited chunk passes the threshold alone, the others are dropped; when only
+    the joined or focused premise passed, every cited chunk stays (they support it together).
+    """
+    if threshold is None or len(sentence.chunk_ids) < 2:
+        return sentence, scores
+    keep = [i for i, s in enumerate(scores) if s is not None and s >= threshold]
+    if not keep or len(keep) == len(sentence.chunk_ids):
+        return sentence, scores
+    ids = tuple(sentence.chunk_ids[i] for i in keep)
+    return replace(sentence, chunk_ids=ids), tuple(scores[i] for i in keep)
+
+
 def kept_and_removed(
-    sentences: list[DraftSentence], checked: Checked
+    sentences: list[DraftSentence], checked: Checked, threshold: float | None = None
 ) -> tuple[list[tuple[DraftSentence, tuple[float | None, ...]]], list[str]]:
-    """Passing sentences with their per-chunk scores, and the texts of the failing ones."""
+    """Passing sentences with their per-chunk scores, and the texts of the failing ones.
+
+    With ``threshold``, sentences the checker passed cite only the chunks that support them on
+    their own (when any does); see :func:`prune_citations`.
+    """
     kept: list[tuple[DraftSentence, tuple[float | None, ...]]] = []
     removed: list[str] = []
     for sentence, check in zip(sentences, checked.checks, strict=True):
         if check.passed:
-            kept.append((sentence, check.chunk_scores))
+            prune = threshold if check.method == "checker" else None
+            kept.append(prune_citations(sentence, check.chunk_scores, prune))
         else:
             removed.append(sentence.text)
     return kept, removed
+
+
+@dataclass(frozen=True)
+class Kept:
+    """A sentence that passed, with its index among the model's sentences and per-chunk scores."""
+
+    index: int
+    sentence: DraftSentence
+    scores: tuple[float | None, ...]
+
+
+@dataclass
+class _Changes:
+    dropped: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    swapped: dict[int, list[tuple[str, str]]] = field(default_factory=dict)
+
+    def out(self, chunks: Mapping[str, RetrievedChunk]) -> list[CitationChange]:
+        ids = sorted(set(self.dropped) | set(self.swapped))
+        changes = [
+            CitationChange(
+                sentence=i,
+                dropped=[chunks[label].chunk_id for label in self.dropped.get(i, ())],
+                swapped=[
+                    [chunks[a].chunk_id, chunks[b].chunk_id] for a, b in self.swapped.get(i, [])
+                ],
+            )
+            for i in ids
+        ]
+        return [c for c in changes if c.dropped or c.swapped]
+
+
+def choose_citations(
+    question: str,
+    sentences: list[DraftSentence],
+    checked: Checked,
+    chunks: Mapping[str, RetrievedChunk],
+    verifier: Verifier,
+    changes: _Changes | None = None,
+) -> tuple[list[Kept], list[str]]:
+    """The passing sentences with their chosen citations, and the texts of the failing ones.
+
+    Checker-passed sentences get D-052 pruning, the near-copy collapse and the guarded upgrade
+    (:mod:`app.chat.citation_choice`); judge-rescued sentences keep their citations, since the
+    evidence anchoring already ties them to cited lines.
+    """
+    log = changes if changes is not None else _Changes()
+    kept: list[Kept] = []
+    removed: list[str] = []
+    for i, (sentence, check) in enumerate(zip(sentences, checked.checks, strict=True)):
+        if not check.passed:
+            removed.append(sentence.text)
+            continue
+        if check.method != "checker":
+            kept.append(Kept(i, sentence, check.chunk_scores))
+            continue
+        choice = choose(question, sentence, check.chunk_scores, chunks, verifier.threshold)
+        if choice.dropped:
+            log.dropped[i] = choice.dropped
+        kept.append(Kept(i, choice.sentence, choice.scores))
+    if verifier.enabled:
+        kept = _upgrade(kept, checked, chunks, verifier, log)
+    return kept, removed
+
+
+def _upgrade(
+    kept: list[Kept],
+    checked: Checked,
+    chunks: Mapping[str, RetrievedChunk],
+    verifier: Verifier,
+    log: _Changes,
+) -> list[Kept]:
+    """Swap near-copy citations for the defining chunk when it passes verification alone."""
+    pairs = [
+        (n, cited, candidate)
+        for n, item in enumerate(kept)
+        if checked.checks[item.index].method == "checker"
+        for cited, candidate in upgrade_candidates(item.sentence, chunks)
+    ]
+    if not pairs:
+        return kept
+    results = verifier.check(
+        [(kept[n].sentence.text, [chunks[candidate]]) for n, _, candidate in pairs]
+    ).checks
+    upgraded = list(kept)
+    for (n, cited, candidate), result in zip(pairs, results, strict=True):
+        if not result.passed or result.problems:
+            continue
+        item = upgraded[n]
+        labels = list(item.sentence.chunk_ids)
+        at = labels.index(cited)
+        labels[at] = candidate
+        scores = list(item.scores)
+        scores[at] = result.chunk_scores[0] if result.chunk_scores else None
+        upgraded[n] = Kept(
+            item.index, replace(item.sentence, chunk_ids=tuple(labels)), tuple(scores)
+        )
+        log.swapped.setdefault(item.index, []).append((cited, candidate))
+        logger.info("Cited the defining chunk instead of a near-copy (sentence %d)", item.index)
+    return upgraded
+
+
+def _holds(name: str, chunk: RetrievedChunk) -> bool:
+    return name_in(name, [unescape_markdown(without_location(chunk.text))])
+
+
+def failed_sentences(
+    sentences: Sequence[DraftSentence],
+    checked: Checked,
+    chunks: Mapping[str, RetrievedChunk],
+) -> list[FailedSentence]:
+    """The failed sentences of a reply for the regeneration feedback (D-074): for each name or
+    literal no cited chunk holds, the other context chunks that hold it (layer 5's test)."""
+    failed: list[FailedSentence] = []
+    for sentence, check in zip(sentences, checked.checks, strict=True):
+        if check.passed:
+            continue
+        missing = tuple(
+            (
+                name,
+                tuple(
+                    label
+                    for label, chunk in chunks.items()
+                    if label not in sentence.chunk_ids and _holds(name, chunk)
+                ),
+            )
+            for name in check.missing
+        )
+        failed.append(FailedSentence(sentence.text, tuple(sentence.chunk_ids), missing))
+    return failed
+
+
+FAILED_TEXT_CHARS = 300  # diagnostics keep at most this much of a failed sentence and its reason
+
+
+def _cap(text: str) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= FAILED_TEXT_CHARS else flat[: FAILED_TEXT_CHARS - 1] + "…"
+
+
+def failed_sentences_out(
+    sentences: Sequence[DraftSentence], checked: Checked, threshold: float
+) -> list[FailedSentenceOut]:
+    """``diagnostics.failed_sentences``: each failed sentence's text and why it failed (D-075)."""
+    return [
+        FailedSentenceOut(text=_cap(sentence.text), reason=_cap(check.failure(threshold)))
+        for sentence, check in zip(sentences, checked.checks, strict=True)
+        if not check.passed
+    ]
+
+
+def retrieval_fingerprint(chunks: Sequence[RetrievedChunk]) -> str | None:
+    """A short hash of the ordered context chunk ids (None without a context)."""
+    if not chunks:
+        return None
+    joined = "\n".join(chunk.chunk_id for chunk in chunks)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def outline_only(
+    sentences: Sequence[DraftSentence],
+    checked: Checked,
+    chunks: Mapping[str, RetrievedChunk],
+    outline: str,
+) -> int:
+    """Diagnostics only (D-077): failed sentences missing a name or literal that the outline
+    shows and no labelled chunk holds. Never used to decide a sentence."""
+    if not outline:
+        return 0
+    return sum(
+        1
+        for check in checked.checks
+        if not check.passed
+        and any(
+            name_in(name, [outline]) and not any(_holds(name, c) for c in chunks.values())
+            for name in check.missing
+        )
+    )
+
+
+def _round(seconds: float) -> float:
+    return round(seconds, 3)
+
+
+@dataclass
+class _Meter:
+    """What one answer spent: time, answer calls and judge calls per step (D-080)."""
+
+    started: float = field(default_factory=time.perf_counter)
+    retrieval: Retrieval | None = None
+    retrieval_s: float | None = None
+    calls: list[AnswerCall] = field(default_factory=list)
+    verification_s: list[float] = field(default_factory=list)
+    judge_per_pass: list[int] = field(default_factory=list)
+    outline_only: list[int] = field(default_factory=list)
+    citation_s: float | None = None
+    promoted_cited: tuple[int, int] = (0, 0)
+
+    def check(
+        self,
+        verifier: Verifier,
+        sentences: list[DraftSentence],
+        chunks: Mapping[str, RetrievedChunk],
+    ) -> Checked:
+        """One verification pass (:func:`check_sentences`), timed and counted."""
+        started, judged = time.perf_counter(), verifier.judge_calls
+        checked = check_sentences(verifier, sentences, chunks)
+        self.verification_s.append(_round(time.perf_counter() - started))
+        self.judge_per_pass.append(verifier.judge_calls - judged)
+        outline = outline_text(self.retrieval.outline) if self.retrieval is not None else ""
+        self.outline_only.append(outline_only(sentences, checked, chunks, outline))
+        return checked
+
+    def update(self, verifier: Verifier) -> dict[str, object]:
+        update: dict[str, object] = {
+            "judge_calls": verifier.judge_calls,
+            "judge_calls_per_pass": list(self.judge_per_pass),
+            "answer_calls": len(self.calls),
+            "timings": Timings(
+                retrieval_s=self.retrieval_s,
+                generation_s=[_round(c.seconds) for c in self.calls],
+                verification_s=list(self.verification_s),
+                citation_s=self.citation_s,
+                total_s=_round(time.perf_counter() - self.started),
+            ),
+            "prompt_tokens": [c.prompt_tokens for c in self.calls],
+            "completion_tokens": [c.completion_tokens for c in self.calls],
+            "outline_only": list(self.outline_only),
+            "promoted_cited": list(self.promoted_cited),
+        }
+        retrieval = self.retrieval
+        if retrieval is not None:
+            promoted = retrieval.promoted
+            update["expansions"] = [
+                ExpansionOut(chunk_id=c.chunk_id, kind=c.expansion or "", referrer=c.referrer)
+                for c in promoted
+            ]
+            update["promoted_tokens"] = sum(max(0, c.token_count) for c in promoted)
+            update["outline_tokens"] = sum(b.tokens for b in retrieval.outline)
+            update["outline_fingerprint"] = outline_fingerprint(retrieval.outline)
+        return update
+
+
+def promoted_cited(kept: Sequence[Kept], chunks: Mapping[str, RetrievedChunk]) -> tuple[int, int]:
+    """(kept sentences citing a promoted chunk, those of them also citing another chunk)."""
+    citing = [k for k in kept if any(chunks[i].expansion is not None for i in k.sentence.chunk_ids)]
+    return len(citing), sum(1 for k in citing if len(set(k.sentence.chunk_ids)) > 1)
 
 
 def answer(
@@ -120,14 +427,49 @@ def answer(
     refuse_threshold: float,
     verifier: Verifier,
     on_stage: Callable[[Stage], None] = lambda _stage: None,
+    generation: Generation | None = None,
 ) -> Outcome:
-    """Answer ``question`` from the space's sources or refuse. Adapter errors propagate."""
+    """Answer ``question`` from the space's sources or refuse. Adapter errors propagate.
+
+    ``generation`` overrides the answer call's temperature and seed (eval runs, F5); the seed
+    also goes to the judge through the verifier the caller built. Every outcome's diagnostics
+    carry the time, answer calls and judge calls it took (D-080).
+    """
+    meter = _Meter()
+    outcome = _answer(
+        question,
+        meter,
+        retrieve=retrieve,
+        chat_adapter=chat_adapter,
+        refuse_threshold=refuse_threshold,
+        verifier=verifier,
+        on_stage=on_stage,
+        generation=generation,
+    )
+    diagnostics = outcome.diagnostics.model_copy(update=meter.update(verifier))
+    return replace(outcome, diagnostics=diagnostics)
+
+
+def _answer(
+    question: str,
+    meter: _Meter,
+    *,
+    retrieve: Callable[[str], Retrieval],
+    chat_adapter: ChatAdapterFactory,
+    refuse_threshold: float,
+    verifier: Verifier,
+    on_stage: Callable[[Stage], None],
+    generation: Generation | None,
+) -> Outcome:
     on_stage("retrieving")
+    started = time.perf_counter()
     retrieval = retrieve(question)
+    meter.retrieval, meter.retrieval_s = retrieval, _round(time.perf_counter() - started)
     if not retrieval.source_ids:
         return Refused(refusal("no_sources", question))
     top = retrieval.top_score
-    diagnostics = Diagnostics(top_rerank=top)
+    fingerprint = retrieval_fingerprint(retrieval.chunks)
+    diagnostics = Diagnostics(top_rerank=top, retrieval_fingerprint=fingerprint)
     if top is None or top < refuse_threshold or not retrieval.chunks:
         logger.info("Refused before generating: top score %s < %s", top, refuse_threshold)
         return Refused(refusal("not_in_sources", question), diagnostics)
@@ -135,13 +477,28 @@ def answer(
     on_stage("generating")
     chunks = labelled(retrieval.chunks)
     adapter = chat_adapter()
+    temperature = TEMPERATURE
+    if generation is not None and generation.temperature is not None:
+        temperature = generation.temperature
+    seed = generation.seed if generation is not None else None
+    used = GenerationUsed(temperature=temperature, seed=seed)
+    diagnostics = diagnostics.model_copy(update={"generation": used})
 
-    def generate(regenerate: bool) -> ParsedAnswer:
+    def generate(regenerate: bool, failed: Sequence[FailedSentence] = ()) -> ParsedAnswer:
         return generate_structured(
             adapter,
-            answer_messages(question, retrieval.chunks, regenerate=regenerate),
+            answer_messages(
+                question,
+                retrieval.chunks,
+                outline=retrieval.outline,
+                regenerate=regenerate,
+                failed=failed,
+            ),
             ANSWER_SCHEMA,
             lambda text: parse_answer(text, chunks.keys()),
+            temperature=temperature,
+            seed=seed,
+            calls=meter.calls,
         )
 
     try:
@@ -159,36 +516,36 @@ def answer(
     if parsed.dropped:
         logger.info("Dropped %d sentence(s) without valid citations", len(parsed.dropped))
 
-    checked = check_sentences(verifier, parsed.sentences, chunks)
+    sentences = parsed.sentences
+    checked = meter.check(verifier, sentences, chunks)
     regenerated = False
-    if checked.mostly_failed:
+    if checked.refuse:
+        # One regeneration whenever the refusal rule would fire: more than half failed, or the
+        # first sentence did (D-063). The refusal rule applies again to the second reply.
         logger.info(
-            "%d of %d sentence(s) failed verification; regenerating once",
+            "%d of %d sentence(s) failed verification (first passed: %s); regenerating once",
             checked.failed,
             len(checked.checks),
+            checked.checks[0].passed,
         )
         regenerated = True
         on_stage("generating")
         try:
-            second = generate(True)
+            second = generate(True, failed_sentences(sentences, checked, chunks))
         except InvalidOutputError:
             second = ParsedAnswer([])
         on_stage("checking")
         if not second.sentences:
-            # The first reply was mostly unsupported and the second has nothing usable.
-            first = [c.diagnostic_score for c in checked.checks]
+            # The first reply was refused and the second has nothing usable.
             return Refused(
                 refusal("unsupported", question),
-                Diagnostics(top_rerank=top, sentence_scores=first, regenerated=True),
+                _diagnostics(diagnostics, checked, verifier, True, _Changes(), chunks, sentences),
             )
         parsed = second
-        checked = check_sentences(verifier, parsed.sentences, chunks)
+        sentences = parsed.sentences
+        checked = meter.check(verifier, sentences, chunks)
 
-    diagnostics = Diagnostics(
-        top_rerank=top,
-        sentence_scores=[c.diagnostic_score for c in checked.checks],
-        regenerated=regenerated,
-    )
+    changes = _Changes()
     if checked.refuse:
         logger.info(
             "Refused: %d of %d sentence(s) failed verification (first passed: %s)",
@@ -196,13 +553,25 @@ def answer(
             len(checked.checks),
             checked.checks[0].passed if checked.checks else False,
         )
-        return Refused(refusal("unsupported", question), diagnostics)
+        return Refused(
+            refusal("unsupported", question),
+            _diagnostics(diagnostics, checked, verifier, regenerated, changes, chunks, sentences),
+        )
 
-    kept, removed = kept_and_removed(parsed.sentences, checked)
-    sentences = number_citations([s for s, _ in kept], chunks)
+    started = time.perf_counter()
+    kept, removed = choose_citations(question, sentences, checked, chunks, verifier, changes)
+    meter.citation_s = _round(time.perf_counter() - started)
+    meter.promoted_cited = promoted_cited(kept, chunks)
+    diagnostics = _diagnostics(
+        diagnostics, checked, verifier, regenerated, changes, chunks, sentences
+    )
+    numbered = number_citations([k.sentence for k in kept], chunks)
     scores = [
-        {chunks[label].chunk_id: score for label, score in zip(s.chunk_ids, cs, strict=True)}
-        for s, cs in kept
+        {
+            chunks[label].chunk_id: score
+            for label, score in zip(k.sentence.chunk_ids, k.scores, strict=True)
+        }
+        for k in kept
     ]
     badge: Badge
     if not verifier.enabled:
@@ -214,10 +583,32 @@ def answer(
     if removed:
         logger.info("Removed %d unsupported sentence(s)", len(removed))
     return Answered(
-        sentences,
+        numbered,
         list(parsed.dropped),
         badge=badge,
         removed=removed,
         scores=scores,
         diagnostics=diagnostics,
+    )
+
+
+def _diagnostics(
+    base: Diagnostics,
+    checked: Checked,
+    verifier: Verifier,
+    regenerated: bool,
+    changes: _Changes,
+    chunks: Mapping[str, RetrievedChunk],
+    sentences: Sequence[DraftSentence],
+) -> Diagnostics:
+    return base.model_copy(
+        update={
+            "sentence_scores": [c.diagnostic_score for c in checked.checks],
+            "regenerated": regenerated,
+            "sentence_methods": checked.methods,
+            "judge_vetoed": checked.vetoed,
+            "judge_seconds": round(verifier.judge_seconds, 3) if verifier.judge_calls else None,
+            "citation_changes": changes.out(chunks),
+            "failed_sentences": failed_sentences_out(sentences, checked, verifier.threshold),
+        }
     )

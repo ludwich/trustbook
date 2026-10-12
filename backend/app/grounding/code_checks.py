@@ -1,7 +1,9 @@
 """Grounding layer 5: deterministic code checks (SPEC §8).
 
 - Every backticked identifier in a sentence must occur verbatim in at least one cited chunk.
-  The only normalisation is a trailing ``()`` (prose writes ``get()`` for a function ``get``).
+  A trailing ``()`` is dropped (prose writes ``get()`` for a function ``get``), and inline markup
+  and whitespace runs of the source may differ (``200 OK`` written as RST ````200 OK```` matches,
+  D-072; underscores are never treated as markup).
 - Every cited chunk whose locator names a ``file`` must point at a file, and line range, that
   exist in the source's indexed snapshot (the ``files`` segments of ``map.json``).
 
@@ -18,9 +20,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from app.chunking.header import complete_numbers, header_content, split_header, stated_in_full
+
 logger = logging.getLogger("trustbook.grounding")
 
-_BACKTICKED = re.compile(r"`([^`\n]+)`")
+# A code span (D-083): a run of backticks closed by a run of the same length, as in Markdown and
+# reStructuredText (``x``). Pairing single backticks read ``a`` and ``b`` as the span "and".
+CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)([^\n]+?)(?<!`)\1(?!`)")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 LineRange = tuple[int, int]
@@ -29,8 +35,8 @@ LineRange = tuple[int, int]
 def backticked(text: str) -> list[str]:
     """The backticked identifiers of ``text``, unique, in order (``get()`` → ``get``)."""
     found: dict[str, None] = {}
-    for match in _BACKTICKED.finditer(text):
-        token = match.group(1).strip()
+    for match in CODE_SPAN.finditer(text):
+        token = match.group(2).strip()
         if token.endswith("()") and len(token) > 2:
             token = token[:-2]
         if token:
@@ -39,6 +45,96 @@ def backticked(text: str) -> list[str]:
 
 
 _NAME_PART = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?")
+_MARKDOWN_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+
+def unescape_markdown(text: str) -> str:
+    """Markdown backslash escapes removed (``trust\\_env`` → ``trust_env``): web pages and
+    converted documents are stored as Markdown, and a name must match what the reader sees."""
+    return _MARKDOWN_ESCAPE.sub(r"\1", text)
+
+
+# Inline markup (D-072): reStructuredText literals (``200 OK``), Markdown code spans (`x`) and
+# asterisk emphasis (*x*, **x**). A sentence quoting a docstring's "is **not** a check to see if
+# the response code is ``200 OK``" writes the words without the markup. Emphasis needs a non-word
+# character outside its markers and no space inside them, so ``2*x*y`` and ``*args, **kwargs``
+# are left alone. Underscore emphasis (_x_) is never removed: it cannot be told apart from Python
+# names such as ``_value_``, ``_missing_`` or ``self._value_``.
+_STRONG = re.compile(r"(?<![\w*])\*\*(?![\s*])([^*\n]+?)(?<![\s*])\*\*(?![\w*])")
+_EMPHASIS = re.compile(r"(?<![\w*])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![\w*])")
+
+
+def normalize_inline(text: str, *, emphasis: bool = True) -> str:
+    """``text`` without inline markup and with runs of whitespace collapsed to one space.
+
+    Only for comparing a sentence with a source: ``This is **not** a check … ``200 OK``.`` →
+    ``This is not a check … 200 OK.`` (D-072). The source side drops literals, code spans and
+    asterisk emphasis; the sentence side (``emphasis=False``) drops literals and code spans only,
+    because a sentence's ``*x*`` inside a name or quote is what it claims, not markup.
+    """
+    out = CODE_SPAN.sub(r"\2", text)
+    if emphasis:
+        out = _STRONG.sub(r"\1", out)
+        out = _EMPHASIS.sub(r"\1", out)
+    return " ".join(out.split())
+
+
+def _verbatim_exact(span: str, text: str) -> bool:
+    left = r"(?<![A-Za-z0-9_])" if span[:1].isalnum() or span[:1] == "_" else ""
+    right = r"(?![A-Za-z0-9_])" if span[-1:].isalnum() or span[-1:] == "_" else ""
+    return re.search(left + re.escape(span) + right, text) is not None
+
+
+def verbatim(span: str, text: str) -> bool:
+    """``span`` occurs in ``text`` and is not part of a longer name: an edge of the span that is
+    a name character may not continue into one (`socks5` is not in ``socks5h``, D-063).
+
+    The span also matches after :func:`normalize_inline` (the source's inline markup removed,
+    whitespace collapsed on both sides; D-072); every word must still be there, in order.
+    """
+    if _verbatim_exact(span, text):
+        return True
+    wanted = normalize_inline(span, emphasis=False)
+    return bool(wanted) and _verbatim_exact(wanted, normalize_inline(text))
+
+
+# A quoted phrase that starts right after one of these words in the source drops a negation
+# ("is **not** a check to see …" quoted as "a check to see …").
+_NEGATIONS = frozenset({"not", "no", "never", "nor", "cannot", "neither"})
+_PROSE_TOKEN = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+
+
+def _after_negation(prefix: str) -> bool:
+    words = _PROSE_TOKEN.findall(normalize_inline(prefix[-200:]))
+    if not words:
+        return False
+    last = words[-1].lower()
+    return last in _NEGATIONS or last.endswith("n't")
+
+
+def _quote_at(wanted: str, text: str) -> bool:
+    """``wanted`` occurs in ``text`` at word boundaries and not right after a negation."""
+    left = r"(?<![A-Za-z0-9_])" if wanted[:1].isalnum() or wanted[:1] == "_" else ""
+    right = r"(?![A-Za-z0-9_])" if wanted[-1:].isalnum() or wanted[-1:] == "_" else ""
+    pattern = re.compile(left + re.escape(wanted) + right)
+    return any(not _after_negation(text[: m.start()]) for m in pattern.finditer(text))
+
+
+def quoted_in(quoted: str, text: str) -> bool:
+    """A quoted phrase of a sentence occurs in ``text``, as is or after :func:`normalize_inline`
+    (D-072). English puts a sentence's own full stop or comma inside the quotes, so one trailing
+    ``.,;:`` of the phrase is not required in the normalised comparison.
+
+    Either way the phrase must start and end at word boundaries and may not start right after a
+    negation (not, no, never, nor, cannot, neither, …n't): quoting "a check to see if the
+    response code is 200 OK" from "This is **not** a check to see …" inverts the source.
+    """
+    if quoted and _quote_at(quoted, text):
+        return True
+    wanted = normalize_inline(quoted, emphasis=False)
+    if len(wanted) > 1 and wanted[-1] in ".,;:":
+        wanted = wanted[:-1].rstrip()
+    return bool(wanted) and _quote_at(wanted, normalize_inline(text))
 
 
 def _occurs(token: str, texts: list[str]) -> bool:
@@ -47,23 +143,35 @@ def _occurs(token: str, texts: list[str]) -> bool:
     return any(pattern.search(t) for t in texts)
 
 
+def without_location(chunk_text: str) -> str:
+    """``chunk_text`` with its ``File:`` header reduced to what it states
+    (:func:`app.chunking.header.header_content`); a chunk without a header unchanged."""
+    header, body = split_header(chunk_text)
+    return f"{header_content(header)}\n{body}" if header else chunk_text
+
+
 def missing_identifiers(text: str, chunk_texts: Iterable[str]) -> list[str]:
     """Backticked names of ``text`` not found in ``chunk_texts`` (exact, deterministic).
 
-    A backticked span passes if it occurs verbatim in a cited chunk, or if every identifier and
+    A backticked span passes if it occurs verbatim in a cited chunk (not inside a longer name),
+    or if every identifier and
     number inside it occurs there as a whole word: code defines ``class Response`` and
     ``def ok``, so ``Response.ok`` never appears verbatim (D-042). A span without identifiers
-    (e.g. a quoted literal) must occur verbatim.
+    (e.g. a quoted literal) must occur verbatim. The ``(part N)`` of a split data literal's
+    header is not code and is not searched (D-058), nor are the header's line numbers and a
+    heading's numbering (D-071).
     """
-    texts = list(chunk_texts)
-    missing: list[str] = []
-    for token in backticked(text):
-        if any(token in t for t in texts):
-            continue
-        parts = _NAME_PART.findall(token)
-        if not parts or not all(_occurs(part, texts) for part in parts):
-            missing.append(token)
-    return missing
+    texts = [unescape_markdown(without_location(t)) for t in chunk_texts]
+    return [token for token in backticked(text) if not name_in(token, texts)]
+
+
+def name_in(name: str, texts: list[str]) -> bool:
+    """Layer 5's test for one backticked name: verbatim in one of ``texts`` (not inside a longer
+    name), or every identifier and number in it as a whole word somewhere in them (D-042)."""
+    if any(verbatim(name, t) for t in texts):
+        return True
+    parts = _NAME_PART.findall(name)
+    return bool(parts) and all(_occurs(part, texts) for part in parts)
 
 
 def _line(value: Any) -> int | None:
@@ -207,6 +315,30 @@ def code_facts(chunk_texts: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(facts))
 
 
+def text_units(text: str) -> list[str]:
+    """A chunk's units: its lines for code (``File: …`` header left out), sentences for prose."""
+    if text.startswith("File: "):
+        parts = text.splitlines()[1:]
+    else:
+        parts = _PROSE_SPLIT.split(" ".join(text.split()))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def support_window(sentence: str, text: str) -> str:
+    """The units of one chunk that share the most terms with ``sentence`` (all ties), in order.
+
+    This is the part of the chunk that states the sentence; two chunks whose windows are the same
+    text are copies of one passage as far as the sentence is concerned (D-052 extension).
+    """
+    wanted = _terms(sentence)
+    units = text_units(text)
+    scores = [len(_terms(u) & wanted) for u in units]
+    best = max(scores, default=0)
+    if best == 0:
+        return ""
+    return "\n".join(u for u, score in zip(units, scores, strict=True) if score == best)
+
+
 def focus_premise(
     sentence: str, chunk_texts: Sequence[str], max_chars: int = FOCUS_MAX_CHARS
 ) -> str:
@@ -225,10 +357,7 @@ def focus_premise(
     n_facts = len(facts)
     units: list[tuple[str, bool]] = [(f, False) for f in facts]
     for text in chunk_texts:
-        code_like = text.startswith("File: ")
-        flat = " ".join(text.split())
-        parts = text.splitlines()[1:] if code_like else _PROSE_SPLIT.split(flat)
-        units.extend((p.strip(), not code_like) for p in parts if p.strip())
+        units.extend((u, not text.startswith("File: ")) for u in text_units(text))
     scores = [len(_terms(u) & wanted) for u, _ in units]
     best = max(scores, default=0)
     if best == 0:
@@ -254,11 +383,23 @@ def missing_literals(text: str, chunk_texts: Iterable[str]) -> list[str]:
     """Numbers, and ``True``/``False``/``None`` stated as values, that no cited chunk contains.
 
     Used for sentences citing code, where the grounding checker cannot tell ``True`` from
-    ``False`` reliably (D-044).
+    ``False`` reliably (D-044). The ``(part N)`` of a split data literal's header is not a
+    number the code states and is not searched: "retries 6 times" citing ``_codes (part 6)``
+    would otherwise pass (D-058). Nor are the header's line numbers and a heading's numbering
+    (``4.2`` of ``4.2 Timeouts``). A number of the header's path, section or symbol counts only
+    for a number the sentence writes exactly as the header does (``2.32.0`` under the section
+    ``2.32.0 (2024-05-20)``; not "2.32", "2024" or "20"), D-071. Everything else must be in the
+    body; ``True``/``False``/``None`` always.
     """
-    texts = list(chunk_texts)
+    bodies: list[str] = []
+    stated: set[str] = set()
+    for chunk_text in chunk_texts:
+        header, body = split_header(chunk_text)
+        bodies.append(body)
+        stated |= complete_numbers(header_content(header))
+    in_header = stated_in_full(text, frozenset(stated), _NUMBER)
     found = dict.fromkeys(
         [m.group(0) for m in _NUMBER.finditer(text)]
         + [m.group(1) for m in _VALUE_CONSTANT.finditer(text)]
     )
-    return [lit for lit in found if not _occurs(lit, texts)]
+    return [lit for lit in found if lit not in in_header and not _occurs(lit, bodies)]

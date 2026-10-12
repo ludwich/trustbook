@@ -76,6 +76,7 @@ def test_anthropic_messages(http: OutboundHttp, router: Router) -> None:
         temperature=0,
         max_tokens=256,
         json_schema={"type": "object"},
+        seed=42,  # the Messages API has no seed: ignored
     )
     assert (result.text, result.reasoning, result.usage.prompt_tokens) == ("OK", "hmm", 9)
     request = router.requests[0]
@@ -86,6 +87,7 @@ def test_anthropic_messages(http: OutboundHttp, router: Router) -> None:
     assert body["system"].startswith("Be brief.")
     assert "JSON Schema" in body["system"]
     assert body["max_tokens"] == 256
+    assert "seed" not in body
 
 
 def test_anthropic_models_and_bad_shape(http: OutboundHttp, router: Router) -> None:

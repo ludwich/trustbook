@@ -11,7 +11,7 @@ from app.db.models import Source
 from app.ingest import errors
 from app.ingest.browse_root import BrowsePathError, BrowseRootMissingError, resolve_in_root
 from app.ingest.errors import fail
-from app.ingest.folder import folder_snapshot
+from app.ingest.folder import PreviousSnapshot, folder_snapshot
 from app.parse.audio import AUDIO_EXTENSIONS, SpeechToText, audio_snapshot
 from app.parse.documents import DOCLING_FORMATS, DocumentParser
 from app.parse.snapshot import Snapshot, read_snapshot_files
@@ -129,8 +129,12 @@ def read_source(
     folder: Path,
     progress: Progress,
     check_cancelled: CheckCancelled,
+    previous: PreviousSnapshot | None = None,
 ) -> tuple[Snapshot, str]:
-    """(snapshot, snapshot time) for ``source``; ``folder`` is its ``sources/<id>/`` folder."""
+    """(snapshot, snapshot time) for ``source``; ``folder`` is its ``sources/<id>/`` folder.
+
+    ``previous``: a folder source's last indexed run (unchanged files are not read again).
+    """
     now = utc_now_iso()
     origin = source.origin or ""
     if source.type == "paste":
@@ -161,6 +165,7 @@ def read_source(
             report_folder=folder,
             progress=progress,
             check_cancelled=check_cancelled,
+            previous=previous,
         )
         return snapshot, now
     raise fail(errors.UNSUPPORTED_FILE)

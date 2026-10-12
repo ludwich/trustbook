@@ -25,6 +25,12 @@ class PresetSpec(BaseModel):
     mock_only: bool = False
 
 
+class ProviderSpec(Option):
+    """A selectable service; ``mock_only`` ones exist only with ``TRUSTBOOK_MOCK_LLM=1``."""
+
+    mock_only: bool = False
+
+
 class FieldOverride(BaseModel):
     label: str | None = None
     help: str | None = None
@@ -44,7 +50,7 @@ class Manifest(BaseModel):
     health_check: str
     presets: list[PresetSpec] = Field(default_factory=list)
     presets_from: str | None = None
-    providers: list[Option] = Field(default_factory=list)
+    providers: list[ProviderSpec] = Field(default_factory=list)
     field_overrides: dict[str, FieldOverride] = Field(default_factory=dict)
 
 

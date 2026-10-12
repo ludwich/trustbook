@@ -8,17 +8,22 @@ binaries: they only add noise and, being huge, dominate indexing time (Gate 1 fi
 Files are read by a small thread pool (overlapping file-system latency, e.g. on Docker Desktop
 bind mounts); Docling conversions run one at a time in their own lane, since Docling already uses
 the model threads. The snapshot is assembled in path order, so the output is deterministic.
+
+Refresh (SPEC §7.5): every file's bytes are hashed (SHA-256). A file whose hash matches the last
+indexed run is not decoded or parsed again: its text is copied from the previous ``snapshot.md``
+(with its map segments moved to the new offsets) and its chunks are kept by the caller.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
@@ -29,7 +34,7 @@ from app.ingest.errors import IngestError, fail
 from app.ingest.git import head_commit
 from app.ingest.gitignore import Rule, is_ignored, parse_gitignore
 from app.parse.documents import DOCLING_FORMATS, DocumentParser
-from app.parse.snapshot import FileEntry, Snapshot, SnapshotBuilder, normalise_text
+from app.parse.snapshot import FileEntry, Segment, Snapshot, SnapshotBuilder, normalise_text
 from app.parse.text import decode_text, looks_binary
 from app.security.gitleaks import (
     Finding,
@@ -162,16 +167,6 @@ def write_secrets_report(folder: Path, findings: list[Finding]) -> None:
     atomic_write_json(folder / SECRETS_REPORT, report)
 
 
-def _read_text_file(path: Path) -> str | None:
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return None
-    if looks_binary(data) or data.lstrip()[:5].startswith(_GENERATED_MAGIC):
-        return None
-    return normalise_text(decode_text(data))
-
-
 def looks_generated(text: str) -> bool:
     """A code file with a very long line: minified or generated, not something to read."""
     return any(len(line) > MAX_CODE_LINE_CHARS for line in text.split("\n"))
@@ -196,20 +191,43 @@ class _FileRead:
     text: str | None = None
     document: Snapshot | None = None
     generated: bool = False
+    sha256: str | None = None
+    reused: bool = False  # same content as last time: copy it from the previous snapshot
 
 
-def _read_one(path: Path, ext: str) -> _FileRead:
-    text = _read_text_file(path)
-    if text is None or not text.strip():
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _read_one(path: Path, ext: str, previous_sha: str | None = None) -> _FileRead:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return _FileRead()
+    sha = _sha256(data)
+    if previous_sha is not None and sha == previous_sha:
+        return _FileRead(sha256=sha, reused=True)
+    if looks_binary(data) or data.lstrip()[:5].startswith(_GENERATED_MAGIC):
+        return _FileRead()
+    text = normalise_text(decode_text(data))
+    if not text.strip():
         return _FileRead()
     if ext not in TEXT_DOCUMENTS and looks_generated(text):
         return _FileRead(generated=True)
-    return _FileRead(text=text)
+    return _FileRead(text=text, sha256=sha)
 
 
-def _parse_one(documents: DocumentParser, path: Path, ext: str, rel: str) -> _FileRead:
+def _parse_one(
+    documents: DocumentParser, path: Path, ext: str, rel: str, previous_sha: str | None = None
+) -> _FileRead:
     try:
-        return _FileRead(document=documents.parse(path, ext, title=rel))
+        sha = _sha256(path.read_bytes())
+    except OSError:
+        return _FileRead()
+    if previous_sha is not None and sha == previous_sha:
+        return _FileRead(sha256=sha, reused=True)
+    try:
+        return _FileRead(document=documents.parse(path, ext, title=rel), sha256=sha)
     except IngestError:
         return _FileRead()
 
@@ -222,12 +240,15 @@ def read_files(
     check_cancelled: Callable[[], None],
     *,
     workers: int | None = None,
+    previous_hashes: Mapping[str, str] | None = None,
 ) -> list[_FileRead]:
     """Read ``files`` (relative to ``root``) concurrently; results come back in ``files`` order.
 
     At most ``4 × workers`` files are in flight, so memory stays bounded for huge folders.
-    Cancellation stops before the next file and drops the queued ones.
+    Cancellation stops before the next file and drops the queued ones. A file whose SHA-256 is
+    its ``previous_hashes`` entry comes back as ``reused`` without being decoded or parsed.
     """
+    hashes = previous_hashes or {}
     size = max(1, min(workers or usable_cpus(), READ_WORKERS_MAX))
     results: list[_FileRead] = []
     pending: deque[Future[_FileRead]] = deque()
@@ -240,11 +261,11 @@ def read_files(
                 rel = next(upcoming, None)
                 if rel is None:
                     break
-                path, ext = root / rel, _extension(rel)
+                path, ext, sha = root / rel, _extension(rel), hashes.get(rel)
                 if ext in DOCLING_FORMATS:
-                    pending.append(docs.submit(_parse_one, documents, path, ext, rel))
+                    pending.append(docs.submit(_parse_one, documents, path, ext, rel, sha))
                 else:
-                    pending.append(texts.submit(_read_one, path, ext))
+                    pending.append(texts.submit(_read_one, path, ext, sha))
             if not pending:
                 break
             check_cancelled()
@@ -254,6 +275,49 @@ def read_files(
         for pool in (texts, docs):
             pool.shutdown(wait=True, cancel_futures=True)
     return results
+
+
+@dataclass(frozen=True)
+class PreviousFile:
+    """A file as indexed last time: its hash and where its text sits in the old snapshot."""
+
+    sha256: str
+    kind: Literal["code", "document"]
+    start: int
+    end: int
+    segments: tuple[Segment, ...]  # its map segments (offsets in the old snapshot)
+
+
+@dataclass(frozen=True)
+class PreviousSnapshot:
+    """The last indexed run of a folder source, for an incremental refresh."""
+
+    markdown: str
+    files: Mapping[str, PreviousFile]
+
+
+@dataclass
+class FolderSnapshot(Snapshot):
+    """A linked folder's snapshot plus what the incremental refresh needs.
+
+    ``hashes``: SHA-256 per file in the snapshot. ``reused``: files copied from the previous
+    snapshot, with their old start offset (their chunks are kept, moved by the offset change).
+    """
+
+    hashes: dict[str, str] = field(default_factory=dict)
+    reused: dict[str, int] = field(default_factory=dict)
+
+
+def _copy_previous(builder: SnapshotBuilder, rel: str, old: PreviousFile, markdown: str) -> int:
+    """Append a reused file's text and its segments; return its new start offset."""
+    start = builder.length
+    builder.text(markdown[old.start : old.end])
+    delta = start - old.start
+    for segment in old.segments:
+        builder.segments.append(
+            replace(segment, start=segment.start + delta, end=segment.end + delta)
+        )
+    return start
 
 
 def folder_snapshot(
@@ -266,8 +330,13 @@ def folder_snapshot(
     report_folder: Path,
     progress: Callable[[float], None],
     check_cancelled: Callable[[], None],
-) -> Snapshot:
-    """Read a linked folder into one ``files`` snapshot."""
+    previous: PreviousSnapshot | None = None,
+) -> FolderSnapshot:
+    """Read a linked folder into one ``files`` snapshot, reusing ``previous``'s unchanged files.
+
+    On a refresh (``previous`` given) ``stats`` gains ``changed_files`` (new, changed and removed
+    files) and ``unchanged_files``.
+    """
     if not root.is_dir():
         raise fail(errors.FOLDER_MISSING)
     try:
@@ -286,13 +355,36 @@ def folder_snapshot(
 
     builder = SnapshotBuilder()
     entries: list[FileEntry] = []
+    hashes: dict[str, str] = {}
+    reused: dict[str, int] = {}
     code_files = doc_files = generated = 0
     warnings: set[str] = set()
     files = [f for f in walk.files if f not in secret_files]
-    reads = read_files(root, files, documents, progress, check_cancelled)
+    old_files: Mapping[str, PreviousFile] = previous.files if previous is not None else {}
+    reads = read_files(
+        root,
+        files,
+        documents,
+        progress,
+        check_cancelled,
+        previous_hashes={path: old.sha256 for path, old in old_files.items()},
+    )
     for rel, read in zip(files, reads, strict=True):
         ext = _extension(rel)
         generated += read.generated
+        old = old_files.get(rel)
+        if read.reused and old is not None and previous is not None:
+            builder.separate()
+            builder.text(f"# {rel}\n\n")
+            start = _copy_previous(builder, rel, old, previous.markdown)
+            entries.append(FileEntry(rel, start, builder.length, old.kind))
+            reused[rel] = old.start
+            hashes[rel] = old.sha256
+            if old.kind == "code":
+                code_files += 1
+            else:
+                doc_files += 1
+            continue
         parsed = read.document
         if parsed is not None:
             warnings.update(parsed.warnings)
@@ -305,6 +397,8 @@ def folder_snapshot(
                     builder.text("\n\n")
                 builder.add(piece, file=rel, page=segment.page)
             entries.append(FileEntry(rel, start, builder.length, "document"))
+            if read.sha256:
+                hashes[rel] = read.sha256
             doc_files += 1
             continue
         text = read.text
@@ -315,6 +409,8 @@ def folder_snapshot(
         start, end = builder.add(text, file=rel, start_line=1, end_line=text.count("\n") + 1)
         kind: Literal["code", "document"] = "document" if ext in TEXT_DOCUMENTS else "code"
         entries.append(FileEntry(rel, start, end, kind))
+        if read.sha256:
+            hashes[rel] = read.sha256
         if kind == "code":
             code_files += 1
         else:
@@ -323,7 +419,7 @@ def folder_snapshot(
     if not entries:
         raise fail(errors.FOLDER_EMPTY)
 
-    snapshot = Snapshot(
+    snapshot = FolderSnapshot(
         markdown=builder.build(),
         kind="files",
         segments=builder.segments,
@@ -331,8 +427,15 @@ def folder_snapshot(
         files=entries,
         group="code" if code_files > doc_files else "documents",
         commit_hash=head_commit(root, browse_root),
+        hashes=hashes,
+        reused=reused,
     )
     snapshot.stats["files"] = len(entries)
+    if previous is not None:
+        kept = {e.path for e in entries}
+        removed = sum(1 for path in old_files if path not in kept)
+        snapshot.stats["changed_files"] = len(entries) - len(reused) + removed
+        snapshot.stats["unchanged_files"] = len(reused)
     if generated:
         snapshot.stats["skipped_generated"] = generated
         logger.info("Skipped %d generated or minified file(s)", generated)

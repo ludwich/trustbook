@@ -311,8 +311,11 @@ def test_overview_leaves_out_unsupported_sentences(
         "Requests is an HTTP library for Python.",
         "Version 2.0 added SOCKS proxy support.",
     ]
-    # Citation numbers count only the kept sentences, in order of first use.
-    assert [c["n"] for c in data["sentences"][0]["citations"]] == [1, 2, 3]
+    # Only the chunk that supports each sentence on its own stays cited (D-052), and citation
+    # numbers count only the kept citations, in order of first use.
+    first = data["sentences"][0]["citations"]
+    assert [c["n"] for c in first] == [1]
+    assert all(len(s["citations"]) >= 1 for s in data["sentences"])
 
 
 def test_overview_with_no_supported_sentence_fails(

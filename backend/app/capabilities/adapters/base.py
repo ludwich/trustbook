@@ -73,6 +73,7 @@ class ChatAdapter(Protocol):
         max_tokens: int = 1024,
         json_schema: dict[str, Any] | None = None,
         think: bool = True,
+        seed: int | None = None,
     ) -> ChatResult: ...
 
     def list_models(self) -> list[str]: ...

@@ -102,6 +102,7 @@ def test_definition_chunk_is_added_from_the_same_file_first(engine: Engine) -> N
     assert [c.chunk_id for c in chunks] == ["top", wanted]
     extra = chunks[1]
     assert extra.definition_of == "DEFAULT_POOLSIZE" and extra.score == 0.0
+    assert extra.referrer == "top"  # with_callees must keep the chunk it was added for
     assert "DEFAULT_POOLSIZE = 10" in extra.text and extra.source_id == source
 
 
@@ -225,3 +226,67 @@ def test_retrieve_adds_the_constants_behind_a_code_answer(engine: Engine) -> Non
     assert ids[-1] == constants and result.chunks[-1].definition_of == "DEFAULT_POOLSIZE"
     assert sum(c.token_count for c in result.chunks) <= 6000
     assert result.top_score == result.ranked[0].score  # refusal still uses the ranked list
+
+
+def _literal_source(engine: Engine, entries: int) -> tuple[str, list[str], RetrievedChunk]:
+    """``ERROR_MESSAGES = {…}`` with ``entries`` rows, chunked by the code chunker and stored.
+
+    Returns the source, the literal's chunk ids in order, and the ``message()`` chunk using it.
+    """
+    from app.chunking.syntax import chunk_source_code
+    from app.chunking.tokens import CharEstimate
+
+    rows = "\n".join(
+        f"    'E{i:03d}': 'Error number {i}: the request could not be processed',"
+        for i in range(entries)
+    )
+    use = "def message(code):\n    return ERROR_MESSAGES[code]\n"
+    src = f"ERROR_MESSAGES = {{\n{rows}\n}}\n\n\n{use}"
+    drafts = chunk_source_code(src, 0, len(src), "errors.py", CharEstimate())
+    index = InMemorySpaceIndex()
+    source = add_source(engine, "errors", source_type="folder", group="code")
+    ids = [
+        add_chunk(
+            engine,
+            index,
+            source,
+            d.text,
+            ordinal=i,
+            locator=d.locator,
+            token_count=d.token_count,
+        )
+        for i, d in enumerate(drafts)
+    ]
+    *parts, user = ids
+    assert all(d.locator["kind"] == "data" for d in drafts[:-1]) and len(parts) > 1
+    referrer = drafts[-1]
+    return source, parts, retrieved(user, referrer.text, referrer.locator, source=source)
+
+
+def test_a_split_literal_comes_in_whole_as_one_definition(engine: Engine) -> None:
+    """D-058: only part 1 has ``ERROR_MESSAGES = {``; the entry asked about is in a later part."""
+    source, parts, user = _literal_source(engine, 30)
+    chunks = with_definitions(engine, [user])
+    assert [c.chunk_id for c in chunks] == [user.chunk_id, *parts]
+    assert all(c.definition_of == "ERROR_MESSAGES" for c in chunks[1:])
+    assert "'E025'" in "".join(c.text for c in chunks)
+    # Part 1 in the context does not count as the definition: the other parts still come.
+    part1 = retrieved(parts[0], chunks[1].text, chunks[1].locator, source=source)
+    chunks = with_definitions(engine, [user, part1])
+    assert [c.chunk_id for c in chunks] == [user.chunk_id, parts[0], *parts[1:]]
+    # The parts count as one name of the MAX_EXTRA.
+    assert len({c.definition_of for c in chunks[2:]}) == 1
+
+
+def test_a_big_split_literal_brings_the_best_scored_parts_within_the_cap(engine: Engine) -> None:
+    from app.retrieval.definitions import LITERAL_MAX_TOKENS
+
+    _, parts, user = _literal_source(engine, 200)
+    plain = with_definitions(engine, [user])[1:]
+    assert sum(c.token_count for c in plain) <= LITERAL_MAX_TOKENS
+    assert [c.chunk_id for c in plain] == parts[: len(plain)] and len(plain) < len(parts)
+    # A part the reranker scored for the question comes first, even far into the table.
+    far = retrieved(parts[-2], "t", {}, score=0.7)
+    extra = [c.chunk_id for c in with_definitions(engine, [user], [user, far])[1:]]
+    assert parts[-2] in extra and parts[0] in extra
+    assert extra == sorted(extra, key=parts.index)  # in line order

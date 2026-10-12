@@ -76,6 +76,10 @@ describe("field visibility", () => {
       "provider",
       "api_key",
     ]);
+    // The test-only mock provider has fixed results: no key, no URL.
+    expect(names(visibleFields(s, withValues(d, { provider: "mock" }).values))).toEqual([
+      "provider",
+    ]);
   });
 });
 

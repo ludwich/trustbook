@@ -78,6 +78,7 @@ class ScriptedChat:
         max_tokens: int = 1024,
         json_schema: dict[str, Any] | None = None,
         think: bool = True,
+        seed: int | None = None,
     ) -> ChatResult:
         self.calls.append(
             {
@@ -85,6 +86,7 @@ class ScriptedChat:
                 "temperature": temperature,
                 "schema": json_schema,
                 "think": think,
+                "seed": seed,
             }
         )
         if not self.replies:

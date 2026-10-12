@@ -107,7 +107,11 @@ function WebSearch({ spaceId, onDone }: { spaceId: string; onDone: () => void })
           {results.map((r) => {
             const id = `result-${encodeURIComponent(r.url)}`;
             return (
-              <li key={r.url} className="flex gap-2.5 rounded-md px-2 py-2 hover:bg-accent/50">
+              <li
+                key={r.url}
+                data-url={r.url}
+                className="flex gap-2.5 rounded-md px-2 py-2 hover:bg-accent/50"
+              >
                 <Checkbox
                   id={id}
                   checked={picked.has(r.url)}

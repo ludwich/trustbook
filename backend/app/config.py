@@ -41,6 +41,11 @@ def _env_flag(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def mock_llm_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """``TRUSTBOOK_MOCK_LLM=1``: test adapters (mock chat, mock web search) may be used."""
+    return _env_flag((os.environ if env is None else env).get("TRUSTBOOK_MOCK_LLM"))
+
+
 @dataclass(frozen=True)
 class Paths:
     """All file-system locations and environment-driven options."""
@@ -134,6 +139,8 @@ class CapabilitySettings(BaseModel):
     use_chat: bool | None = None
     provider: str | None = None
     mode: str | None = None
+    # grounding only: check claims about code with the chat model (D-045); None = on.
+    code_judge: bool | None = None
     last_test: TestResult | None = None
 
 
@@ -144,6 +151,17 @@ class Thresholds(BaseModel):
     verify: float = 0.5
 
 
+class RetrievalSettings(BaseModel):
+    """Parent context for the top children of a retrieval (D-077), the kill switches.
+
+    ``parent_context``: promote citable parent chunks and build the code outline. ``outline``:
+    the non-citable code outline (off keeps the promotions).
+    """
+
+    parent_context: bool = True
+    outline: bool = True
+
+
 def default_capabilities() -> dict[str, CapabilitySettings]:
     """Default per-capability configuration (chat starts unconfigured)."""
     return {
@@ -151,7 +169,7 @@ def default_capabilities() -> dict[str, CapabilitySettings]:
         "gate": CapabilitySettings(use_chat=True),
         "embeddings": CapabilitySettings(),
         "reranker": CapabilitySettings(),
-        "grounding": CapabilitySettings(enabled=True),
+        "grounding": CapabilitySettings(enabled=True, code_judge=True),
         "stt": CapabilitySettings(mode="bundled"),
         "web_search": CapabilitySettings(provider="searxng"),
         "tts": CapabilitySettings(enabled=False),
@@ -165,6 +183,7 @@ class Settings(BaseModel):
     power: Power = "normal"
     setup_completed: bool = False
     thresholds: Thresholds = Field(default_factory=Thresholds)
+    retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     hints_dismissed: list[str] = Field(default_factory=list)  # one-time hints, e.g. chat_grounding
     capabilities: dict[str, CapabilitySettings] = Field(default_factory=default_capabilities)
 

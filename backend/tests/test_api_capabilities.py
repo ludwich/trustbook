@@ -53,6 +53,7 @@ def test_list_and_get(client: TestClient) -> None:
         "use_chat",
         "provider",
         "mode",
+        "code_judge",
     }
     assert set(chat["presets"][0]) == {"id", "label", "adapter", "base_url", "needs_api_key"}
     assert "mock" in [p["id"] for p in chat["presets"]]

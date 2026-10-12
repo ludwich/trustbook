@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
 
 from app.chunking.code import chunk_code
@@ -104,7 +105,9 @@ def test_snapshot_locators_pages_and_sections() -> None:
         _sentence(i) for i in range(100)
     )
     drafts = chunk_snapshot(text_snapshot(md), WordCounter())
-    assert drafts[0].locator["heading"] is None
+    # Named by the section holding most of it (D-053), listing every section it spans.
+    assert drafts[0].locator["heading"] == "Usage"
+    assert drafts[0].locator["headings"] == ["Install", "Usage"]
     assert drafts[0].locator["offset"] == 0
     assert any(d.locator["heading"] == "Usage" for d in drafts)
 
@@ -184,12 +187,114 @@ def test_files_snapshot_uses_code_and_document_chunkers() -> None:
         files=[FileEntry("a.py", s1, e1, "code"), FileEntry("README.md", s2, e2, "document")],
     )
     drafts = chunk_snapshot(snap, WordCounter())
-    assert drafts[0].locator == {"file": "a.py", "start_line": 1, "end_line": 6, "symbol": None}
+    # .py goes to tree-sitter (one chunk per function); README.md to the document chunker
+    assert [d.locator for d in drafts[:2]] == [
+        {"file": "a.py", "start_line": 1, "end_line": 2, "symbol": "f", "kind": "function"},
+        {"file": "a.py", "start_line": 5, "end_line": 6, "symbol": "g", "kind": "function"},
+    ]
     readme = drafts[-1]
     assert readme.locator == {
         "file": "README.md",
         "start_line": 1,
         "end_line": 2,
         "symbol": None,
+        "kind": None,
+        "heading": None,
     }
-    assert readme.text.startswith("File: README.md\n")
+    assert readme.text.startswith("File: README.md (lines 1-2)\n")
+
+
+# --- file documents end on whole lines (ref-near-07, D-056) ------------------------------------
+
+
+def _rst_file() -> str:
+    """Wrapped prose (sentences run over line ends) with some long one-line paragraphs."""
+    paragraphs: list[str] = []
+    for p in range(40):
+        if p % 4 == 3:  # one 45-word line holding three sentences, like advanced.rst:693
+            paragraphs.append(" ".join(_sentence(p * 10 + k, 15) for k in range(3)))
+            continue
+        words = " ".join(_sentence(p * 10 + k, 9) for k in range(5)).split()
+        paragraphs.append("\n".join(" ".join(words[i : i + 12]) for i in range(0, len(words), 12)))
+    return "\n\n".join(paragraphs)
+
+
+def _file_snapshot(path: str, body: str) -> tuple[Snapshot, str]:
+    builder = SnapshotBuilder()
+    builder.text(f"# {path}\n\n")
+    start, end = builder.add(body, file=path)
+    snap = Snapshot(
+        builder.build(), "files", builder.segments, files=[FileEntry(path, start, end, "document")]
+    )
+    return snap, snap.markdown
+
+
+def test_file_document_chunks_hold_whole_lines() -> None:
+    body = _rst_file()
+    file_lines = body.split("\n")
+    snap, text = _file_snapshot("docs/advanced.rst", body)
+    drafts = chunk_snapshot(snap, WordCounter())
+    assert len(drafts) > 3
+    for d in drafts:
+        claimed = "\n".join(file_lines[d.locator["start_line"] - 1 : d.locator["end_line"]])
+        # The cited lines hold exactly the chunk's text: no line is claimed in part.
+        assert text[d.start : d.end] == claimed.strip()
+        assert d.token_count <= 800 + 3
+    assert any(b.start < a.end for a, b in itertools.pairwise(drafts))  # overlap is kept
+    # Without whole lines some chunk would end inside a line (and claim all of it).
+    entry = snap.files[0]
+    units = split_units(text, entry.start, entry.end, WordCounter(), max_tokens=800)
+    ends = [g[-1].end for g in pack_units(units)]
+    assert any(e < entry.end and text[e] != "\n" for e in ends)
+
+
+def test_file_document_line_longer_than_the_maximum_is_still_located() -> None:
+    line = " ".join(_sentence(i, 20) for i in range(120))  # one 2,400-word line
+    body = "Intro line.\n\n" + line + "\n\nOutro line."
+    snap, text = _file_snapshot("notes.txt", body)
+    drafts = chunk_snapshot(snap, WordCounter())
+    inside = [d for d in drafts if d.locator["start_line"] == d.locator["end_line"] == 3]
+    assert inside  # cut inside the line: the only place left
+    for d in drafts:
+        claimed = "\n".join(body.split("\n")[d.locator["start_line"] - 1 : d.locator["end_line"]])
+        assert text[d.start : d.end] in claimed  # every cited line range contains the text
+
+
+def test_line_aligned_packing_prefers_line_and_sentence_ends() -> None:
+    def unit(i: int, tokens: int, line: bool, clean: bool = False) -> Unit:
+        return Unit(i * 10, i * 10 + 9, tokens, line_start=line, clean_start=clean)
+
+    units = [
+        unit(0, 40, True, True),
+        unit(1, 40, False),
+        unit(2, 40, True, True),  # a sentence starts this line
+        unit(3, 40, False),
+        unit(4, 40, True),  # a line starting mid-sentence
+        unit(5, 40, False),
+        unit(6, 40, False),
+    ]
+    groups = pack_units(units, target=200, max_tokens=300, overlap=0, align_lines=True)
+    assert [[u.start // 10 for u in g] for g in groups] == [[0, 1, 2, 3], [4, 5, 6]]
+    plain = pack_units(units, target=200, max_tokens=300, overlap=0)
+    assert [len(g) for g in plain] == [5, 2]  # cut mid-line without alignment
+    clean_first = [unit(0, 40, True, True), unit(1, 40, False), unit(2, 40, False)]
+    clean_first += [unit(3, 40, True, True), unit(4, 40, True), unit(5, 40, False)]
+    groups = pack_units(clean_first, target=200, max_tokens=300, overlap=0, align_lines=True)
+    assert groups[0][-1].start // 10 == 2  # the clean start wins over the later line start
+    overlap = pack_units(units, target=200, max_tokens=300, overlap=80, align_lines=True)
+    assert overlap[1][0].line_start  # an overlap starts on a line too
+
+
+def test_split_units_lines_marks_line_starts() -> None:
+    text = "One two.\nThree four. Five\nsix seven.\n\n- item one\n- item two"
+    units = split_units(text, 0, len(text), WordCounter(), max_tokens=800, lines=True)
+    pieces = [(text[u.start : u.end], u.line_start, u.clean_start) for u in units]
+    assert pieces == [
+        ("One two.", True, True),
+        ("Three four.", True, True),
+        ("Five", False, False),
+        ("six seven.", True, False),  # the line starts mid-sentence
+        ("- item one", True, True),
+        ("- item two", True, True),
+    ]
+    assert [u.tokens for u in units] == [2, 3, 1, 3, 4, 4]  # + 1 for each line break

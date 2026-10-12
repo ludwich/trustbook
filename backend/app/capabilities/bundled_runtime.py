@@ -51,7 +51,8 @@ _GEMMA_DOCUMENT_PROMPT = "Document"
 _BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 _EMBED_MAX_TOKENS = 2048
 # HHEM does not truncate; cited context is capped at ~6,000 tokens (SPEC §8), so this is a guard.
-_GROUNDING_MAX_PREMISE_CHARS = 32_000
+_GROUNDING_MAX_PREMISE_CHARS = 6_000  # ~1,500 tokens; HHEM was trained on 512 (D-054)
+_GROUNDING_BATCH = 4  # padded to the longest premise: small, length-sorted batches
 # Building a model is not thread-safe: transformers switches torch's process-wide default dtype
 # while it creates the weights, so two loads at once (e.g. indexing-stream replicas, or a BF16
 # reranker next to an FP32 checker) can end up with mixed BF16/FP32 layers. Loads take turns.
@@ -238,8 +239,17 @@ class HHEMGroundingChecker:
         with self._lock, torch.no_grad():
             self._threads.apply()
             if not self._fallback:
-                # predict() = softmax(logits)[:, 1]; label 1 means "consistent".
-                return _unit_interval(_floats(self._model.predict(capped)))
+                # predict() = softmax(logits)[:, 1]; label 1 means "consistent". Scored in small
+                # batches sorted by length: one batch padded to the longest of many long premises
+                # needed several GB of attention memory and got the app killed (D-054).
+                order = sorted(range(len(capped)), key=lambda i: len(capped[i][0]))
+                out: list[float] = [0.0] * len(capped)
+                for start in range(0, len(order), _GROUNDING_BATCH):
+                    batch = order[start : start + _GROUNDING_BATCH]
+                    scores = _floats(self._model.predict([capped[i] for i in batch]))
+                    for i, value in zip(batch, scores, strict=True):
+                        out[i] = value
+                return _unit_interval(out)
             premises = [p for p, _ in capped]
             hypotheses = [h for _, h in capped]
             batch = self._tokenizer(

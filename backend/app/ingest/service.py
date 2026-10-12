@@ -13,7 +13,6 @@ half-indexed source; a failure removes the partial rows and vectors.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -21,14 +20,16 @@ from typing import Any
 
 from app.capabilities.bundled import ProviderRegistry, ProviderUnavailableError
 from app.capabilities.streams import EmbeddedBatch, embed_in_streams
-from app.chunking.dispatch import chunk_snapshot
 from app.chunking.tokens import TokenCounter, load_token_counter
-from app.db.models import Chunk, Source
-from app.index.base import IndexedChunk, IndexRegistry, SpaceIndex
+from app.db.models import Source
+from app.index.base import IndexedChunk, IndexRegistry, SpaceIndex, search_text
 from app.index.lance import IndexDimensionError
 from app.ingest import errors
+from app.ingest.browse_root import BrowsePathError, BrowseRootMissingError, resolve_in_root
 from app.ingest.errors import IngestError, fail
 from app.ingest.estimate import job_seconds
+from app.ingest.git import AheadTracker
+from app.ingest.incremental import ChunkPlan, load_previous, plan_chunks
 from app.ingest.readers import IngestTools, read_source
 from app.jobs.calibration import Calibration
 from app.jobs.eta import ESTIMATE_KEY
@@ -37,7 +38,7 @@ from app.jobs.pool import WorkerPool
 from app.jobs.repository import JobNotFoundError, JobRepository
 from app.parse.snapshot import Snapshot, write_snapshot
 from app.spaces.service import SpaceService
-from app.spaces.source_schemas import SourceOut
+from app.spaces.source_schemas import AheadOut, SourceOut
 from app.spaces.sources import (
     FINAL_STATUSES,
     SourceNotFoundError,
@@ -87,6 +88,7 @@ class IngestService:
         self.on_ready = on_ready
         # This computer's measured speed, for job estimates (set by the app; tests: none).
         self.calibration: Callable[[], Calibration | None] = lambda: None
+        self.ahead_tracker = AheadTracker()
 
     # --- helpers ---------------------------------------------------------------------------
 
@@ -135,6 +137,24 @@ class IngestService:
             stats=load_stats(source),
             created_at=source.created_at,
             job_id=source.job_id,
+            ahead=self._ahead(source) if status == "ready" else None,
+        )
+
+    def _ahead(self, source: Source) -> AheadOut | None:
+        """For a ready folder source: how far the folder's HEAD moved since indexing."""
+        if source.type != "folder" or not source.commit_hash or not source.origin:
+            return None
+        try:
+            root, _relative = resolve_in_root(self.tools.browse_root, source.origin)
+            ahead = self.ahead_tracker.ahead(root, self.tools.browse_root, source.commit_hash)
+        except (BrowsePathError, BrowseRootMissingError, OSError):
+            return None
+        if ahead is None:
+            return None
+        return AheadOut(
+            indexed_commit=ahead.indexed_commit,
+            head_commit=ahead.head_commit,
+            commits_ahead=ahead.commits_ahead,
         )
 
     def _cancelled_pair(self, source: Source) -> tuple[str, str]:
@@ -279,6 +299,10 @@ class IngestService:
             logger.exception("Ingest of source %s failed", source.id)
             self._fail_quietly(repo, source, fail(errors.INTERNAL))
             raise
+        finally:
+            # Indexing replicas hold GBs; keep them only while more indexing is waiting (D-054).
+            if self.jobs.others_unfinished(INGEST_KIND, ctx.job_id) == 0:
+                self.providers.release_replicas()
 
     def _fail_quietly(self, repo: SourceRepository, source: Source, exc: IngestError) -> None:
         try:
@@ -334,6 +358,10 @@ class IngestService:
         ctx.progress(0.0)
         folder = repo.folder(source.id)
         folder.mkdir(parents=True, exist_ok=True)
+        previous = load_previous(repo, source.id, folder) if source.type == "folder" else None
+        old_ids = [c.id for c in repo.chunks(source.id)] if previous is not None else []
+        # Trusted again only after this run succeeds (a crash mid-run means a full re-index).
+        repo.replace_files(source.id, [])
         with self.providers.use.shared():  # parsing (Docling, STT) also uses the CPU models
             snapshot, snapshot_at = read_source(
                 self.tools,
@@ -341,51 +369,61 @@ class IngestService:
                 folder,
                 lambda f: ctx.progress(0.4 * max(0.0, min(1.0, f))),
                 ctx.check_cancelled,
+                previous=previous.snapshot if previous is not None else None,
             )
         ctx.check_cancelled()
         write_snapshot(folder, snapshot)
         repo.update(source.id, status="indexing")
-        drafts = chunk_snapshot(snapshot, self.token_counter())
-        if not drafts:
+        plan = plan_chunks(
+            snapshot, self.token_counter(), source.id, old_ids=old_ids, previous=previous
+        )
+        if not plan.rows:
             raise fail(errors.NO_TEXT)
         ctx.check_cancelled()
-
-        rows = [
-            Chunk(
-                id=new_id(),
-                source_id=source.id,
-                ordinal=i,
-                text=d.text,
-                start_offset=d.start,
-                end_offset=d.end,
-                locator=json.dumps(d.locator),
-                token_count=d.token_count,
-            )
-            for i, d in enumerate(drafts)
-        ]
-        indexed = [IndexedChunk(r.id, source.id, r.text) for r in rows]
         index = self.indexes.for_space(space_id)
-        # Rows first: retrieval skips indexed ids without a row, and the source is not ready yet.
-        repo.replace_chunks(source.id, rows)
-        index.delete_source(source.id)
         try:
-            self._embed_into(ctx, index, indexed)
-            ctx.check_cancelled()
-            index.refresh_text_index()
+            self._index(ctx, repo, index, source.id, plan)
         except BaseException as exc:
             self._discard_chunks(repo, index, source.id)
             if isinstance(exc, IndexDimensionError):
                 raise fail(errors.EMBEDDING_CHANGED) from exc
             raise
-        self._mark_ready(repo, source, snapshot, snapshot_at, len(rows))
+        if plan.files:
+            repo.replace_files(source.id, plan.files)
+        self._mark_ready(repo, source, snapshot, snapshot_at, len(plan.rows))
         ctx.progress(1.0)
         self._notify_ready(space_id, source.id)
+
+    def _index(
+        self,
+        ctx: JobContext,
+        repo: SourceRepository,
+        index: SpaceIndex,
+        source_id: str,
+        plan: ChunkPlan,
+    ) -> None:
+        """Store ``plan``'s rows, drop stale vectors and embed the new chunks."""
+        # Read before the rows are stored: committing expires the row objects.
+        indexed = [IndexedChunk(r.id, source_id, search_text(r.text)) for r in plan.new_rows]
+        counts = (len(plan.new_rows), len(plan.rows) - len(plan.new_rows), len(plan.stale_ids))
+        # Rows first: retrieval skips indexed ids without a row, and the source is not ready yet.
+        repo.replace_chunks(source_id, plan.rows)
+        if plan.incremental:
+            index.delete_chunks(plan.stale_ids)
+            logger.info("Refresh of %s: %d new chunks, %d kept, %d removed", source_id, *counts)
+        else:
+            index.delete_source(source_id)
+        if indexed:
+            self._embed_into(ctx, index, indexed)
+        ctx.check_cancelled()
+        index.refresh_text_index()
 
     def _discard_chunks(self, repo: SourceRepository, index: SpaceIndex, source_id: str) -> None:
         """Drop a half-indexed source's rows and vectors (it is marked failed next)."""
         try:
             index.delete_source(source_id)
             repo.replace_chunks(source_id, [])
+            repo.replace_files(source_id, [])
         except Exception:
             logger.warning("Could not clean up source %s after a failure", source_id, exc_info=True)
 

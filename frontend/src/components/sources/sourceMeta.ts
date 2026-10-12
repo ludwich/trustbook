@@ -93,3 +93,31 @@ export function visibleQualityWarning(source: Source): string | null {
     .trim();
   return rest || null;
 }
+
+/** First 7 characters of a commit hash, the way git shows it. */
+export function shortCommit(commit: string): string {
+  return commit.slice(0, 7);
+}
+
+/**
+ * "Indexed at 1a2b3c4, folder is 3 commits ahead." for a linked folder whose HEAD moved on
+ * (SPEC §7.5). When the commit graph can't count the commits: "…, folder has new commits."
+ * null when the folder is up to date (or the backend doesn't report it).
+ */
+export function aheadText(source: Source): string | null {
+  const ahead = source.ahead;
+  if (source.type !== "folder" || !ahead) return null;
+  const n = ahead.commits_ahead;
+  const where = `Indexed at ${shortCommit(ahead.indexed_commit)}`;
+  if (typeof n === "number" && n > 0) {
+    return `${where}, folder is ${plural(n, "commit")} ahead.`;
+  }
+  return `${where}, folder has new commits.`;
+}
+
+/** "3 files changed, 120 unchanged" after a folder refresh; null before the first refresh. */
+export function refreshStatsText(source: Source): string | null {
+  const { changed_files: changed, unchanged_files: unchanged } = source.stats;
+  if (source.type !== "folder" || changed === undefined || unchanged === undefined) return null;
+  return `${plural(changed, "file")} changed, ${unchanged.toLocaleString("en-US")} unchanged`;
+}

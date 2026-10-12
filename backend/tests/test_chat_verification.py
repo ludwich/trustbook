@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from app.chat.pipeline import NOT_IN_SOURCES, Answered, Refused, answer
-from app.chat.prompt import ANSWER_SYSTEM, REGENERATE_INSTRUCTION
+from app.chat.pipeline import NOT_IN_SOURCES, Answered, Refused, answer, retrieval_fingerprint
+from app.chat.prompt import (
+    ANSWER_SYSTEM,
+    FEEDBACK_HEADING,
+    FEEDBACK_TASK,
+    REGENERATE_INSTRUCTION,
+    REGENERATION_HEADING,
+)
 from app.chat.schemas import Stage
 from app.grounding.verify import Verifier
 from app.retrieval.service import Retrieval, RetrievedChunk
@@ -57,16 +63,62 @@ def run(
     return outcome, stages
 
 
+def regenerated_user(first_user: str, feedback: str) -> str:
+    """The second attempt's user message: the first one with the regeneration section added
+    before the question (D-079)."""
+    chunks, question = first_user.rsplit("\n\nQuestion: ", 1)
+    return (
+        f"{chunks}\n\n{REGENERATION_HEADING}\n\n{REGENERATE_INSTRUCTION}\n\n{feedback}"
+        f"\n\nQuestion: {question}"
+    )
+
+
+def latency(dump: dict[str, object], *, passes: int, calls: int, cited: bool) -> None:
+    """Pops and checks the D-080 latency fields that hold measured times."""
+    timings = dump.pop("timings")
+    assert isinstance(timings, dict)
+    assert timings["retrieval_s"] is not None and timings["gate_s"] is None
+    assert len(timings["generation_s"]) == calls and len(timings["verification_s"]) == passes
+    assert (timings["citation_s"] is not None) is cited
+    assert timings["total_s"] >= 0
+    prompt = dump.pop("prompt_tokens")
+    assert isinstance(prompt, list) and len(prompt) == calls and all(n > 0 for n in prompt)
+
+
+PARENTS_OFF: dict[str, object] = {
+    "expansions": [],
+    "promoted_tokens": 0,
+    "outline_tokens": 0,
+    "outline_fingerprint": None,
+    "promoted_cited": [0, 0],
+}
+
+
 def test_all_sentences_pass_is_verified_with_scores_and_diagnostics() -> None:
     chat = ScriptedChat(answer_json(("A.", ["c1"]), ("B.", ["c2", "c1"])))
     outcome, stages = run(chat, {"A.": 0.9, "B.": 0.6})
     assert isinstance(outcome, Answered)
     assert outcome.badge == "verified" and outcome.removed == []
     assert outcome.scores == [{"k1": 0.9}, {"k2": 0.6, "k1": 0.6}]
-    assert outcome.diagnostics.model_dump() == {
+    dump = outcome.diagnostics.model_dump()
+    latency(dump, passes=1, calls=1, cited=True)
+    assert dump == {
         "top_rerank": 0.9,
         "sentence_scores": [0.9, 0.6],
         "regenerated": False,
+        "sentence_methods": ["checker", "checker"],
+        "judge_vetoed": [],
+        "judge_seconds": None,
+        "citation_changes": [],
+        "retrieval_fingerprint": retrieval_fingerprint(FOUND.chunks),
+        "generation": {"temperature": 0.2, "seed": None},
+        "failed_sentences": [],
+        "judge_calls": 0,
+        "judge_calls_per_pass": [0],
+        "answer_calls": 1,
+        "completion_tokens": [None],
+        "outline_only": [0],
+        **PARENTS_OFF,
     }
     assert stages == ["retrieving", "generating", "checking"]
     assert len(chat.calls) == 1
@@ -98,18 +150,51 @@ def test_exactly_half_failing_is_not_refused_and_not_regenerated() -> None:
     assert len(chat.calls) == 1
 
 
-def test_first_sentence_failing_refuses_without_regenerating() -> None:
-    chat = ScriptedChat(answer_json(("Bad first.", ["c1"]), ("Good.", ["c2"])))
-    outcome, stages = run(chat, {"Bad first.": 0.1})
+def test_first_sentence_failing_regenerates_once_then_refuses() -> None:
+    # D-063: the first sentence failing alone (not more than half) also gets the one
+    # regeneration; the refusal rule applies to the second reply.
+    chat = ScriptedChat(
+        answer_json(("Bad first.", ["c1"]), ("Good.", ["c2"])),
+        answer_json(("Bad again.", ["c1"]), ("Good.", ["c2"]), ("Fine.", ["c3"])),
+        "never used",
+    )
+    outcome, stages = run(chat, {"Bad first.": 0.1, "Bad again.": 0.2})
     assert isinstance(outcome, Refused)
     assert outcome.refusal.reason == "unsupported"
     assert outcome.refusal.message == NOT_IN_SOURCES
     assert outcome.refusal.suggestion == (
         "Add sources that cover “how are proxies configured in requests”, then ask again."
     )
-    assert outcome.diagnostics.sentence_scores == [0.1, 1.0]
-    assert outcome.diagnostics.regenerated is False
-    assert len(chat.calls) == 1 and stages[-1] == "checking"
+    assert outcome.diagnostics.sentence_scores == [0.2, 1.0, 1.0]
+    assert outcome.diagnostics.regenerated is True
+    # The refusal keeps the failed sentence of the reply it rests on and why (D-075).
+    assert [f.model_dump() for f in outcome.diagnostics.failed_sentences] == [
+        {"text": "Bad again.", "reason": "checker score 0.20 < 0.5"}
+    ]
+    assert len(chat.calls) == 2
+    assert stages == ["retrieving", "generating", "checking", "generating", "checking"]
+
+
+def test_first_sentence_failing_can_recover_on_the_regeneration() -> None:
+    chat = ScriptedChat(
+        answer_json(("Bad first.", ["c1"]), ("Good.", ["c2"])),
+        answer_json(("Better.", ["c1"]), ("Good.", ["c2"])),
+    )
+    outcome, _ = run(chat, {"Bad first.": 0.1})
+    assert isinstance(outcome, Answered) and outcome.badge == "verified"
+    assert [s.text for s in outcome.sentences] == ["Better.", "Good."]
+    assert outcome.diagnostics.regenerated is True
+    second = chat.calls[1]["messages"]
+    feedback = (
+        f"{FEEDBACK_HEADING}\n"
+        '1. "Bad first." (cited c1): not supported by the cited chunks.\n'
+        f"{FEEDBACK_TASK}"
+    )
+    # The system message stays the same; the regeneration text goes before the question (D-079).
+    assert second[0]["content"] == ANSWER_SYSTEM
+    assert second[1]["content"] == regenerated_user(
+        chat.calls[0]["messages"][1]["content"], feedback
+    )
 
 
 def test_more_than_half_failing_regenerates_once_and_can_recover() -> None:
@@ -128,11 +213,21 @@ def test_more_than_half_failing_regenerates_once_and_can_recover() -> None:
     assert len(chat.calls) == 2
     first, second = (c["messages"] for c in chat.calls)
     assert first[0]["content"] == ANSWER_SYSTEM
-    assert second[0]["content"] == f"{ANSWER_SYSTEM}\n\n{REGENERATE_INSTRUCTION}"
-    assert second[1] == first[1]  # same chunks and question
+    # Only the failed sentences are listed, each with its reason (D-074).
+    feedback = (
+        f"{FEEDBACK_HEADING}\n"
+        '1. "Bad 1." (cited c1): not supported by the cited chunks.\n'
+        '2. "Bad 2." (cited c2): not supported by the cited chunks.\n'
+        f"{FEEDBACK_TASK}"
+    )
+    # The system message stays the same; the regeneration text goes before the question (D-079).
+    assert second[0]["content"] == ANSWER_SYSTEM
+    assert second[1]["content"] == regenerated_user(
+        chat.calls[0]["messages"][1]["content"], feedback
+    )
     assert REGENERATE_INSTRUCTION == (
         "Some sentences were not supported by the cited chunks. "
-        "Only state what the chunks say, and cite them."
+        "Only state what the chunks say, in the chunks' own words, and cite them."
     )
 
 
@@ -195,11 +290,39 @@ def test_refusals_before_generation_carry_the_top_score() -> None:
     low = Retrieval(chunks=[chunk("k1", 0.05)], ranked=[chunk("k1", 0.05)], source_ids=["s1"])
     outcome, _ = run(ScriptedChat(), found=low)
     assert isinstance(outcome, Refused) and outcome.refusal.reason == "not_in_sources"
-    assert outcome.diagnostics.model_dump() == {
+    dump = outcome.diagnostics.model_dump()
+    latency(dump, passes=0, calls=0, cited=False)
+    assert dump == {
         "top_rerank": 0.05,
         "sentence_scores": [],
         "regenerated": False,
+        "sentence_methods": [],
+        "judge_vetoed": [],
+        "judge_seconds": None,
+        "citation_changes": [],
+        "retrieval_fingerprint": retrieval_fingerprint(low.chunks),
+        "generation": None,  # no answer call
+        "failed_sentences": [],
+        "judge_calls": 0,
+        "judge_calls_per_pass": [],
+        "answer_calls": 0,
+        "completion_tokens": [],
+        "outline_only": [],
+        **PARENTS_OFF,
     }
     none = Retrieval(chunks=[], ranked=[], source_ids=[])
     outcome, _ = run(ScriptedChat(), found=none)
     assert isinstance(outcome, Refused) and outcome.diagnostics.top_rerank is None
+
+
+def test_citations_are_pruned_to_the_chunks_that_support_a_sentence_alone() -> None:
+    from app.chat.output import DraftSentence
+    from app.chat.pipeline import prune_citations
+
+    sentence = DraftSentence("netrc is read from ~/.netrc.", ("c1", "c2", "c3"))
+    pruned, scores = prune_citations(sentence, (0.9, 0.2, 0.6), 0.5)
+    assert (pruned.chunk_ids, scores) == (("c1", "c3"), (0.9, 0.6))
+    # Only the joined/focused premise passed: every cited chunk stays.
+    assert prune_citations(sentence, (0.2, 0.3, 0.1), 0.5)[0].chunk_ids == ("c1", "c2", "c3")
+    # Checker off (no threshold) or a single citation: untouched.
+    assert prune_citations(sentence, (0.9, 0.2, 0.6), None)[0] == sentence

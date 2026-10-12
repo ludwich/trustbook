@@ -25,11 +25,13 @@ from app.chat.schemas import (
     ChatStatusOut,
     ConversationCreate,
     ConversationOut,
+    Generation,
     MessageCreate,
     MessageOut,
 )
 from app.chat.service import ChatService, EventSink
 from app.db.engine import get_engine
+from app.grounding.code_judge import CodeJudge
 from app.grounding.verify import Verifier, build_verifier, checker_scores
 from app.retrieval.service import Retrieval, retrieve
 from app.retrieval.store import source_counts
@@ -105,27 +107,45 @@ def gate_adapter(services: Services) -> Callable[[], ChatAdapter] | None:
     return build
 
 
-def chat_service(services: Services, space: SpaceRecord) -> ChatService:
+def chat_service(
+    services: Services, space: SpaceRecord, generation: Generation | None = None
+) -> ChatService:
+    """The chat service for one question. ``generation`` (eval runs, F5) sets the answer call's
+    temperature and seed; the seed also goes to the gate and the judge."""
     engine = get_engine(space.db_path)
+    seed = generation.seed if generation is not None else None
     index = services.indexes.for_space(space.id)
+    settings = services.settings.load()
 
     def run_retrieval(question: str) -> Retrieval:
         providers = services.providers
         with providers.use.shared():  # waits while calibration measures
-            return retrieve(engine, index, providers.embedder(), providers.reranker(), question)
+            return retrieve(
+                engine,
+                index,
+                providers.embedder(),
+                providers.reranker(),
+                question,
+                parent_context=settings.retrieval.parent_context,
+                outline=settings.retrieval.outline,
+            )
 
     def verifier() -> Verifier:
         return build_verifier(
-            services.grounding_settings(), checker_scores(services.providers), space.folder
+            services.grounding_settings(),
+            checker_scores(services.providers),
+            space.folder,
+            CodeJudge(services.chat_adapter, seed=seed),
         )
 
     return ChatService(
         ChatStore(engine),
         retrieve=run_retrieval,
         chat_adapter=services.chat_adapter,
-        refuse_threshold=services.settings.load().thresholds.refuse,
+        refuse_threshold=settings.thresholds.refuse,
         verifier=verifier,
-        gate=Gate(GateLogStore(engine), adapter=gate_adapter(services)),
+        gate=Gate(GateLogStore(engine), adapter=gate_adapter(services), seed=seed),
+        generation=generation,
     )
 
 
@@ -188,7 +208,7 @@ def post_message(
         raise HTTPException(status_code=409, detail=CHAT_NOT_READY)
     question = body.content
     store.add_user_message(conversation_id, question)
-    service = chat_service(services, space)
+    service = chat_service(services, space, body.generation)
 
     def run(emit: EventSink) -> None:
         service.respond(conversation_id, question, emit)

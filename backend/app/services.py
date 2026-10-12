@@ -65,9 +65,11 @@ class Services:
     def grounding_settings(self) -> GroundingSettings:
         """Grounding checker on/off (the ``grounding`` capability) and the verify threshold."""
         settings = self.settings.load()
+        grounding = settings.capability("grounding")
         return GroundingSettings(
-            enabled=settings.capability("grounding").enabled,
+            enabled=grounding.enabled,
             verify_threshold=settings.thresholds.verify,
+            code_judge=grounding.code_judge is not False,
         )
 
     def cancel_space_jobs(self, space_id: str) -> None:

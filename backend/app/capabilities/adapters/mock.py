@@ -7,6 +7,20 @@ with the question it returns ``{"sentences": []}``. Overview prompts (schema wit
 get summary sentences citing chunks plus exactly three questions. Gate prompts (schema with
 ``decision``) are classified by keywords: greetings and thanks → ``chitchat``; "brainstorm",
 "ideas for", "what if" → ``brainstorm``; everything else → ``sources``.
+
+Test hooks (docs/ARCHITECTURE.md, "Test hooks"):
+
+- A question containing ``TB-UNSUPPORTED`` gets one extra sentence, :data:`UNSUPPORTED_SENTENCE`,
+  citing ``c1``. It fails verification, so the answer is ``partially_verified``.
+- A question containing ``TB-OUTLINE-FACT`` gets one extra sentence naming, in backticks, a name
+  that only the prompt's code outline shows (D-077), citing ``c1``. The outline is not a chunk, so
+  the sentence fails layer 5 and is removed. Without an outline nothing is added.
+
+The mock never quotes the outline otherwise: answers and judge verdicts read only the numbered
+chunks (:func:`~app.chat.prompt.parse_prompt` returns the outline separately).
+- Judge prompts (schema with ``verdicts``): a statement is supported when its cited lines share
+  at least two content words with it; each cited chunk's whole line range is the evidence.
+- :class:`MockSearchAdapter`: the ``mock`` web-search provider, fixed results for any query.
 """
 
 from __future__ import annotations
@@ -18,13 +32,21 @@ from collections import Counter
 from collections.abc import Sequence
 from typing import Any
 
-from app.capabilities.adapters.base import ChatMessage, ChatResult, Usage
+from app.capabilities.adapters.base import ChatMessage, ChatResult, SearchResult, Usage
+from app.capabilities.adapters.search import demote_homepages
 from app.chat.prompt import PromptChunk, parse_prompt
 from app.chat.text import content_terms, truncate
+from app.grounding.code_judge import parse_judge_prompt
 
 MOCK_MODEL = "mock"
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 MAX_QUOTE_CHARS = 300
+UNSUPPORTED_TRIGGER = "TB-UNSUPPORTED"
+UNSUPPORTED_SENTENCE = "This also requires a licence key from the vendor."
+OUTLINE_FACT_TRIGGER = "TB-OUTLINE-FACT"
+OUTLINE_FACT_SENTENCE = "The file also defines `{name}`."
+_OUTLINE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+JUDGE_MIN_SHARED = 2
 
 
 def _sentences(text: str) -> list[str]:
@@ -36,15 +58,47 @@ def _overlap(terms: set[str], text: str) -> int:
     return len(terms & set(content_terms(text)))
 
 
+def _body(text: str) -> str:
+    """A chunk's text without a code chunk's ``File: … (lines a-b)`` header line.
+
+    A model quotes the code, not the header; quoting it put line numbers into the answer, which
+    the judge's anchor check (correctly) finds in no code line.
+    """
+    first, sep, rest = text.partition("\n")
+    return rest if sep and first.startswith("File: ") else text
+
+
 def _best_sentence(chunk: PromptChunk, terms: set[str]) -> str:
     """The chunk sentence sharing most terms with the question (first one on ties)."""
-    candidates = _sentences(chunk.text) or [chunk.text]
+    body = _body(chunk.text)
+    candidates = _sentences(body) or [body]
     best = max(candidates, key=lambda s: (_overlap(terms, s), -candidates.index(s)))
     return truncate(best, MAX_QUOTE_CHARS)
 
 
-def grounded_answer(chunks: Sequence[PromptChunk], question: str) -> dict[str, Any]:
-    """1–2 sentences quoting the best-matching chunk(s), or no sentences when nothing matches."""
+def outline_only_name(chunks: Sequence[PromptChunk], outline: str) -> str | None:
+    """The first name of the outline's ``module:`` or class lines that no chunk contains."""
+    texts = [c.text for c in chunks]
+    for line in outline.splitlines():
+        _, sep, names = line.partition(": ")
+        if not sep or line.strip().startswith("imports:"):
+            continue
+        for name in _OUTLINE_NAME.findall(names):
+            if name in ("class", "and", "more"):
+                continue
+            if not any(re.search(rf"(?<!\w){re.escape(name)}(?!\w)", t) for t in texts):
+                return str(name)
+    return None
+
+
+def grounded_answer(
+    chunks: Sequence[PromptChunk], question: str, outline: str = ""
+) -> dict[str, Any]:
+    """1–2 sentences quoting the best-matching chunk(s), or no sentences when nothing matches.
+
+    ``outline``: the prompt's code outline; never quoted (only the ``TB-OUTLINE-FACT`` hook names
+    one of its names).
+    """
     terms = set(content_terms(question))
     scored = [(_overlap(terms, c.text), i, c) for i, c in enumerate(chunks)]
     matching = sorted((s for s in scored if s[0] > 0), key=lambda s: (-s[0], s[1]))
@@ -57,7 +111,42 @@ def grounded_answer(chunks: Sequence[PromptChunk], question: str) -> dict[str, A
         text = _best_sentence(second, terms)
         if text != sentences[0]["text"]:
             sentences.append({"text": text, "chunk_ids": [second.label]})
+    if UNSUPPORTED_TRIGGER in question and chunks:
+        sentences.append({"text": UNSUPPORTED_SENTENCE, "chunk_ids": [chunks[0].label]})
+    if OUTLINE_FACT_TRIGGER in question and chunks:
+        name = outline_only_name(chunks, outline)
+        if name is not None:
+            text = OUTLINE_FACT_SENTENCE.format(name=name)
+            sentences.append({"text": text, "chunk_ids": [chunks[0].label]})
     return {"sentences": sentences}
+
+
+def judge_verdicts(prompt: str) -> dict[str, Any]:
+    """Mock judge: supported when the cited lines share 2+ content words with the statement.
+
+    The evidence is each cited chunk's whole line range. A real judge names the exact lines; the
+    mock exists for UI tests, and picking only word-sharing lines missed lines that hold a
+    statement's anchors (``DEFAULT_POOL_SIZE = 10``), so the confirmation step vetoed true answers.
+    The anchoring rules themselves are unchanged and tested with explicit judge replies.
+    """
+    chunks, statements = parse_judge_prompt(prompt)
+    verdicts: list[dict[str, Any]] = []
+    for index, statement in enumerate(statements, start=1):
+        terms = set(content_terms(statement.text))
+        shared: set[str] = set()
+        evidence: list[dict[str, Any]] = []
+        for label in statement.labels:
+            lines = chunks.get(label, [])
+            for _number, line in lines:
+                shared |= terms & set(content_terms(line))
+            if lines:
+                first, last = lines[0][0], lines[-1][0]
+                evidence.append({"chunk": label, "start_line": first, "end_line": last})
+        supported = len(shared) >= JUDGE_MIN_SHARED
+        verdicts.append(
+            {"index": index, "supported": supported, "evidence": evidence if supported else []}
+        )
+    return {"verdicts": verdicts}
 
 
 _GREETING_WORDS = frozenset(
@@ -124,6 +213,7 @@ class MockChatAdapter:
         max_tokens: int = 1024,
         json_schema: dict[str, Any] | None = None,
         think: bool = True,
+        seed: int | None = None,
     ) -> ChatResult:
         self.calls.append(list(messages))
         last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
@@ -132,14 +222,17 @@ class MockChatAdapter:
         if isinstance(properties, dict) and "decision" in properties:
             text = json.dumps(gate_decision(last_user))
             return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
+        if isinstance(properties, dict) and "verdicts" in properties:
+            text = json.dumps(judge_verdicts(last_user))
+            return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
         if isinstance(properties, dict) and "sentences" in properties:
             # The prompt with the chunks is the first user message (a retry appends more).
             prompt = next((m["content"] for m in messages if m["role"] == "user"), "")
-            chunks, question = parse_prompt(prompt)
+            parts = parse_prompt(prompt)
             if "questions" in properties:
-                data = grounded_overview(chunks)
+                data = grounded_overview(parts.chunks)
             else:
-                data = grounded_answer(chunks, question or "")
+                data = grounded_answer(parts.chunks, parts.question or "", parts.outline)
             text = json.dumps(data, ensure_ascii=False)
             return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
         if last_user.strip().lower().startswith("reply with ok"):
@@ -154,3 +247,34 @@ class MockChatAdapter:
 
     def list_models(self) -> list[str]:
         return [MOCK_MODEL]
+
+
+# The ``mock`` web-search provider: bare homepages first (the order a search engine might give),
+# then specific pages, so the homepage demotion for specific queries is visible.
+MOCK_SEARCH_RESULTS: tuple[SearchResult, ...] = (
+    SearchResult("Example", "https://www.example.com/sv-se/", "Example home page."),
+    SearchResult("Example Organisation", "https://example.org/", "Welcome to Example."),
+    SearchResult(
+        "AB-731 certificate",
+        "https://docs.example.com/certificates/ab-731",
+        "What the AB-731 certificate covers and how to earn it.",
+    ),
+    SearchResult(
+        "Exam AB-731",
+        "https://learn.example.com/exams/ab-731",
+        "Skills measured in exam AB-731, with study material.",
+    ),
+)
+
+
+class MockSearchAdapter:
+    """Fixed results for any query (only with ``TRUSTBOOK_MOCK_LLM=1``); never touches the network.
+
+    Ranked like the real adapters: for specific queries, bare homepages go last.
+    """
+
+    def ping(self) -> None:
+        return None
+
+    def search(self, query: str, limit: int = 10) -> list[SearchResult]:
+        return demote_homepages(query, list(MOCK_SEARCH_RESULTS))[: max(0, limit)]

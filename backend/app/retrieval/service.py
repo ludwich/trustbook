@@ -1,16 +1,25 @@
-"""Hybrid retrieval (SPEC §8): enabled sources → vector + full text → RRF → rerank → budget."""
+"""Hybrid retrieval (SPEC §8): enabled sources → vector + full text → RRF → rerank → budget.
+
+Agreement guard (D-046): a chunk ranked in the top :data:`AGREEMENT_TOP` of **both** the vector
+and the full-text lists stays in the context even if the reranker dropped it. The reranker was
+trained on prose and sometimes ranks the one code chunk that answers a question below the
+context cut, although both searches put it first. The kept chunk replaces the lowest-ranked kept
+chunk and the token budget still holds. The refusal threshold still uses the rerank scores.
+"""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from sqlalchemy import Engine
 from sqlmodel import Session
 
 from app.capabilities.bundled import Embedder, Reranker
-from app.index.base import SpaceIndex
+from app.chunking.structure import Structure
+from app.index.base import Hit, SpaceIndex
+from app.retrieval.callees import callee_extras
 from app.retrieval.definitions import definition_extras, fit_extras
 from app.retrieval.fusion import (
     CONTEXT_CHUNKS,
@@ -21,9 +30,13 @@ from app.retrieval.fusion import (
     reciprocal_rank_fusion,
     select_within_budget,
 )
-from app.retrieval.store import ChunkRow, load_chunks, usable_sources
+from app.retrieval.parents import Expansion, OutlineBlock, expand
+from app.retrieval.store import ChunkRow, FileRows, load_chunks, usable_sources
 
 logger = logging.getLogger("trustbook.retrieval")
+
+AGREEMENT_TOP = 3
+FUSED_TOP = 3  # the top of the RRF list is guarded too
 
 
 @dataclass(frozen=True)
@@ -37,12 +50,29 @@ class RetrievedChunk:
     locator: dict[str, object]
     token_count: int
     score: float
-    # Set when the chunk was added because it defines this constant (not ranked in).
+    # Set when the chunk was added because it defines this constant (D-032) or this function the
+    # context's code calls (D-060), not because it was ranked into the context.
     definition_of: str | None = None
+    # The id of the context chunk such an added chunk was found for (it refers to or calls it).
+    referrer: str | None = None
+    # The chunk's parent (D-077), from its row; navigation only, never part of ``text``.
+    parent_key: str | None = None
+    structure: Structure | None = None
+    # The chunk's position in its source (-1: unknown), for the parent lookups (D-077).
+    ordinal: int = -1
+    # Set only on a chunk promoted as parent context for ``referrer`` (D-077):
+    # ``section_previous`` or ``class_head``. Never read by a grounding layer.
+    expansion: str | None = None
 
     @classmethod
     def from_row(
-        cls, row: ChunkRow, score: float, *, definition_of: str | None = None
+        cls,
+        row: ChunkRow,
+        score: float,
+        *,
+        definition_of: str | None = None,
+        referrer: str | None = None,
+        expansion: str | None = None,
     ) -> RetrievedChunk:
         return cls(
             chunk_id=row.chunk_id,
@@ -53,6 +83,11 @@ class RetrievedChunk:
             token_count=row.token_count,
             score=score,
             definition_of=definition_of,
+            referrer=referrer,
+            parent_key=row.parent_key,
+            structure=row.structure,
+            ordinal=row.ordinal,
+            expansion=expansion,
         )
 
 
@@ -60,13 +95,22 @@ class RetrievedChunk:
 class Retrieval:
     """Result of one retrieval.
 
-    ``chunks``: the context for the prompt (top 8 within the token budget).
-    ``ranked``: every reranked candidate, best first. ``source_ids``: the sources searched.
+    ``chunks``: the context for the prompt (top 8 within the token budget), then the D-032 and
+    D-060 extras, then the chunks promoted as parent context (D-077).
+    ``ranked``: every reranked candidate, best first (promoted chunks never enter it).
+    ``source_ids``: the sources searched. ``outline``: the non-citable code outline (D-077,
+    D-079); never a chunk, never a premise, judge item or anchor.
     """
 
     chunks: list[RetrievedChunk]
     ranked: list[RetrievedChunk] = field(default_factory=list)
     source_ids: list[str] = field(default_factory=list)
+    outline: tuple[OutlineBlock, ...] = ()
+
+    @property
+    def promoted(self) -> list[RetrievedChunk]:
+        """The context chunks promoted as parent context, in child rank order."""
+        return [c for c in self.chunks if c.expansion is not None]
 
     @property
     def top_score(self) -> float | None:
@@ -80,7 +124,12 @@ def usable_source_ids(engine: Engine) -> list[str]:
 
 
 def rerank(query: str, rows: Sequence[ChunkRow], reranker: Reranker) -> list[RetrievedChunk]:
-    """Score ``rows`` against ``query``; best first, ties keep the input order."""
+    """Score ``rows`` against ``query``; best first, ties keep the input order.
+
+    The input is the fused list, whose order is itself fixed by scores and content keys (D-059),
+    so equal rerank scores (common with a BF16 reranker) are ordered the same on every run,
+    re-index and machine. The fused rank is a better tie-breaker than a hash: it is evidence.
+    """
     if not rows:
         return []
     scores = reranker.score(query, [row.text for row in rows])
@@ -108,23 +157,26 @@ def with_definitions(
     ranked: Sequence[RetrievedChunk] = (),
     *,
     max_tokens: int = CONTEXT_TOKENS,
+    file_rows: FileRows | None = None,
 ) -> list[RetrievedChunk]:
     """``selected`` plus the chunks defining the module-level constants its code refers to.
 
     See :mod:`app.retrieval.definitions`. A chunk that was also reranked keeps its score;
     otherwise its score is 0.0 (it was not ranked; the refusal check only uses ``ranked``).
     """
+    scores = {c.chunk_id: c.score for c in ranked}
     try:
-        extras = definition_extras(engine, selected)
+        extras = definition_extras(engine, selected, scores=scores, file_rows=file_rows)
     except Exception:
         logger.warning("Looking up constant definitions failed; context unchanged", exc_info=True)
         return list(selected)
     if not extras:
         return list(selected)
-    scores = {c.chunk_id: c.score for c in ranked}
     chunks = [
         (
-            RetrievedChunk.from_row(e.row, scores.get(e.row.chunk_id, 0.0), definition_of=e.name),
+            RetrievedChunk.from_row(
+                e.row, scores.get(e.row.chunk_id, 0.0), definition_of=e.name, referrer=e.referrer
+            ),
             e.referrer,
         )
         for e in extras
@@ -132,16 +184,81 @@ def with_definitions(
     return fit_extras(selected, chunks, max_tokens=max_tokens)
 
 
-def candidates(
+def with_callees(
+    selected: Sequence[RetrievedChunk],
+    ranked: Sequence[RetrievedChunk],
+    *,
+    max_tokens: int = CONTEXT_TOKENS,
+    file_rows: FileRows | None = None,
+) -> list[RetrievedChunk]:
+    """``selected`` plus the reranked chunks defining functions its code calls (D-060).
+
+    See :mod:`app.retrieval.callees`. At most two, within ``max_tokens``; the top chunk, the
+    calling chunks, the constants added before and the chunks those constants were added for are
+    never displaced. Each keeps its rerank score.
+    """
+    try:
+        extras = callee_extras(selected, ranked, file_rows=file_rows)
+    except Exception:
+        logger.warning("Looking up called functions failed; context unchanged", exc_info=True)
+        return list(selected)
+    if not extras:
+        return list(selected)
+    for chunk, name, callers in extras:
+        logger.info(
+            "Callee: added %s (chunk %s) for %d context chunk(s)",
+            name,
+            chunk.chunk_id,
+            len(callers),
+        )
+    chunks = [
+        (replace(chunk, definition_of=name, referrer=callers[0]), callers[0])
+        for chunk, name, callers in extras
+    ]
+    # Constants added before, the chunks they were added for (D-032: an extra is never left
+    # without its referrer) and every calling chunk stay: a body is read through its call site.
+    added = [c for c in selected if c.definition_of is not None]
+    keep = [c.chunk_id for c in added] + [c.referrer for c in added if c.referrer is not None]
+    keep += [cid for _, _, callers in extras for cid in callers]
+    return fit_extras(selected, chunks, max_tokens=max_tokens, protect=keep)
+
+
+def _top_ids(hits: Sequence[Hit], n: int) -> list[str]:
+    found: list[str] = []
+    for hit in hits:
+        if hit.chunk_id not in found:
+            found.append(hit.chunk_id)
+        if len(found) == n:
+            break
+    return found
+
+
+def agreed_ids(
+    vector_hits: Sequence[Hit], text_hits: Sequence[Hit], *, top: int = AGREEMENT_TOP
+) -> list[str]:
+    """Chunk ids in the top ``top`` of both lists, in vector order (D-046)."""
+    text_top = set(_top_ids(text_hits, top))
+    return [cid for cid in _top_ids(vector_hits, top) if cid in text_top]
+
+
+@dataclass(frozen=True)
+class Candidates:
+    """The fused candidates (best first, at most 40) and the ids both searches ranked top 3."""
+
+    rows: list[ChunkRow]
+    agreed: list[str] = field(default_factory=list)
+
+
+def search(
     engine: Engine,
     index: SpaceIndex,
     embedder: Embedder,
     query: str,
     source_ids: Sequence[str],
-) -> list[ChunkRow]:
+) -> Candidates:
     """Vector top 40 + full-text top 40, fused with RRF (k = 60), cut to the top 40."""
     if not source_ids:
-        return []
+        return Candidates([])
     vectors = embedder.embed_queries([query])
     if len(vectors) != 1:
         raise RuntimeError("The embedding model returned the wrong number of vectors")
@@ -159,7 +276,117 @@ def candidates(
     missing = len(fused) - len(ordered)
     if missing:
         logger.warning("%d indexed chunk(s) have no row in space.db; skipped", missing)
-    return ordered[:RERANK_TOP]
+    # Kept even if the reranker drops them: chunks both searches rank top 3, and the top of the
+    # fused list (D-046; the prose reranker under-rates code chunks).
+    guarded = agreed_ids(vector_hits, text_hits) + [f.chunk_id for f in fused[:FUSED_TOP]]
+    agreed = [cid for cid in dict.fromkeys(guarded) if cid in rows]
+    return Candidates(ordered[:RERANK_TOP], agreed)
+
+
+def candidates(
+    engine: Engine,
+    index: SpaceIndex,
+    embedder: Embedder,
+    query: str,
+    source_ids: Sequence[str],
+) -> list[ChunkRow]:
+    """The fused candidates of :func:`search` (best first, at most 40)."""
+    return search(engine, index, embedder, query, source_ids).rows
+
+
+def keep_agreed(
+    selected: Sequence[RetrievedChunk],
+    ranked: Sequence[RetrievedChunk],
+    agreed: Sequence[str],
+    *,
+    max_chunks: int = CONTEXT_CHUNKS,
+    max_tokens: int = CONTEXT_TOKENS,
+) -> list[RetrievedChunk]:
+    """``selected`` with every agreed chunk the reranker left out put back (D-046).
+
+    Each one replaces the lowest-ranked kept chunk, more than one if that is what the token
+    budget needs. The top chunk and other agreed chunks are never replaced; an agreed chunk that
+    still does not fit is left out. The result keeps the rerank order.
+    """
+    position = {c.chunk_id: i for i, c in enumerate(ranked)}
+    by_id = {c.chunk_id: c for c in ranked}
+    result = list(selected)
+    protected = set(agreed)
+    for chunk_id in agreed:
+        chunk = by_id.get(chunk_id)
+        if chunk is None or any(c.chunk_id == chunk_id for c in result):
+            continue
+        trial = list(result)
+        size = max(0, chunk.token_count)
+
+        def over(chosen: list[RetrievedChunk], size: int = size) -> bool:
+            used = sum(max(0, c.token_count) for c in chosen)
+            return len(chosen) >= max_chunks or used + size > max_tokens
+
+        while trial and over(trial):
+            victims = [i for i, c in enumerate(trial) if i > 0 and c.chunk_id not in protected]
+            if not victims:
+                break
+            trial.pop(max(victims, key=lambda i: position.get(trial[i].chunk_id, len(position))))
+        if trial and over(trial):
+            logger.info("Agreement guard: chunk %s does not fit the context budget", chunk_id)
+            continue
+        trial.append(chunk)
+        trial.sort(key=lambda c: position.get(c.chunk_id, len(position)))
+        logger.info(
+            "Agreement guard: kept chunk %s (reranked #%d)", chunk_id, position[chunk_id] + 1
+        )
+        result = trial
+    return result
+
+
+def with_parents(
+    engine: Engine,
+    chunks: Sequence[RetrievedChunk],
+    ranked: Sequence[RetrievedChunk],
+    *,
+    file_rows: FileRows,
+    allowed_source_ids: Sequence[str],
+    outline: bool = True,
+    max_tokens: int = CONTEXT_TOKENS,
+) -> tuple[list[RetrievedChunk], tuple[OutlineBlock, ...]]:
+    """``chunks`` plus the chunks promoted as parent context, and the code outline (D-077).
+
+    See :mod:`app.retrieval.parents`. Promoted chunks go after every other chunk, in the order of
+    the children they were promoted for, and only into the free part of ``max_tokens``. Any
+    error gives no expansion: the context stays as it was.
+    """
+    try:
+        found = expand(
+            engine,
+            chunks,
+            ranked,
+            file_rows=file_rows,
+            allowed_source_ids=allowed_source_ids,
+            outline_on=outline,
+            max_tokens=max_tokens,
+        )
+    except Exception:
+        logger.warning("Expanding parent context failed; context unchanged", exc_info=True)
+        found = Expansion()
+    promoted = [
+        RetrievedChunk.from_row(p.row, p.score, referrer=p.referrer, expansion=p.kind)
+        for p in found.promoted
+    ]
+    for chunk in promoted:
+        logger.info(
+            "Parent context: promoted chunk %s (%s) for chunk %s",
+            chunk.chunk_id,
+            chunk.expansion,
+            chunk.referrer,
+        )
+    if found.outline:
+        logger.info(
+            "Parent context: outline of %d file(s), %d tokens",
+            len(found.outline),
+            found.outline_tokens,
+        )
+    return [*chunks, *promoted], found.outline
 
 
 def retrieve(
@@ -170,12 +397,30 @@ def retrieve(
     query: str,
     *,
     source_ids: Sequence[str] | None = None,
+    parent_context: bool = True,
+    outline: bool = True,
 ) -> Retrieval:
-    """Run the full retrieval for ``query`` over the enabled, ready sources of a space."""
+    """Run the full retrieval for ``query`` over the enabled, ready sources of a space.
+
+    ``parent_context`` / ``outline``: the D-077 kill switches (``retrieval`` in settings). Off,
+    no chunk is promoted and no outline is built; ``outline`` off keeps the promotions.
+    """
     allowed = list(source_ids) if source_ids is not None else usable_source_ids(engine)
     if not allowed:
         return Retrieval(chunks=[], ranked=[], source_ids=[])
-    rows = candidates(engine, index, embedder, query, allowed)
-    ranked = rerank(query, rows, reranker)
-    chunks = with_definitions(engine, select_context(ranked), ranked)
-    return Retrieval(chunks=chunks, ranked=ranked, source_ids=allowed)
+    found = search(engine, index, embedder, query, allowed)
+    ranked = rerank(query, found.rows, reranker)
+    chosen = keep_agreed(select_context(ranked), ranked, found.agreed)
+    # One per-file row cache for the lookups and the expansion (D-077).
+    file_rows = FileRows(engine, allowed)
+    chunks = with_callees(
+        with_definitions(engine, chosen, ranked, file_rows=file_rows),
+        ranked,
+        file_rows=file_rows,
+    )
+    blocks: tuple[OutlineBlock, ...] = ()
+    if parent_context:
+        chunks, blocks = with_parents(
+            engine, chunks, ranked, file_rows=file_rows, allowed_source_ids=allowed, outline=outline
+        )
+    return Retrieval(chunks=chunks, ranked=ranked, source_ids=allowed, outline=blocks)

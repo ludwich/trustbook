@@ -77,6 +77,16 @@ class JobRepository:
                 .limit(1)
             ).first()
 
+    def others_unfinished(self, kind: str, job_id: str) -> int:
+        """Unfinished jobs of ``kind`` other than ``job_id``."""
+        with Session(self._engine) as session:
+            rows = session.exec(
+                select(Job.id).where(
+                    Job.kind == kind, col(Job.status).in_(UNFINISHED), Job.id != job_id
+                )
+            ).all()
+            return len(rows)
+
     def status(self, job_id: str) -> str | None:
         with Session(self._engine) as session:
             job = session.get(Job, job_id)

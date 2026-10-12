@@ -70,9 +70,9 @@ def test_read_files_keeps_order_and_uses_lanes(
 
     original = folder._read_one
 
-    def jittery(path: Path, ext: str) -> folder._FileRead:
+    def jittery(path: Path, ext: str, previous_sha: str | None = None) -> folder._FileRead:
         time.sleep(random.random() / 200)
-        return original(path, ext)
+        return original(path, ext, previous_sha)
 
     monkeypatch.setattr(folder, "_read_one", jittery)
     progress: list[float] = []

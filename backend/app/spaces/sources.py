@@ -12,7 +12,7 @@ from sqlalchemy import delete
 from sqlmodel import Session, col, select
 
 from app.db.engine import get_engine
-from app.db.models import Chunk, Source
+from app.db.models import Chunk, Source, SourceFile
 from app.spaces.service import SpaceRecord
 from app.timeutil import utc_now_iso
 
@@ -109,6 +109,7 @@ class SourceRepository:
         """Remove the source, its chunks and its folder."""
         with Session(self._engine) as session:
             session.exec(delete(Chunk).where(col(Chunk.source_id) == source_id))
+            session.exec(delete(SourceFile).where(col(SourceFile.source_id) == source_id))
             session.exec(delete(Source).where(col(Source.id) == source_id))
             session.commit()
         shutil.rmtree(self.folder(source_id), ignore_errors=True)
@@ -122,6 +123,12 @@ class SourceRepository:
             session.add_all(chunks)
             session.commit()
 
+    def chunks(self, source_id: str) -> list[Chunk]:
+        """A source's chunks in reading order."""
+        with Session(self._engine) as session:
+            query = select(Chunk).where(col(Chunk.source_id) == source_id)
+            return list(session.exec(query.order_by(col(Chunk.ordinal))).all())
+
     def chunk_count(self, source_id: str) -> int:
         with Session(self._engine) as session:
             return len(session.exec(select(Chunk.id).where(Chunk.source_id == source_id)).all())
@@ -133,3 +140,18 @@ class SourceRepository:
             if chunk is None or source is None:
                 raise ChunkNotFoundError(chunk_id)
             return chunk, source
+
+    # --- files of linked folders (incremental refresh) -------------------------------------
+
+    def files(self, source_id: str) -> list[SourceFile]:
+        """The files of a folder source as last indexed, by path."""
+        with Session(self._engine) as session:
+            query = select(SourceFile).where(col(SourceFile.source_id) == source_id)
+            return list(session.exec(query.order_by(col(SourceFile.path))).all())
+
+    def replace_files(self, source_id: str, files: list[SourceFile]) -> None:
+        """Swap a source's file records in one transaction (``[]`` forgets them)."""
+        with Session(self._engine) as session:
+            session.exec(delete(SourceFile).where(col(SourceFile.source_id) == source_id))
+            session.add_all(files)
+            session.commit()

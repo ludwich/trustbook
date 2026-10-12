@@ -7,9 +7,14 @@ kind: bundled
 required: false
 contract: grounding_checker
 locality: local
-ui_fields: [enabled]
+ui_fields: [enabled, code_judge]
 health_check: bundled_grounding
 field_overrides:
   enabled:
     label: Check every sentence against its sources
     help: When off, answers are marked Unverified.
+  code_judge:
+    label: Check code claims with the chat model
+    help: >-
+      When the checker can't confirm a sentence about code, the chat model compares it with
+      the cited lines. Only those lines and the sentence are sent.

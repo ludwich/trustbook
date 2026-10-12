@@ -201,7 +201,7 @@ class HealthChecker:
     def _search(self, draft: CapabilityConfigUpdate | None) -> str:
         settings = self._registry.effective("web_search", draft)
         provider = settings.provider or "searxng"
-        if provider != "searxng" and not settings.api_key:
+        if provider in ("brave", "tavily") and not settings.api_key:
             raise ConfigError("Add the API key first.")
         adapter = build_search_adapter(
             provider,
