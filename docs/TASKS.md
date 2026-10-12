@@ -94,7 +94,7 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] CI green, PR `phase-3 → main` (#4), `:phase-3-rc` published from `92a8b12` (e2e gate passes)
 - [x] GATES.md Gate 3 checklist incl. per-category false refusals and p95 latency
 - [x] Gate 3 attempt 8 passes; GATES.md Gate 3 results + approval list; `phase-3-rc` from the final commit; PR #4 left open
-- [ ] `docker image prune -f` at the end of the overnight run
+- [x] `docker image prune -f` and test containers removed at the end of the overnight run (2026-10-12)
 
 ## Phase 3b (branch `phase-3b`, after the Gate 3 runs pass): CLI for agents + transcript windows
 - `trustbook` CLI (in the image: `docker compose exec app trustbook …`; pip-installable from the repo), talks to the HTTP API (default http://127.0.0.1:8484, `--base-url`), reuses the eval runner's client
