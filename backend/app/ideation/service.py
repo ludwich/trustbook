@@ -140,10 +140,12 @@ class IdeationService:
         return self._locks.busy(self._key(session_id))
 
     def get(self, session_id: str) -> SessionOut:
+        """The stored session, with ``running`` set while a turn of it holds the lock."""
         try:
-            return self._store.get(session_id)
+            session = self._store.get(session_id)
         except SessionNotFoundError as exc:
             raise IdeationError(SESSION_NOT_FOUND, 404) from exc
+        return session.model_copy(update={"running": self.busy(session_id)})
 
     def _active(self, session_id: str) -> SessionOut:
         session = self.get(session_id)
@@ -218,6 +220,7 @@ class IdeationService:
             if target is not None or not result.branches:
                 break
             follow_up = False
+        # The lock is released right after; the page treats the turn as over (running: false).
         emit("done", {"session": self._store.get(session_id).model_dump()})
 
     # --- commands --------------------------------------------------------------------------

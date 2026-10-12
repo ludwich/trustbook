@@ -89,9 +89,13 @@ class SessionSummary(BaseModel):
 
 
 class SessionOut(SessionSummary):
+    """``running``: a turn (``…/turn`` or ``…/answer`` stream) of this session is in progress on
+    the server, so a reloaded page waits and refetches instead of asking again (a 409)."""
+
     nodes: list[NodeOut]
     current_node_id: str | None
     risks: list[Risk]
+    running: bool = False
 
 
 class SessionCreate(BaseModel):

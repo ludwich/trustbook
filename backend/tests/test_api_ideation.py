@@ -401,6 +401,34 @@ def test_finish_during_a_turn_discards_its_result(
     assert all(n["question"] is None for n in session["nodes"])
 
 
+def test_get_reports_a_running_turn(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A page reloaded during a turn sees ``running`` and waits instead of asking again."""
+    sid = env.create()["id"]
+    assert env.get(sid)["running"] is False
+    seen: list[bool] = []
+
+    class LooksMidTurn(MockChatAdapter):
+        def chat(self, messages: Any, **kwargs: Any) -> ChatResult:
+            schema = kwargs.get("json_schema") or {}
+            if "question" in schema.get("properties", {}):
+                seen.append(env.get(sid)["running"])  # a reload while the model works
+            return super().chat(messages, **kwargs)
+
+    monkeypatch.setattr(env.services, "chat_adapter", LooksMidTurn)
+    session = env.turn(sid)
+    assert seen == [True]
+    assert session["running"] is False  # the done event ends the turn
+    assert env.get(sid)["running"] is False
+
+    TURN_LOCKS.acquire((env.space_id, sid))
+    try:
+        assert env.get(sid)["running"] is True
+        listed = env.client.get(env.url("/sessions")).json()
+        assert "running" not in listed[0]  # only the full session carries it
+    finally:
+        TURN_LOCKS.release((env.space_id, sid))
+
+
 def test_delete_removes_rows_and_brief(env: Env) -> None:
     sid = env.create()["id"]
     env.turn(sid)

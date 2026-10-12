@@ -844,7 +844,11 @@ the recommendation's plain text (what "accept" stores as the answer); `citations
 - `GET /sessions` → `SessionSummary[]`, most recently updated first.
 - `POST /sessions` body `{"idea": str}` (1–4,000 characters, not blank; trimmed) → `201 Session` with
   `nodes: []`. No model call; the client then calls `/turn`. Blank or too long → `422`.
-- `GET /sessions/{id}` → `Session` (`404 {"detail": "Idea session not found."}`).
+- `GET /sessions/{id}` → `Session` (`404 {"detail": "Idea session not found."}`). `running: true` while a
+  `/turn` or `/answer` stream of the session holds its turn lock (also when the page that started it was
+  reloaded or closed). The UI then shows "Preparing the next question…" and refetches every second until it is
+  `false`, instead of offering "Ask the next question" (which would get the 409 below). Every `Session` response
+  carries it; the `done` event's session always has `running: false` (D-102).
 - `DELETE /sessions/{id}` → `204`; removes the rows and `ideas/<id>/` (also while a turn runs; that turn's
   result is dropped and its stream ends with `error` "This idea session was deleted.").
 - `POST /sessions/{id}/turn` (no body) → `text/event-stream`. Seeds the map when it is empty (3–4 tentative
@@ -897,7 +901,8 @@ SessionSummary = {"id": str, "title": str, "idea": str, "status": "active"|"fini
 Session = SessionSummary + {
   "nodes": Node[],                    // tree pre-order (parents before children, siblings by ordinal)
   "current_node_id": str|null,        // the branch whose question waits for an answer
-  "risks": [{"text": str, "node_id": str|null}]}   // node_id: the branch whose answer raised it
+  "risks": [{"text": str, "node_id": str|null}],   // node_id: the branch whose answer raised it
+  "running": bool}                    // a turn of this session is in progress on the server
 Node = {"id": str, "parent_id": str|null, "ordinal": int, "depth": int,   // depth 0 = seed level; max 2
         "title": str, "status": "tentative"|"open"|"resolved"|"dismissed",
         "origin": "seed"|"answer",
