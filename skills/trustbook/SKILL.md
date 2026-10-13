@@ -12,6 +12,13 @@ reference: `docs/cli.md` in the Trustbook repository.
 ## Running it
 
 - Installed on this computer: `trustbook …`
+- If `trustbook` is blocked ("Access denied") or not found but the package is installed:
+  `python -m trustbook_cli …` (same arguments, same exit codes). To keep typing `trustbook` in
+  Git Bash, create `~/bin/trustbook` (`~/bin` must be on `PATH`) and run `chmod +x ~/bin/trustbook`:
+  ```sh
+  #!/bin/sh
+  exec python -m trustbook_cli "$@"
+  ```
 - Otherwise through Docker, from the folder with Trustbook's `compose.yaml`:
   `docker compose exec -T app trustbook …`
 - Always pass `--json` and read the single JSON document on stdout. Check the exit code.

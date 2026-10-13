@@ -24,6 +24,44 @@ checkout `pip install "./cli[eval]"`, from GitHub
 The image and the backend's environment have it. Without it `trustbook eval` stops with an error
 (exit 1) that says how to install it.
 
+### If `trustbook.exe` is blocked
+
+Application control on a locked-down Windows laptop can block the `trustbook.exe` that pip creates
+("Access denied"). Run the installed package through Python instead; it takes the same arguments
+and gives the same exit codes:
+
+```
+python -m trustbook_cli ask "How does HTTPBasicAuth add the Authorization header?" --space Smoke --json
+```
+
+Use the Python that `trustbook-cli` was installed into (`py -m trustbook_cli …` works too).
+
+**Git Bash (Claude Code on Windows).** Make `trustbook` a two-line script in `~/bin`:
+
+```bash
+mkdir -p ~/bin
+printf '#!/bin/sh\nexec python -m trustbook_cli "$@"\n' > ~/bin/trustbook
+chmod +x ~/bin/trustbook
+command -v trustbook   # should print /c/Users/<you>/bin/trustbook
+```
+
+`~/bin/trustbook` then contains:
+
+```sh
+#!/bin/sh
+exec python -m trustbook_cli "$@"
+```
+
+`~/bin` must be on Git Bash's `PATH`. If `command -v trustbook` prints nothing, add
+`export PATH="$HOME/bin:$PATH"` to `~/.bashrc` and open a new Git Bash (and restart Claude Code).
+
+**PowerShell.** A function does the same; put it in your `$PROFILE` to keep it:
+
+```powershell
+function trustbook { python -m trustbook_cli @args }
+trustbook --version   # $LASTEXITCODE is the CLI's exit code, as with trustbook.exe
+```
+
 ## Options and environment
 
 | Option | Environment | Default | Meaning |
