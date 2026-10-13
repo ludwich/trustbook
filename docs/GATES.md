@@ -592,7 +592,7 @@ Other checks:
 
 ## Gate 4 — Ideation
 
-**Image:** `ghcr.io/ludwich/trustbook:phase-4-rc` · **PR:** `phase-4 → phase-3b` (stacked: merged only after Gates 3 and 3b pass, then this one)
+**Image:** `ghcr.io/ludwich/trustbook:phase-4-rc` · **PR:** `phase-4 → main` (#6)
 
 **Criteria (SPEC §14):** a full session on a sample idea produces a brief with cited anchors and open questions;
 "Finish now" mid-session works; briefs never appear in chat citations.
