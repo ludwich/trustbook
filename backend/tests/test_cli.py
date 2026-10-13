@@ -460,6 +460,22 @@ def test_api_key_from_settings_never_printed(cli: Cli, router: Router) -> None:
         assert STT_KEY not in run.out + run.err and STT_KEY[-8:] not in run.out + run.err
 
 
+def test_rejected_key_reports_http_status_401(cli: Cli, router: Router) -> None:
+    # A wrong key: the chat endpoint answers 401 while the app streams the answer.
+    llm = "http://llm.example:8080/v1"
+    router.add("POST", llm, lambda _r: httpx.Response(401, json={"error": "invalid key"}))
+    _guide(cli)
+    body = {"preset": "custom", "base_url": llm, "model": "m", "api_key": API_KEY}
+    assert cli.client.put("/api/capabilities/chat", json=body).status_code == 200
+    run = cli.json("ask", "How are proxies configured?", "--space", "Acme")
+    assert run.code == 1
+    assert run.doc["schema"] == "trustbook.error/1"
+    assert run.doc["http_status"] == 401
+    assert "The API key was rejected (401)." in run.doc["message"]
+    assert router.requests[-1].headers["authorization"] == f"Bearer {API_KEY}"
+    assert API_KEY not in run.out + run.err
+
+
 def test_redactor_masks_a_saved_key_in_any_output(
     cli: Cli, monkeypatch: pytest.MonkeyPatch
 ) -> None:

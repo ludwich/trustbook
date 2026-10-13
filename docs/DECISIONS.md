@@ -1957,3 +1957,14 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   path, already covered by the tests that keep keys out of responses, logs, the request log and CLI output).
 - **Alternatives:** a key field only on "Other OpenAI-compatible" (users of the llama.cpp or vLLM presets with
   `--api-key` would have had to switch preset).
+
+### D-112 `trustbook.error/1` reports a status whenever a response was received
+- **Context:** a rejected key gave `"http_status": null`. The API answers `ask` with a 200 event stream; the
+  chat endpoint's 401 arrived as an `error` event with only a message, and the CLI raised its error without a
+  status. Errors about a 2xx body (not JSON, wrong shape) had no status either.
+- **Decision:** the stream's `error` event carries `http_status` when the model endpoint answered with an error
+  (e.g. 401, 404, 429, 500), and the CLI reports it. Every other error raised after a response arrived reports
+  that response's status (for `ask`, the stream's 200). `null` means no response was received (Trustbook not
+  reachable, bad arguments).
+- **Reason:** simplicity for agents: one field says whether and how the far side answered; the 401 is what a
+  user needs to see to fix the key. The event's message is unchanged and still carries no secret.

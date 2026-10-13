@@ -82,7 +82,12 @@ def stream_events(run: Callable[[EventSink], None], space: SpaceRecord) -> Itera
             with space_context(space.id, space.name):
                 run(emit)
         except AdapterError as exc:
-            emit("error", {"message": exc.message})
+            # The endpoint's status (e.g. 401 for a rejected key) when it answered, so the CLI's
+            # error document can report it (trustbook.error/1 ``http_status``).
+            error: dict[str, Any] = {"message": exc.message}
+            if exc.status is not None:
+                error["http_status"] = exc.status
+            emit("error", error)
         except ConfigError as exc:
             emit("error", {"message": str(exc)})
         except ProviderUnavailableError:

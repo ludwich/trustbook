@@ -199,7 +199,7 @@ Shown indented; the CLI writes it on one line.
 | `trustbook.jobs/1` | `jobs[]`: `{id, kind, title, space_id, space_name, status, progress, position, error, created_at, started_at, finished_at, eta_seconds}`, `summary {queued, running, paused, eta_seconds, workers}` |
 | `trustbook.gate_log/1` | `space {id, name}`, `entries[]`: `{id, created, input, decision, confidence, user_correction}` |
 | `trustbook.deleted/1` | `kind` (`space` or `source`), `id`, `name` |
-| `trustbook.error/1` | `message`, `http_status` (the API's status code, `null` when there was no response); `created` only when a `sources add` with several items failed part-way: the sources already added before the error (as in `trustbook.sources/1`), so don't add them again |
+| `trustbook.error/1` | `message`, `http_status` (the status code of the response that failed: the API's, or for `ask` the chat endpoint's when it answered with an error, e.g. `401` for a rejected key; `null` only when no response was received); `created` only when a `sources add` with several items failed part-way: the sources already added before the error (as in `trustbook.sources/1`), so don't add them again |
 
 Source `status`: `queued`, `reading`, `indexing`, `ready`, `failed`; `progress` is 0–1 or `null`.
 

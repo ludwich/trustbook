@@ -169,6 +169,38 @@ def test_broken_streams_are_errors(stream: str, message: str) -> None:
     assert message in err
 
 
+@pytest.mark.parametrize(
+    ("stream", "status"),
+    [
+        # The model endpoint rejected the key: the app's error event carries its status.
+        (sse(("error", {"message": "The API key was rejected (401).", "http_status": 401})), 401),
+        # No endpoint status (e.g. it could not be reached): the API's own response status.
+        (sse(("error", {"message": "Cannot reach llm.local."})), 200),
+        (sse(("status", {"stage": "retrieving"})), 200),
+        ("event: done\ndata: {broken\n\n", 200),
+    ],
+)
+def test_stream_errors_report_the_http_status(stream: str, status: int) -> None:
+    code, out, _err = run(FakeApi(stream), "ask", "q", "--space", "Acme", "--json")
+    doc = json.loads(out)
+    assert code == 1 and doc["schema"] == "trustbook.error/1"
+    assert doc["http_status"] == status
+
+
+def test_unusable_bodies_report_the_http_status() -> None:
+    def not_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>proxy</html>")
+
+    code, out, _err = run(not_json, "spaces", "list", "--json")
+    assert code == 1 and json.loads(out)["http_status"] == 200
+
+    def wrong_shape(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"spaces": []})
+
+    code, out, _err = run(wrong_shape, "spaces", "list", "--json")
+    assert code == 1 and json.loads(out)["http_status"] == 200
+
+
 def test_unreachable_api() -> None:
     def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)

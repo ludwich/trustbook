@@ -161,6 +161,8 @@ def _consume(
                 raise ApiError(
                     f"ask failed: HTTP {resp.status_code}: {error_detail(resp)}", resp.status_code
                 )
+            # Every error below came with a response: report its status (trustbook.error/1).
+            status = resp.status_code
             for ev in iter_sse(sse_lines(resp.iter_bytes())):
                 if ev.event in ("status", "message"):
                     continue
@@ -169,21 +171,26 @@ def _consume(
                 except ValueError:
                     data = None
                 if not isinstance(data, dict):
-                    raise ApiError(f"ask: bad {ev.event} event from the API")
+                    raise ApiError(f"ask: bad {ev.event} event from the API", status)
                 if ev.event == "sentence":
                     streamed.append(data)
                 elif ev.event == "refused":
                     refusal = data
                 elif ev.event == "error":
-                    raise ApiError(f"ask failed: {data.get('message') or 'error event'}")
+                    # The model endpoint's status when it answered (401: the key was rejected).
+                    endpoint = data.get("http_status")
+                    raise ApiError(
+                        f"ask failed: {data.get('message') or 'error event'}",
+                        endpoint if isinstance(endpoint, int) else status,
+                    )
                 elif ev.event == "done":
                     message = data.get("message")
                     if not isinstance(message, dict):
-                        raise ApiError("ask: the answer's message is missing")
+                        raise ApiError("ask: the answer's message is missing", status)
                     return _Stream(streamed, refusal, message, round(clock() - start, 2))
+            raise ApiError("ask: the answer stream ended without a result", status)
     except httpx.TransportError as exc:
         raise ApiUnreachableError(f"ask: {type(exc).__name__}: {exc}") from exc
-    raise ApiError("ask: the answer stream ended without a result")
 
 
 def _sentences(message: dict[str, Any], streamed: list[dict[str, Any]]) -> list[dict[str, Any]]:
