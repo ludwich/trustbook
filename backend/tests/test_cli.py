@@ -38,6 +38,7 @@ ARTICLE = (
     + "</article></body></html>"
 )
 API_KEY = "tb-test-key-7f3a9c2e5b1d"  # not shaped like a known key: only the CLI keeps it out
+STT_KEY = "tb-stt-key-4c8e1a7b9d2f"  # an optional endpoint key (G3b-2)
 
 
 @dataclass
@@ -432,6 +433,10 @@ def test_api_key_from_settings_never_printed(cli: Cli, router: Router) -> None:
     body = {"provider": "brave", "api_key": API_KEY}
     assert cli.client.put("/api/capabilities/web_search", json=body).status_code == 200
     assert API_KEY in cli.paths.settings_file.read_text()  # the key is really saved
+    # G3b-2: the optional key of an OpenAI-compatible speech-to-text endpoint, saved the same way.
+    stt = {"mode": "endpoint", "base_url": "http://stt.example", "model": "w", "api_key": STT_KEY}
+    assert cli.client.put("/api/capabilities/stt", json=stt).status_code == 200
+    assert STT_KEY in cli.paths.settings_file.read_text()
 
     _guide(cli)
     commands: list[tuple[str, ...]] = [
@@ -452,6 +457,7 @@ def test_api_key_from_settings_never_printed(cli: Cli, router: Router) -> None:
     for run in cli.runs:
         assert API_KEY not in run.out and API_KEY not in run.err
         assert API_KEY[-8:] not in run.out + run.err
+        assert STT_KEY not in run.out + run.err and STT_KEY[-8:] not in run.out + run.err
 
 
 def test_redactor_masks_a_saved_key_in_any_output(

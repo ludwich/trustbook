@@ -1938,3 +1938,22 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     said "by default, Requests does not retry failed connections… retries with backoff using urllib3.util.Retry",
     citing `advanced.rst` 1032–1056, followed by the model's own 502/503/504 suggestion, uncited. Turns took
     7–27 s, and the brief's "Cited anchors" lists both.
+
+## 2026-10-13 — Phase 5 (setup and CLI fixes)
+
+### D-111 Every endpoint can take an optional API key (G3b-2)
+- **Context:** only the OpenAI, Azure and Anthropic presets showed a key field. OpenRouter, LiteLLM and
+  `llama-server --api-key` need a key on an "Other OpenAI-compatible" chat endpoint or the speech-to-text
+  endpoint. The backend already stored and sent a key for any preset; the UI hid the field.
+- **Decision:**
+  - The UI shows the key field for every real endpoint preset (not the test-only mock) and for the speech-to-text
+    endpoint. It is labelled "API key (optional)" unless the preset needs a key; empty means no key, and an
+    optional key is never "Required".
+  - Same storage and rules as the preset keys: only `~/Trustbook/config/settings.json` (mode 600); responses carry
+    `api_key_set` and a four-character hint; a missing key in an update keeps the saved one, `""` clears it, and
+    a saved key is dropped when the address moves to another host. Adapters send `Authorization: Bearer <key>`
+    only when a key is set; the Test button uses the draft's key.
+- **Reason:** simplicity (one rule for every endpoint, no new setting) and data safety (one storage and redaction
+  path, already covered by the tests that keep keys out of responses, logs, the request log and CLI output).
+- **Alternatives:** a key field only on "Other OpenAI-compatible" (users of the llama.cpp or vLLM presets with
+  `--api-key` would have had to switch preset).

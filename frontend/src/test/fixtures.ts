@@ -201,7 +201,7 @@ export function sttCapability(over: Partial<Capability> = {}): Capability {
           { value: "endpoint", label: "Endpoint" },
         ],
       },
-      { name: "preset", label: "Provider", type: "select", required: false },
+      // Like the backend manifest: no provider field, the endpoint is OpenAI-compatible.
       { name: "base_url", label: "Base URL", type: "url", required: false },
       { name: "api_key", label: "API key", type: "password", required: false },
       { name: "model", label: "Model", type: "text", required: false },
