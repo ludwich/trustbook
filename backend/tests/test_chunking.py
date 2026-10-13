@@ -105,11 +105,18 @@ def test_snapshot_locators_pages_and_sections() -> None:
         _sentence(i) for i in range(100)
     )
     drafts = chunk_snapshot(text_snapshot(md), WordCounter())
-    # Named by the section holding most of it (D-053), listing every section it spans.
-    assert drafts[0].locator["heading"] == "Usage"
-    assert drafts[0].locator["headings"] == ["Install", "Usage"]
-    assert drafts[0].locator["offset"] == 0
-    assert any(d.locator["heading"] == "Usage" for d in drafts)
+    # Every heading starts a chunk (D-104): the text before the first heading has no section and
+    # no first line; a chunk under a heading starts with its "Section:" line (D-105).
+    assert drafts[0].text == "Intro line."
+    assert drafts[0].locator == {"heading": None, "offset": 0}
+    assert drafts[1].text == "Section: Install\n# Install\n\nRun pip install."
+    assert drafts[1].locator == {"heading": "Install", "offset": md.index("# Install")}
+    assert len(drafts) > 3
+    for draft in drafts[2:]:
+        assert draft.text.startswith("Section: Usage\n")
+        assert draft.locator["heading"] == "Usage"
+        assert draft.text.endswith(md[draft.start : draft.end])
+    assert all("headings" not in d.locator for d in drafts)
 
 
 def test_transcript_chunks_group_turns_and_never_split_them() -> None:

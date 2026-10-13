@@ -49,7 +49,11 @@ def test_request_log_routes(client: TestClient, router: Router) -> None:
 
 def test_calibration_routes(make_client: AppFactory, paths: Paths) -> None:
     client = make_client()
-    assert client.get("/api/calibration").json() == {"status": "pending", "results": None}
+    assert client.get("/api/calibration").json() == {
+        "status": "pending",
+        "results": None,
+        "outdated": False,
+    }
     response = client.post("/api/calibration/run")
     assert response.status_code == 202
     job = response.json()

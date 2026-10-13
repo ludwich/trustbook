@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from app.chat.schemas import CitationOut
-from app.ideation.brief import brief_path, render_brief, write_brief
+from app.ideation.brief import anchor_place, brief_path, render_brief, write_brief
 from app.ideation.marker import BRIEF_MARKER, is_idea_brief
 from app.ideation.schemas import (
     NodeOut,
@@ -217,3 +217,41 @@ def test_write_brief_path_and_marker(tmp_path: Path) -> None:
     assert is_idea_brief(path.read_text("utf-8"))
     with pytest.raises(ValueError):
         brief_path(tmp_path, "../escape")
+
+
+def test_anchors_name_the_section_of_document_chunks() -> None:
+    """G4-1: an anchor in a document file names the section of the cited chunk (chunks are
+    split at headings, D-104, so it is the section of all of its text)."""
+    retry = {
+        "file": "docs/user/advanced.rst",
+        "start_line": 1032,
+        "end_line": 1056,
+        "symbol": None,
+        "kind": None,
+        "heading": "Example: Automatic Retries",
+    }
+    assert anchor_place(retry) == (
+        "docs/user/advanced.rst, lines 1032–1056, section “Example: Automatic Retries”"
+    )
+    assert anchor_place({**retry, "heading": None}) == "docs/user/advanced.rst, lines 1032–1056"
+    code = {"file": "src/a.py", "start_line": 3, "end_line": 9, "symbol": "send", "kind": "method"}
+    assert anchor_place(code) == "src/a.py, lines 3–9"
+    assert anchor_place({"pages": [4], "heading": "Ferries"}) == "p. 4, section “Ferries”"
+    assert anchor_place({"heading": "Ferries", "offset": 0}) == "section “Ferries”"
+    sentence = RecommendationSentence(
+        text="Retries are off by default.",
+        citations=[
+            CitationOut(n=1, chunk_id="c", source_id="s", source_title="requests", locator=retry)
+        ],
+        kind="cited",
+    )
+    recommendation = Recommendation(grounding="cited", badge="verified", sentences=[sentence])
+    nodes = [
+        n.model_copy(update={"recommendation": recommendation}) if n.id == "a" else n
+        for n in session().nodes
+    ]
+    text = render_brief(session().model_copy(update={"nodes": nodes}), "x")
+    assert (
+        "- Retries are off by default. (*requests*, docs/user/advanced.rst, lines 1032–1056, "
+        "section “Example: Automatic Retries”)"
+    ) in text

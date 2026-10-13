@@ -58,6 +58,22 @@ def test_describe_locator_variants() -> None:
     assert describe_locator({"file": "a.py", "start_line": 4, "end_line": 4}) == "a.py, line 4"
     assert describe_locator({"file": "a.py"}) == "a.py"
     assert describe_locator({}) == ""
+    # A web chunk's heading path, or none when its "Section:" line names it already (D-105).
+    section = {"heading": "Install", "offset": 3}
+    assert describe_locator(section, section="Guide › Install") == "section “Guide › Install”"
+    assert describe_locator(section, section="") == ""
+    assert describe_locator({"pages": [2], "heading": "Results"}, section="") == "p. 2"
+
+
+def test_a_web_chunk_names_its_section_once() -> None:
+    """D-105: the chunk's "Section:" line carries the heading path; the Source line no longer
+    repeats the innermost heading. A chunk indexed before keeps its Source line section."""
+    new = chunk("w1", "Section: Guide › Install\nRun pip.", "Docs", heading="Install", offset=0)
+    assert chunk_block("c1", new) == "[c1] Source: Docs\nSection: Guide › Install\nRun pip."
+    old = chunk("w0", "Run pip.", "Docs", heading="Install", offset=0)
+    assert chunk_block("c1", old) == "[c1] Source: Docs (section “Install”)\nRun pip."
+    pdf = chunk("p1", "Section: Results\nRevenue rose.", "Report", pages=[3], heading="Results")
+    assert chunk_block("c2", pdf) == "[c2] Source: Report (p. 3)\nSection: Results\nRevenue rose."
 
 
 def test_parse_prompt_round_trips_chunks_and_question() -> None:

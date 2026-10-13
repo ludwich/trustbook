@@ -552,8 +552,11 @@ def test_heading_forms_give_the_same_parent(path: str, heading: str) -> None:
     lines = body.split("\n")
     snap = docs_snapshot(path, body, start_line=1, end_line=len(lines))
     drafts = chunk_snapshot(snap, CharEstimate())
-    (draft,) = drafts  # one small chunk: its first line is the preamble
-    assert (draft.parent_key, draft.structure) == (None, None)
+    # Every heading starts a chunk (D-104): the preamble has no parent, the section has its own.
+    preamble, section = drafts
+    assert (preamble.parent_key, preamble.structure) == (None, None)
+    assert section.parent_key == line_section_key(path, 3)
+    assert section.structure == Structure("section", "Usage", None, True)
     later = chunk_snapshot(
         docs_snapshot(path, f"{heading}\nThe usage text.\n", start_line=1, end_line=4),
         CharEstimate(),
@@ -566,9 +569,9 @@ def test_web_pdf_paged_and_transcript_parents() -> None:
     builder = SnapshotBuilder()
     builder.add("Opening words without a heading. " * 5)
     builder.separate()
-    first = builder.add("Install it with pip. " * 300, heading="Install")
+    first = builder.add("# Install\n\n" + "Install it with pip. " * 300, heading="Install")
     builder.separate()
-    builder.add("Use it like this. " * 20, heading="Usage")
+    builder.add("# Usage\n\n" + "Use it like this. " * 20, heading="Usage")
     web = Snapshot(builder.build(), "sections", builder.segments)
     drafts = chunk_snapshot(web, CharEstimate())
     keys = [(d.parent_key, d.structure.head if d.structure else None) for d in drafts]
@@ -577,13 +580,18 @@ def test_web_pdf_paged_and_transcript_parents() -> None:
     for draft in drafts:
         if draft.structure is not None:
             assert draft.structure.title == draft.locator["heading"]
+            assert draft.text.startswith(f"Section: {draft.locator['heading']}\n")  # D-105
         else:
             assert not draft.locator["heading"]
 
     text = "Preface.\n\n# Results\n\nThe results are good.\n"
     pdf = Snapshot(text, "pages", [Segment(0, len(text), page=1)])
-    (page,) = chunk_snapshot(pdf, CharEstimate())
-    assert (page.parent_key, page.structure) == (None, None)  # starts in the preface
+    preface, results = chunk_snapshot(pdf, CharEstimate())  # every heading starts a chunk
+    assert (preface.parent_key, preface.structure) == (None, None)
+    assert preface.locator == {"pages": [1]}
+    assert results.parent_key == offset_section_key("", 10)
+    assert results.locator == {"pages": [1], "heading": "Results"}
+    assert results.text == "Section: Results\n# Results\n\nThe results are good."
     pdf = Snapshot(text[10:], "pages", [Segment(0, len(text) - 10, page=1)])
     (page,) = chunk_snapshot(pdf, CharEstimate())
     assert page.parent_key == offset_section_key("", 0)

@@ -18,6 +18,7 @@ from typing import Any
 
 from app.capabilities.adapters.base import ChatMessage
 from app.chunking.clock import clock
+from app.chunking.header import section_path
 from app.chunking.headings import heading_syntax
 from app.grounding.code_checks import unescape_markdown
 from app.retrieval.parents import OutlineBlock, TranscriptWindow, outline_text, window_text
@@ -201,8 +202,13 @@ def labelled(chunks: Sequence[RetrievedChunk]) -> dict[str, RetrievedChunk]:
     return {label(i): chunk for i, chunk in enumerate(chunks)}
 
 
-def describe_locator(locator: Mapping[str, object]) -> str:
-    """Where a chunk is in its source, in a few words (``p. 3–4``, ``lines 12–58`` …)."""
+def describe_locator(locator: Mapping[str, object], *, section: str | None = None) -> str:
+    """Where a chunk is in its source, in a few words (``p. 3–4``, ``lines 12–58`` …).
+
+    ``section``: for a web page's, pasted or uploaded text's chunk, the heading path to name
+    instead of the locator's innermost heading (``""``: name none, the chunk's ``Section:`` line
+    already does, D-105).
+    """
     file = locator.get("file")
     if isinstance(file, str) and file:
         start, end = locator.get("start_line"), locator.get("end_line")
@@ -220,6 +226,8 @@ def describe_locator(locator: Mapping[str, object]) -> str:
         speaker = locator.get("speaker")
         return f"{span}, {speaker}" if isinstance(speaker, str) and speaker else span
     heading = locator.get("heading")
+    if section is not None:
+        heading = section
     if isinstance(heading, str) and heading:
         return f"section “{heading}”"
     return ""
@@ -242,8 +250,9 @@ def reader_text(chunk: RetrievedChunk) -> str:
 
 
 def chunk_block(chunk_label: str, chunk: RetrievedChunk) -> str:
-    """One numbered chunk as the model sees it."""
-    where = describe_locator(chunk.locator)
+    """One numbered chunk as the model sees it. A chunk whose text starts with its ``Section:``
+    line (D-105) is not given the section a second time in its ``Source:`` line."""
+    where = describe_locator(chunk.locator, section="" if section_path(chunk.text) else None)
     title = " ".join(chunk.source_title.split()) or "Untitled"
     header = f"[{chunk_label}] Source: {title}" + (f" ({where})" if where else "")
     return f"{header}\n{reader_text(chunk).strip()}"

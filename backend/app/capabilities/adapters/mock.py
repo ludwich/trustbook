@@ -82,13 +82,14 @@ def _overlap(terms: set[str], text: str) -> int:
 
 
 def _body(text: str) -> str:
-    """A chunk's text without a code chunk's ``File: … (lines a-b)`` header line.
+    """A chunk's text without a code chunk's ``File: … (lines a-b)`` header line or a web
+    chunk's ``Section: …`` line (D-105).
 
     A model quotes the code, not the header; quoting it put line numbers into the answer, which
     the judge's anchor check (correctly) finds in no code line.
     """
     first, sep, rest = text.partition("\n")
-    return rest if sep and first.startswith("File: ") else text
+    return rest if sep and first.startswith(("File: ", "Section: ")) else text
 
 
 def _best_sentence(chunk: PromptChunk, terms: set[str]) -> str:

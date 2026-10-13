@@ -3,9 +3,9 @@
 After a successful run each file of a folder source is recorded in ``source_files``: its SHA-256,
 where its text sits in ``snapshot.md`` and the ids of its chunks. On the next refresh:
 
-- files with the same hash (and the same chunker version) keep their chunks: same ids, text,
-  locator and vectors, only their offsets move to where the file now sits in the rebuilt
-  ``snapshot.md`` (so old citations still resolve and the source viewer still highlights them);
+- files with the same hash (and the same chunker version for their kind, D-106) keep their
+  chunks: same ids, text, locator and vectors, only their offsets move to where the file now sits
+  in the rebuilt ``snapshot.md`` (so old citations still resolve and the viewer highlights them);
 - new and changed files are read, chunked and embedded;
 - chunks of changed and removed files are deleted from ``space.db`` and the index.
 
@@ -23,7 +23,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from app.chunking.dispatch import CHUNKER_VERSION, chunk_file, chunk_snapshot, snapshot_files
+from app.chunking.dispatch import (
+    CHUNKER_VERSIONS,
+    chunk_file,
+    chunk_snapshot,
+    snapshot_files,
+)
 from app.chunking.document import ChunkDraft
 from app.chunking.imports import SourceFiles, resolve_imports
 from app.chunking.structure import parse_structure, structure_json
@@ -53,6 +58,12 @@ class ChunkPlan:
     stale_ids: list[str]  # old chunks to delete from the index
     files: list[SourceFile] = field(default_factory=list)  # to record after success
     incremental: bool = False
+
+
+def file_chunker(kind: str) -> str:
+    """The chunker version that chunks a folder file of ``kind`` (``code`` or ``document``) now:
+    a file record made by another version is chunked again (D-106)."""
+    return CHUNKER_VERSIONS["code" if kind == "code" else "document"]
 
 
 def _segments(data: dict[str, Any]) -> list[Segment]:
@@ -97,8 +108,8 @@ def load_previous(repo: SourceRepository, source_id: str, folder: Path) -> Previ
         kind = record.kind
         ids = _chunk_ids(record.chunk_ids)
         if (
-            record.chunker != CHUNKER_VERSION
-            or kind not in ("code", "document")
+            kind not in ("code", "document")
+            or record.chunker != file_chunker(kind)
             or not 0 <= start <= end <= len(markdown)
             or ids is None
         ):
@@ -124,10 +135,18 @@ def _matches(chunk: Chunk, markdown: str, start: int, end: int) -> bool:
     return chunk.text.endswith(markdown[chunk.start_offset : chunk.end_offset])
 
 
-def _new_rows(source_id: str, drafts: Iterable[ChunkDraft]) -> list[Chunk]:
+IdenticalKey = tuple[int, int, str]
+
+
+def _new_rows(
+    source_id: str, drafts: Iterable[ChunkDraft], same: dict[IdenticalKey, str] | None = None
+) -> list[Chunk]:
+    """Rows for ``drafts``; a draft whose offsets and text are a key of ``same`` keeps that id
+    (its vector is still right; each id is given once)."""
+    same = same if same is not None else {}
     return [
         Chunk(
-            id=new_id(),
+            id=same.pop((d.start, d.end, d.text), "") or new_id(),
             source_id=source_id,
             ordinal=0,
             text=d.text,
@@ -178,11 +197,21 @@ def plan_chunks(
     *,
     old_ids: Iterable[str],
     previous: Previous | None,
+    identical: Iterable[Chunk] = (),
 ) -> ChunkPlan:
-    """Chunk rows for ``snapshot``: kept chunks of unchanged files, new ones for the rest."""
+    """Chunk rows for ``snapshot``: kept chunks of unchanged files, new ones for the rest.
+
+    ``identical`` (a re-index, D-106): the source's current chunks. A new chunk with the same
+    offsets and text as one of them keeps its id and is not embedded again; its locator, parent
+    and structure are the new ones.
+    """
     rows: list[Chunk] = []
     new_rows: list[Chunk] = []
     files: list[SourceFile] = []
+    same: dict[IdenticalKey, str] = {}
+    for chunk in identical:
+        same.setdefault((chunk.start_offset, chunk.end_offset, chunk.text), chunk.id)
+    reusable = set(same.values())
     if isinstance(snapshot, FolderSnapshot):
         kept_by_path = previous.chunks if previous is not None else {}
         paths = snapshot_files(snapshot)
@@ -193,8 +222,9 @@ def plan_chunks(
                 delta = entry.start - old_start
                 file_rows = [_moved(c, delta, entry.path, paths) for c in kept]
             else:
-                file_rows = _new_rows(source_id, chunk_file(snapshot, entry, counter, paths))
-                new_rows.extend(file_rows)
+                drafts = chunk_file(snapshot, entry, counter, paths)
+                file_rows = _new_rows(source_id, drafts, same)
+                new_rows.extend(r for r in file_rows if r.id not in reusable)
             rows.extend(file_rows)
             sha = snapshot.hashes.get(entry.path)
             if sha is not None:
@@ -204,14 +234,15 @@ def plan_chunks(
                         path=entry.path,
                         sha256=sha,
                         kind=entry.kind,
-                        chunker=CHUNKER_VERSION,
+                        chunker=file_chunker(entry.kind),
                         start_offset=entry.start,
                         end_offset=entry.end,
                         chunk_ids=json.dumps([r.id for r in file_rows]),
                     )
                 )
     else:
-        rows = new_rows = _new_rows(source_id, chunk_snapshot(snapshot, counter))
+        rows = _new_rows(source_id, chunk_snapshot(snapshot, counter), same)
+        new_rows = [r for r in rows if r.id not in reusable]
     for ordinal, row in enumerate(rows):
         row.ordinal = ordinal
     current = {r.id for r in rows}

@@ -19,6 +19,7 @@ from app.jobs import calibration
 from app.jobs.calibration import (
     CALIBRATE_KIND,
     CALIBRATION_VERSION,
+    RECALIBRATE_TITLE,
     SPEECH_SAMPLE,
     CalibrationService,
     pipeline_key,
@@ -137,8 +138,15 @@ def test_chunker_or_embedding_change_redoes_calibration(
 
     monkeypatch.setattr(calibration, "CHUNKER_VERSION", "next-chunker")
     assert service.outdated(current)
+    # Not silent (D-107): the settings say the results are out of date, and the queue says why
+    # the speed test runs again.
+    assert service.state().outdated
+    job = service.ensure_first_run()
+    assert job is not None and job.title == RECALIBRATE_TITLE
+    repo.cancel(job.id)
     monkeypatch.undo()
     assert not service.outdated(current)
+    assert not service.state().outdated
 
     lock = paths.models_dir / "models.lock.json"
     original = lock.read_text("utf-8")

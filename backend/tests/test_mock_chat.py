@@ -55,6 +55,24 @@ def test_mock_is_deterministic_and_answers_with_one_sentence_when_one_chunk_matc
     }
 
 
+def test_mock_never_quotes_a_web_chunks_section_line() -> None:
+    """D-105: like a model, the mock quotes the text, not the "Section:" line naming it."""
+    web = RetrievedChunk(
+        "w1",
+        "s3",
+        "Docs",
+        "Section: Advanced › Retries and backoff\nRetries are off by default",
+        {"heading": "Retries and backoff", "offset": 0},
+        12,
+        0.9,
+    )
+    mock = MockChatAdapter()
+    reply = mock.chat(answer_messages("Retries and backoff?", [web]), json_schema=ANSWER_SCHEMA)
+    assert json.loads(reply.text) == {
+        "sentences": [{"text": "Retries are off by default", "chunk_ids": ["c1"]}]
+    }
+
+
 def test_mock_returns_no_sentences_without_meaningful_overlap() -> None:
     assert ask("What is the capital of France?") == {"sentences": []}
     assert ask("What is it?") == {"sentences": []}  # only stopwords
