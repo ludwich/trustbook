@@ -2124,6 +2124,24 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Alternatives:** a time-based "still starting" hint (a heuristic, wrong on fast and slow machines alike);
   a stored column (a migration for a value that is stale after a restart).
 
+### D-114 Settings lists the spaces that need re-indexing, using the per-space endpoints
+- **Decision:** Settings gets a "Re-index outdated spaces" section (SPEC §12 item 5), after the speed test: one
+  row per space whose sources an older chunker made (name linking to the space, "2 sources need it.", the
+  estimate) with a **Re-index** button, and "All spaces are up to date." when none does. A running re-index
+  shows "Re-indexing… See progress in the queue." in its row. Above two minutes the same confirmation as the
+  banner (D-106) is asked first. A space whose status cannot be read shows "Could not check every space"
+  instead of "up to date".
+  - **No new endpoint:** the page lists the spaces (`GET /api/spaces`) and reads each one's
+    `GET /api/spaces/{sid}/reindex`, starting with `POST` on the same path. A personal library has a handful
+    of spaces; the backend does the same work per space either way (one list endpoint would loop over the
+    same `reindex_status`), and sharing each space's query key with its banner keeps the two in step (a start
+    in Settings shows in the space, polling stops when done).
+  - **No "Re-index all":** each space has its own estimate and confirmation; one button would need a summed
+    estimate and one confirmation for several queues of work, so it is left out until asked for.
+- **Reason:** simplicity (§15): reuse what the banner already uses; never silent about an outdated index.
+- **Alternatives:** `GET /api/reindex` listing all spaces (one request, but a second contract for the same
+  data); a "Re-index all" button (see above).
+
 ### D-115 The gate command runs comparison models in the same command, reported and never judged (G3-3)
 - **Decision:** `eval/runner.py --also-model NAME` (repeatable), with an optional `--also-endpoint URL` (default:
   the main run's endpoint, i.e. `--chat-endpoint` or the saved one).

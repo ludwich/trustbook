@@ -7,12 +7,14 @@ import { QueryError } from "@/components/common/QueryError";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CalibrationSection } from "./settings/CalibrationSection";
 import { PowerSection } from "./settings/PowerSection";
+import { ReindexSection } from "./settings/ReindexSection";
 import { RequestLogSection } from "./settings/RequestLogSection";
 
 const SECTIONS = [
   { id: "capabilities", label: "Models and services" },
   { id: "power", label: "Processing power" },
   { id: "calibration", label: "Speed test" },
+  { id: "reindex", label: "Re-index" },
   { id: "request-log", label: "Request log" },
 ];
 
@@ -82,6 +84,7 @@ export function SettingsPage() {
 
       <PowerSection />
       <CalibrationSection />
+      <ReindexSection />
       <RequestLogSection />
     </div>
   );

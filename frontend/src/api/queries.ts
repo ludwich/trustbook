@@ -1,4 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  queryOptions,
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useCallback, useRef, useState } from "react";
 import { api } from "./client";
 import type {
@@ -276,14 +282,23 @@ function useInvalidateSources(sid: string) {
 
 export const REINDEX_POLL_MS = 3_000;
 
-/** Whether the space holds chunks of an older chunker; polled while a re-index runs. */
-export function useReindexStatus(sid: string) {
-  return useQuery({
+function reindexStatusQuery(sid: string) {
+  return queryOptions({
     queryKey: queryKeys.reindex(sid),
     queryFn: () => api.getReindex(sid),
     refetchInterval: (query) => (query.state.data?.reindexing ? REINDEX_POLL_MS : false),
     refetchIntervalInBackground: false,
   });
+}
+
+/** Whether the space holds chunks of an older chunker; polled while a re-index runs. */
+export function useReindexStatus(sid: string) {
+  return useQuery(reindexStatusQuery(sid));
+}
+
+/** The re-index status of several spaces (Settings), sharing each space's cache with its banner. */
+export function useReindexStatuses(sids: string[]) {
+  return useQueries({ queries: sids.map(reindexStatusQuery) });
 }
 
 /** Queue the re-index; the queue and the source list show its progress. */
