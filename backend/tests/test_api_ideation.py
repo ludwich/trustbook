@@ -550,10 +550,30 @@ def test_every_ideation_call_is_in_the_request_log(env: Env, router: Router) -> 
         "/api/capabilities/chat",
         json={"preset": "custom", "base_url": "http://llm.example/v1", "model": "m"},
     )
-    session = env.turn(env.create()["id"])
+    sid = env.create()["id"]
+    session = env.turn(sid)
     assert current(session)["recommendation"]["grounding"] == "cited"
     log = env.client.get("/api/request-log").json()
     chat_calls = [e for e in log if e["capability"] == "chat"]
     assert len(chat_calls) == len(router.requests) == 3  # seed, turn and the judge
     assert all(e["space_id"] == env.space_id and e["space_name"] == "Trips" for e in chat_calls)
     assert all(e["endpoint_host"] == "llm.example" for e in chat_calls)
+
+    # Gate 4 #9: the turns that answers start (the /answer stream) are logged the same way, until
+    # the session is complete; finishing writes the brief without a model call.
+    while session["current_node_id"] is not None:
+        session = env.answer(sid, session["current_node_id"], "answer", "Keep it simple.")
+    assert session["complete"] is True
+    env.client.post(env.url(f"/sessions/{sid}/finish"))
+    log = env.client.get("/api/request-log").json()
+    chat_calls = [e for e in log if e["capability"] == "chat"]
+    kinds = [
+        next(iter(json.loads(r.content)["response_format"]["json_schema"]["schema"]["properties"]))
+        for r in router.requests
+    ]
+    # One seed; one turn per branch (three seeds, no follow-ups) plus the last answer's turn that
+    # only looks for new branches and risks; and the judge calls.
+    assert kinds.count("title") == 1 and kinds.count("question") == 4
+    assert kinds.count("verdicts") >= 1 and len(kinds) == 5 + kinds.count("verdicts")
+    assert len(chat_calls) == len(router.requests)
+    assert all(e["space_id"] == env.space_id and e["space_name"] == "Trips" for e in chat_calls)
