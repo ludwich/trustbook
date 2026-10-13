@@ -6,7 +6,7 @@ docs/BACKLOG.md. `phase-4` (#6 → `phase-3b`) is stacked on this branch.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
-## Status: built, Gate 3b waiting for Ludwig
+## Status: Gate 3b passed (Ludwig, 2026-10-13; #8 waived), #5 squash-merged, tagged `phase-3b`
 - [x] CLI package `cli/` (D-087), JSON contract + exit codes (D-088), folder paths (D-089), skill (D-090),
   review fixes (SSE line splitting, eval extra and exit codes, no tracebacks, partial adds reported)
 - [x] Transcript windows, non-citable (D-091); golden prompts unchanged for the eval corpus

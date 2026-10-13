@@ -3,19 +3,17 @@
 Each phase ends at a gate (SPEC §14). Ludwig verifies it on his laptop with the published `-rc` image and
 reports **pass** or **fail**.
 
-## Waiting for Ludwig: Gate 3b → Gate 4
+## Waiting for Ludwig: Gate 4
 
-**Gate 3 passed** on 2026-10-12 (results under "Gate 3 — Code"). #4 is squash-merged into `main` and tagged
-`phase-3`. The two remaining gates are stacked, each on the one before. Test them in this order; the full
-checklists are on their branches.
+**Gate 3 passed** on 2026-10-12 and **Gate 3b passed** on 2026-10-13 (results in their sections; #8, the
+Claude Code skill, was waived, not tested). Both are squash-merged into `main` and tagged `phase-3` and
+`phase-3b`.
 
 | # | Gate | Branch · PR | Image (`TRUSTBOOK_IMAGE_TAG`) | What to test | Section |
 |---|---|---|---|---|---|
-| 1 | **Gate 3b: CLI for agents + transcript windows** | `phase-3b` · #5 → `main` | `phase-3b-rc` | 10 PowerShell steps: the `trustbook` CLI in the container and pip-installed on Windows, JSON and exit codes (2 = not in sources, 3 = failed source), no keys in output, the Claude Code skill, transcript windows, Gate 3 still passing | "Gate 3b" |
-| 2 | **Gate 4: Ideation** | `phase-4` · #6 → `phase-3b` | `phase-4-rc` | **Back up your Trustbook folder first** (spaces migrate to schema v6, which older images cannot open). A session in `Smoke` with cited recommendations, accept/answer/skip/dismiss, resume, Finish now mid-session, Export, a full session to Complete, and briefs never reaching chat | "Gate 4 — Ideation" |
+| 1 | **Gate 4: Ideation** | `phase-4` · #6 → `main` | `phase-4-rc` | **Back up your Trustbook folder first** (spaces migrate to schema v6, which older images cannot open). A session in `Smoke` with cited recommendations, accept/answer/skip/dismiss, resume, Finish now mid-session, Export, a full session to Complete, and briefs never reaching chat | "Gate 4 — Ideation" |
 
-**After a pass:** I squash-merge the PR, tag the phase on `main`, rebase the next branch onto `main` and
-retarget its PR. If a gate fails, I fix it on its own branch and rebase the branches stacked on it.
+**After a pass:** I squash-merge the PR and tag the phase on `main`. If a gate fails, I fix it on its own branch.
 
 ---
 
@@ -527,7 +525,7 @@ Other checks:
 
 ## Gate 3b — CLI for agents and transcript windows
 
-**Image:** `ghcr.io/ludwich/trustbook:phase-3b-rc` · **PR:** `phase-3b → main` (#5; rebased onto `main` after Gate 3 passed)
+**Image:** `ghcr.io/ludwich/trustbook:phase-3b-rc` · **PR:** `phase-3b → main` (#5)
 
 **What it adds:**
 - `trustbook` CLI (`docs/cli.md`) in the image and pip-installable from the repo, plus a Claude Code skill
@@ -537,6 +535,21 @@ Other checks:
 - Transcript windows (D-091): for a transcript chunk among the top 3, up to ~2,000 tokens of what was said just
   before and after it (timestamps, speakers when known), shown to the model as context it may not cite.
   Citations stay on the chunk's own timestamps.
+
+### Result: passed (Ludwig, 2026-10-13, `phase-3b-rc`), #8 waived
+
+- **#1–#5 pass:** the CLI in the container, JSON schemas, exit codes 0/2/3, a failed source with a plain reason.
+- **#6 pass via a workaround** (G3b-1): application control blocked the pip-generated `trustbook.exe`; the
+  absolute Windows path was mapped to `trustbook-eval/requests`.
+- **#7 pass:** a fake key in settings never appeared in stdout or stderr; the 401 error was clean.
+- **#8 waived, not tested** (Ludwig's decision): the skill is installed and a Git Bash shim works; the behaviour
+  test (cited answer, refusal not retried) is deferred.
+- **#9 pass:** Last Lecture (76 min): `window_tokens` 1196, one numbered child plus 2 neighbours. A Stanford talk
+  (6 chunks) correctly got no window, since all its neighbours were already numbered.
+- **#10 pass:** precision 100% (37/37), correct refusals 23/23, false refusals 0/22 (code 0/13), cited ranges
+  25/25, p95 47.8 s, exit 0.
+- **Backlog, not blocking** (`docs/BACKLOG.md`, "From Gate 3b pass"): G3b-1 `python -m trustbook_cli` fallback,
+  G3b-2 optional API key for custom endpoints, two CLI nits.
 
 ### Setup
 1. In `.env` set `TRUSTBOOK_IMAGE_TAG=phase-3b-rc`, then `docker compose pull` and `docker compose up -d`.
