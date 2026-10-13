@@ -63,6 +63,8 @@ export function SourceViewerBody({ spaceId, citation }: { spaceId: string; citat
   const ctx = context.data;
   const code = ctx?.view === "code" ? ctx.code : undefined;
   const commit = shortCommit(code ? code.commit : source?.commit_hash);
+  // The code chunk's qualified symbol (`Class.method`); none for module code or document files.
+  const symbol = code ? (ctx?.chunk.locator.symbol ?? citation.locator.symbol ?? null) : null;
   const where = code
     ? null
     : ((ctx?.view === "text" ? ctx.text?.label : null) ??
@@ -80,6 +82,11 @@ export function SourceViewerBody({ spaceId, citation }: { spaceId: string; citat
           {code && (
             <span className="min-w-0 truncate font-mono text-xs" data-testid="viewer-file">
               · {code.file}, {lineRange(code.highlight)}
+            </span>
+          )}
+          {symbol && (
+            <span className="min-w-0 font-mono text-xs wrap-anywhere" data-testid="viewer-symbol">
+              · {symbol}
             </span>
           )}
           {where && <span data-testid="viewer-label">· {where}</span>}

@@ -107,6 +107,8 @@ describe("source viewer: code (G6)", () => {
     expect(file).toHaveTextContent("src/requests/sessions.py, lines 250–253");
     expect(file).toHaveClass("font-mono");
     expect(within(viewer).getByTestId("viewer-commit")).toHaveTextContent("0123456");
+    // Module-level code has no symbol: nothing is shown for it.
+    expect(within(viewer).queryByTestId("viewer-symbol")).not.toBeInTheDocument();
 
     // Monospace, numbered from first_line.
     expect(code).toHaveClass("font-mono");
@@ -128,6 +130,37 @@ describe("source viewer: code (G6)", () => {
     // Scrolled so the highlight is in view.
     expect(code.scrollTop).toBe(codeScrollTop(201, 250, [250, 253], VIEWPORT));
     expect(code.scrollTop).toBeGreaterThan(0);
+  });
+
+  it("shows the code chunk's qualified symbol after the file path (G3-1)", async () => {
+    mockViewport();
+    const locator = {
+      file: "src/requests/sessions.py",
+      start_line: 250,
+      end_line: 253,
+      symbol: "SessionRedirectMixin.should_strip_auth",
+      kind: "method" as const,
+    };
+    const context = codeChunkContext();
+    spaceBackend({
+      sources: [repoSource()],
+      conversations: [conversation()],
+      messages: { cv_1: [userMessage("How are calls made?"), answerCitingCode()] },
+      contexts: { ch_code: { ...context, chunk: { ...context.chunk, locator } } },
+    });
+    const user = userEvent.setup();
+    renderApp(SPACE);
+
+    await user.click(
+      await screen.findByRole("button", { name: /^Citation 1: requests, src\/requests/ }),
+    );
+    const viewer = await screen.findByRole("dialog", { name: "requests" });
+    const symbol = await within(viewer).findByTestId("viewer-symbol");
+    expect(symbol).toHaveTextContent("· SessionRedirectMixin.should_strip_auth");
+    expect(symbol).toHaveClass("font-mono");
+    // After the file path, in the header.
+    const file = within(viewer).getByTestId("viewer-file");
+    expect(file.compareDocumentPosition(symbol) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("is positioned before paint: scrollTop is set before any passive effect runs", () => {
