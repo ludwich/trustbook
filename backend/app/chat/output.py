@@ -10,13 +10,21 @@ Rules:
   When …``). The text is split at each marker: the part before a marker cites that marker's ids,
   text after the last marker (or text without markers) cites the declared ``chunk_ids``. Markers
   are removed, so prompt labels never reach stored text. Each part is validated on its own.
+- A part with no word character once Markdown code-fence markers are removed (``}]}]}```json{``)
+  is JSON or Markdown syntax that leaked into a string, not a sentence: it is dropped like an
+  uncited sentence (D-117). Strict JSON-schema output keeps the reply valid JSON, so a model that
+  tries to close its answer and start another one can only write that syntax inside a ``text``.
+- A sentence whose text equals an earlier sentence's text in the same reply (whitespace is
+  already normalised) is merged into the earlier one: shown once, citing the earlier sentence's
+  ids followed by the new ones (D-117). It is verified like every sentence; every merged id is
+  one the model gave for that exact text.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +42,8 @@ _INLINE_MARKER = re.compile(
 )
 _LABEL = re.compile(r"c\d+", re.IGNORECASE)
 _AFTER_MARKER = re.compile(r"[.!?;:,]*")
+_FENCE_MARKER = re.compile(r"`{3,}[A-Za-z0-9_+-]*")
+_WORD = re.compile(r"\w")
 
 
 class InvalidOutputError(ValueError):
@@ -50,9 +60,14 @@ class DraftSentence:
 
 @dataclass(frozen=True)
 class ParsedAnswer:
+    """``dropped``: parts without valid chunk ids, and syntax fragments (also listed in
+    ``fragments``). ``duplicates``: parts merged into an earlier sentence with the same text."""
+
     sentences: list[DraftSentence]
     dropped: list[str] = field(default_factory=list)
     returned: int = 0  # sentences the model returned before dropping
+    fragments: list[str] = field(default_factory=list)
+    duplicates: int = 0
 
 
 @dataclass(frozen=True)
@@ -128,13 +143,42 @@ def split_inline_citations(text: str) -> tuple[list[tuple[str, list[str]]], str]
     return [(t, list(dict.fromkeys(i))) for t, i in parts], rest
 
 
+def is_syntax_fragment(text: str) -> bool:
+    """True when ``text`` has no word character once code-fence markers (```` ```json ````) are
+    removed: JSON or Markdown syntax such as ``}]}]}```json{``, never a statement (D-117)."""
+    return _WORD.search(_FENCE_MARKER.sub("", text)) is None
+
+
+def merge_duplicates(sentences: Sequence[DraftSentence]) -> tuple[list[DraftSentence], int]:
+    """Keep the first of sentences with the same text, citing its ids and then the later ones'
+    new ids; returns the sentences and how many were merged (D-117). Exact text match only (the
+    texts are whitespace-normalised already). A cited sentence and an uncited one (an ideation
+    suggestion) are never merged."""
+    first: dict[tuple[str, bool], int] = {}
+    out: list[DraftSentence] = []
+    merged = 0
+    for sentence in sentences:
+        key = (sentence.text, bool(sentence.chunk_ids))
+        if key not in first:
+            first[key] = len(out)
+            out.append(sentence)
+            continue
+        merged += 1
+        index = first[key]
+        ids = tuple(dict.fromkeys((*out[index].chunk_ids, *sentence.chunk_ids)))
+        out[index] = DraftSentence(out[index].text, ids)
+    return out, merged
+
+
 def parse_sentences(data: Any, valid_ids: Collection[str]) -> ParsedAnswer:
-    """Validate ``{"sentences": [...]}`` and drop sentences without valid chunk ids."""
+    """Validate ``{"sentences": [...]}``: drop sentences without valid chunk ids and syntax
+    fragments, merge repeated sentences."""
     if not isinstance(data, dict) or not isinstance(data.get("sentences"), list):
         raise InvalidOutputError('missing "sentences" list')
     valid = set(valid_ids)
     kept: list[DraftSentence] = []
     dropped: list[str] = []
+    fragments: list[str] = []
     items: list[Any] = data["sentences"]
     for item in items:
         if not isinstance(item, dict):
@@ -150,11 +194,16 @@ def parse_sentences(data: Any, valid_ids: Collection[str]) -> ParsedAnswer:
         for part_text, ids in candidates:
             if not part_text:
                 continue  # nothing to show or drop
+            if is_syntax_fragment(part_text):
+                fragments.append(part_text[:MAX_SENTENCE_CHARS])
+                dropped.append(part_text[:MAX_SENTENCE_CHARS])
+                continue
             if not ids or any(i not in valid for i in ids):
                 dropped.append(part_text[:MAX_SENTENCE_CHARS])
                 continue
             kept.append(DraftSentence(part_text[:MAX_SENTENCE_CHARS], tuple(dict.fromkeys(ids))))
-    return ParsedAnswer(kept, dropped, len(items))
+    sentences, duplicates = merge_duplicates(kept)
+    return ParsedAnswer(sentences, dropped, len(items), fragments, duplicates)
 
 
 def parse_answer(text: str, valid_ids: Collection[str]) -> ParsedAnswer:

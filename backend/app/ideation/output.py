@@ -25,6 +25,8 @@ from app.chat.output import (
     DraftSentence,
     InvalidOutputError,
     extract_json,
+    is_syntax_fragment,
+    merge_duplicates,
     normalise_id,
     split_inline_citations,
 )
@@ -105,10 +107,13 @@ def _recommendation(raw: Any, valid: set[str]) -> tuple[list[DraftSentence], lis
         if rest.strip(" .!?;:,"):
             candidates.append((rest, declared))
         for part, ids in candidates:
-            if ids is None or any(i not in valid for i in ids):
+            if not part:
+                continue
+            if is_syntax_fragment(part) or ids is None or any(i not in valid for i in ids):
                 dropped.append(part[:MAX_SENTENCE_CHARS])
                 continue
             kept.append(DraftSentence(part[:MAX_SENTENCE_CHARS], tuple(dict.fromkeys(ids))))
+    kept, _ = merge_duplicates(kept)
     return kept[:MAX_RECOMMENDATION_SENTENCES], dropped
 
 

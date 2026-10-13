@@ -164,6 +164,11 @@ class Diagnostics(BaseModel):
     prompt tokens), ``window_fingerprint`` (a hash of their text; None: no window) and
     ``window_only``: per verification pass, how many failed sentences miss a name, or use a word,
     that a window shows and no chunk holds.
+
+    Layer 3 clean-up (D-117), for the reply the outcome rests on: ``syntax_fragments``: parts
+    of a ``text`` that were only JSON or Markdown syntax (``}]}]}```json{``), dropped before
+    verification (each capped at 300 characters); ``duplicate_sentences``: sentences that
+    repeated an earlier sentence's text and were merged into it.
     """
 
     top_rerank: float | None = None
@@ -192,6 +197,8 @@ class Diagnostics(BaseModel):
     window_tokens: int = 0
     window_fingerprint: str | None = None
     window_only: list[int] = Field(default_factory=list)
+    syntax_fragments: list[str] = Field(default_factory=list)
+    duplicate_sentences: int = 0
 
 
 class MessageOut(BaseModel):

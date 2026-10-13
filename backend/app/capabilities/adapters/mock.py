@@ -19,6 +19,10 @@ Test hooks (docs/ARCHITECTURE.md, "Test hooks"):
   window (D-091): the first sentence of a neighbour's line with a word no numbered chunk has,
   citing ``c1``. The window is not a chunk, so the sentence fails verification and is removed.
   Without a window nothing is added.
+- A question containing ``TB-GARBLED`` gets the reply shape of eval question ref-near-05
+  (D-117): the answer's sentences, then a sentence that is only :data:`GARBLED_FRAGMENT` citing
+  the last sentence's chunk, then the answer's sentences again. Layer 3 drops the fragment and
+  merges the repeats, so the answer is shown once.
 
 The mock never quotes the outline or a window otherwise: answers and judge verdicts read only the
 numbered chunks (:func:`~app.chat.prompt.parse_prompt` returns both separately).
@@ -65,6 +69,8 @@ _OUTLINE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 WINDOW_FACT_TRIGGER = "TB-WINDOW-FACT"
 _WINDOW_LINE = re.compile(r"^\s+\[[^\]]*\]\s+(.*)$")
 _SPEAKER = re.compile(r"^[^\s:][^:]{0,38}:\s+")
+GARBLED_TRIGGER = "TB-GARBLED"
+GARBLED_FRAGMENT = "}]}]}```json{"
 JUDGE_MIN_SHARED = 2
 BRANCH_TRIGGER = "TB-BRANCH"
 SEEDS4_TRIGGER = "TB-SEEDS4"
@@ -162,6 +168,11 @@ def grounded_answer(
         quoted = window_only_sentence(chunks, transcript)
         if quoted is not None:
             sentences.append({"text": quoted, "chunk_ids": [chunks[0].label]})
+    if GARBLED_TRIGGER in question:
+        # ref-near-05 (D-117): the answer, a syntax fragment citing the last sentence's chunk,
+        # then the answer again.
+        fragment = {"text": GARBLED_FRAGMENT, "chunk_ids": list(sentences[-1]["chunk_ids"])}
+        sentences = [*sentences, fragment, *(dict(s) for s in sentences)]
     return {"sentences": sentences}
 
 

@@ -721,7 +721,9 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
   "windows": [{"source_id": str, "numbered": [str], "chunk_ids": [str], "tokens": int}],  // D-091
   "window_tokens": int,
   "window_fingerprint": str|null,        // hash of the transcript windows' text
-  "window_only": [int]                   // per pass: failed sentences with a name or word only a window shows
+  "window_only": [int],                  // per pass: failed sentences with a name or word only a window shows
+  "syntax_fragments": [str],             // D-117: parts of a text that were only JSON/Markdown syntax, dropped
+  "duplicate_sentences": int             // D-117: sentences repeating an earlier one's text, merged into it
   ```
 - **Eval sidecar version 4 (D-080)** adds these per question (`null` when not sent), `promoted_citations`, a run
   `latency` block and `retrieval_settings`; the report's "Latency and judge calls" table shows judge calls per
@@ -799,6 +801,10 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
     sentence of a neighbour's line with a word no numbered chunk has), citing c1 (D-091). It fails verification
     and is counted in `diagnostics.window_only`. Without a window nothing is added. The mock never quotes a
     window otherwise.
+  - A question containing `TB-GARBLED` gets the reply shape of eval question ref-near-05 (D-117): the answer's
+    sentences, a sentence that is only `}]}]}```json{` citing the last sentence's chunk, then the answer's
+    sentences again. Layer 3 drops the fragment and merges the repeats (`diagnostics.syntax_fragments`,
+    `diagnostics.duplicate_sentences`), so the answer is shown once.
   - The mock code judge supports a sentence when it shares at least two content words with the cited lines,
     and names those lines as evidence.
 - **Mock ideation (D-093):** seed prompts get "Who it is for", "What your sources say about <first content word
