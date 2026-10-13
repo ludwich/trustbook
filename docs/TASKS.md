@@ -10,7 +10,10 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] G4-1 chunks split at headings (documents) and a stored section header for web/paste/upload chunks;
       bump `CHUNKER_VERSION` and the calibration version; the UI says a space needs re-indexing and offers a
       button (never silent) (D-104..D-107); Settings lists outdated spaces with Re-index (SPEC §12, D-114)
-- [~] Gate 3 command on the new chunker with Qwen3.6 + real-model ideation check of D-108 (measuring)
+- [x] Gate 3 command on the new chunker with Qwen3.6 (image 44b3c3a): pass; precision 94.9% (37/39; both off-key
+      citations support their sentence), 0 false refusals, p95 42.7 s
+- [~] Follow-ups from that run: a duplicated sentence after a JSON fragment (ref-near-05); a risk still attached
+      to the answered branch by fallback (1 of 15) and a map label ("n5") in a risk text
 - [~] G3-2 ref-near-10: diagnosis done (docs/reports/G3-2-ref-near-10.md): verification refusals, not retrieval;
       **waiting for Ludwig** to choose fixes. **Diagnose first** and report to Ludwig what retrieval misses, before any change. Never
       weaken a grounding layer; never widen the answer key without his approval
