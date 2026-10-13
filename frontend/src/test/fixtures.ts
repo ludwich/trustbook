@@ -12,6 +12,7 @@ import type {
   Message,
   Overview,
   Preset,
+  ReindexStatus,
   Settings,
   Source,
   Space,
@@ -470,4 +471,17 @@ export function ideationSession(over: Partial<IdeationSession> = {}): IdeationSe
     running: false,
     ...over,
   });
+}
+
+/** GET /api/spaces/{id}/reindex: up to date unless overridden. */
+export function reindexStatus(over: Partial<ReindexStatus> = {}): ReindexStatus {
+  return {
+    needed: false,
+    sources: [],
+    reindexing: false,
+    estimate_seconds: null,
+    estimate_summary: null,
+    confirm: false,
+    ...over,
+  };
 }

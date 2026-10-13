@@ -11,6 +11,7 @@ import type {
   IdeationSessionSummary,
   Message,
   Overview,
+  ReindexStatus,
   SecretsReport,
   Settings,
   Snapshot,
@@ -25,6 +26,7 @@ import {
   gateCapability,
   groundingCapability,
   overview as overviewFixture,
+  reindexStatus as reindexFixture,
   searchCapability,
   settings as settingsFixture,
   source as sourceFixture,
@@ -68,6 +70,8 @@ export interface SpaceBackendOptions {
   /** Stored idea sessions, most recently updated first. */
   ideationSessions?: IdeationSession[];
   ideationEstimate?: IdeationEstimate;
+  /** GET …/reindex. Default: up to date. POST …/reindex marks every source as re-indexing. */
+  reindex?: ReindexStatus;
   /** POST …/turn (answer null) and …/answer. Default: 500. */
   ideationStream?: (args: {
     sessionId: string;
@@ -113,7 +117,9 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
       asked: [] as { conversationId: string; content: string }[],
       estimate: [] as SourceEstimateItem[][],
       gateCorrect: [] as { id: number; body: unknown }[],
+      reindex: 0,
     },
+    reindex: opts.reindex ?? reindexFixture(),
     gateLog: [...(opts.gateLog ?? [])],
     ideation: [...(opts.ideationSessions ?? [])],
     ideationCalls: {
@@ -167,6 +173,19 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
 
     // Sources
     http.get("*/api/spaces/:sid/sources", () => HttpResponse.json(state.sources)),
+    http.get("*/api/spaces/:sid/reindex", () => HttpResponse.json(state.reindex)),
+    http.post("*/api/spaces/:sid/reindex", () => {
+      state.calls.reindex += 1;
+      state.reindex = {
+        ...state.reindex,
+        reindexing: state.reindex.needed,
+        sources: state.reindex.sources.map((s) => ({ ...s, reindexing: true })),
+        estimate_seconds: null,
+        estimate_summary: null,
+        confirm: false,
+      };
+      return HttpResponse.json(state.reindex, { status: 202 });
+    }),
     http.post("*/api/spaces/:sid/sources/paste", async ({ request }) => {
       const body = (await request.json()) as { title?: string; text: string };
       state.calls.paste.push(body);

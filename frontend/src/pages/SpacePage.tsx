@@ -16,6 +16,7 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { QueryError } from "@/components/common/QueryError";
 import { GateLogDialog } from "@/components/gate/GateLogDialog";
 import { IdeationView } from "@/components/ideation/IdeationView";
+import { ReindexBanner } from "@/components/sources/ReindexBanner";
 import { SourcesPanel } from "@/components/sources/SourcesPanel";
 import { Button } from "@/components/ui/button";
 import {
@@ -161,6 +162,7 @@ function SpaceWorkspace({ spaceId }: { spaceId: string }) {
 
         {/* Centre */}
         <section className="flex min-h-0 min-w-0 flex-col px-6 pt-3 pb-4">
+          <ReindexBanner spaceId={spaceId} />
           <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
             <TabsList aria-label="Space views">
               <TabsTrigger value="chat">

@@ -49,6 +49,7 @@ export const queryKeys = {
   ideationSession: (sid: string, id: string) =>
     ["spaces", sid, "ideation", "sessions", id] as const,
   ideationEstimate: (sid: string) => ["spaces", sid, "ideation", "estimate"] as const,
+  reindex: (sid: string) => ["spaces", sid, "reindex"] as const,
 };
 
 /** Jobs that still need work (shown in the header indicator). */
@@ -269,7 +270,33 @@ function useInvalidateSources(sid: string) {
     void qc.invalidateQueries({ queryKey: queryKeys.overview(sid) });
     void qc.invalidateQueries({ queryKey: queryKeys.space(sid), exact: true });
     void qc.invalidateQueries({ queryKey: queryKeys.jobs });
+    void qc.invalidateQueries({ queryKey: queryKeys.reindex(sid) });
   };
+}
+
+export const REINDEX_POLL_MS = 3_000;
+
+/** Whether the space holds chunks of an older chunker; polled while a re-index runs. */
+export function useReindexStatus(sid: string) {
+  return useQuery({
+    queryKey: queryKeys.reindex(sid),
+    queryFn: () => api.getReindex(sid),
+    refetchInterval: (query) => (query.state.data?.reindexing ? REINDEX_POLL_MS : false),
+    refetchIntervalInBackground: false,
+  });
+}
+
+/** Queue the re-index; the queue and the source list show its progress. */
+export function useStartReindex(sid: string) {
+  const qc = useQueryClient();
+  const done = useInvalidateSources(sid);
+  return useMutation({
+    mutationFn: () => api.startReindex(sid),
+    onSuccess: (status) => {
+      qc.setQueryData(queryKeys.reindex(sid), status);
+      done();
+    },
+  });
 }
 
 export function useAddPaste(sid: string) {

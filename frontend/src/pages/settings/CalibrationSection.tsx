@@ -73,12 +73,23 @@ export function CalibrationSection() {
             {status === "running" && <Badge variant="info">Running…</Badge>}
             {status === "pending" && <Badge variant="secondary">Waiting to run</Badge>}
             {status === "failed" && <Badge variant="danger">Failed</Badge>}
+            {cal.data.outdated && status !== "running" && (
+              <Badge variant="warning" data-testid="calibration-outdated">
+                Out of date
+              </Badge>
+            )}
             {cal.data.results && (
               <span className="text-xs text-muted-foreground">
                 Measured {formatDateTime(cal.data.results.measured_at)}
               </span>
             )}
           </div>
+          {cal.data.outdated && (
+            <p className="mb-2 text-xs text-muted-foreground">
+              Indexing has changed since this was measured. The speed test runs again on its own;
+              until then, estimates use these numbers.
+            </p>
+          )}
           {cal.data.results ? (
             <>
               <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm">
