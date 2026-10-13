@@ -1,24 +1,39 @@
-# Phase 4 — Ideation (branch `phase-4`)
+# Phase 5 — Hardening (branch `phase-5`)
 
-Gates 3 and 3b passed (2026-10-12 and 2026-10-13) and are merged into `main` (tags `phase-3`, `phase-3b`).
-`phase-4` is rebased onto `main`; PR #6 targets `main`. All SPEC §14 phases are done; the next phase waits
-for Ludwig (proposal: `docs/BACKLOG.md`, "Priorities").
+Scope (Ludwig, 2026-10-13): all of P1 and P2 from `docs/BACKLOG.md` ("Priorities"), correctness first, with his
+additions. Stop at Gate 5; no merge or tag without his typed confirmation.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
-## Status: Gate 4 passed (Ludwig, 2026-10-13; #9 and seed dismiss not tested), #6 squash-merged, tagged `phase-4`
-- [x] Backend: schema v6, map, prompt, engine (per-sentence grounded recommendations), service, API + SSE, brief,
-  estimate, shared `api/grounded.py`, isolation guards (D-093..D-101)
-- [x] Frontend: Ideation tab (entry, question card, branch map, finish/export/continue, resume, running state; D-102)
-- [x] Real-model check (Qwen3.6): recommendations cite sources, briefs never in chat (D-103)
-- [x] Quality bar green; Playwright 25/25 incl. `ideation.spec.ts`; CLI e2e on the image
-- [x] CI + `phase-4-rc` (rebuilt from the rebased branch head); PR #6 phase-4 → main; Gate 4 in GATES.md — waiting for Ludwig
-- Backlog: `trustbook ideas` CLI command; "Suggest ideas" (SPEC §16, out of scope)
+## P1: correctness of what the user reads
+- [~] G4-3 a risk is attached to the branch it concerns, not the one answered just before
+- [~] G4-1 chunks split at headings (documents) and a stored section header for web/paste/upload chunks;
+      bump `CHUNKER_VERSION` and the calibration version; the UI says a space needs re-indexing and offers a
+      button (never silent)
+- [~] G3-2 ref-near-10: **diagnose first** and report to Ludwig what retrieval misses, before any change. Never
+      weaken a grounding layer; never widen the answer key without his approval
+- [ ] G3-3 second model family (non-Qwen): propose 2–3 GGUF candidates for llama-server on Strix Halo (Vulkan)
+      with size and speed; **Ludwig chooses before anything runs**. Results reported next to Qwen3.6, not
+      pass/fail. The gate command runs both models in one command
+- [~] Untested gate items made one-step: Gate 3b #8 skill behaviour, Gate 4 #9 request log, Gate 4 seed dismiss
+
+## P2: usability and setup
+- [~] G3b-2 optional API key for "Other OpenAI-compatible" chat and the speech-to-text endpoint
+      (`settings.json` only, never logged or echoed)
+- [~] G3b-1 `python -m trustbook_cli` + Git Bash shim, documented in docs/cli.md and SKILL.md
+- [~] G3-1 code symbol in the citation viewer header
+- [~] G4-2 a reload keeps the Ideation tab
+- [~] G4-4 source-list messages and long file names wrap; one line per problem
+- [~] CLI nits: `http_status` on a known 401; "loading models" instead of "reading 0%"
+- [ ] docs/MODELS.md: tested chat models with their gate results (Qwen3.6 recommended; Qwen3.8-27B ~78%
+      precision, p95 ~85 s; the second family once run)
+
+## Gate 5 (fast to verify: one command or one click per finding; Gate 3 command once with both models)
+- [ ] Gate 5 checklist in docs/GATES.md, PR `phase-5 → main`, `phase-5-rc`
 
 ## Notes for a restarted session
-- Quality bar script (stops on first failure): scratchpad `qbar.sh`; never chain checks through `| tail`.
-- Phase 3b merged (`e5ee9c4`), tagged `phase-3b`. Push tags as `refs/tags/phase-N`.
+- Phase 4 merged (`66bafd5`), tagged `phase-4`; `:latest` = Phase 4.
+- Quality bar: backend ruff/format/mypy --strict/pytest; frontend lint/typecheck/test; cli and eval suites.
 - Never `git commit -a` while agents edit the tree; stage explicit paths.
-- ML work outside CI: `UV_PROJECT_ENVIRONMENT=<scratch>/mlvenv uv sync --frozen --extra ml`.
 - Build test images from committed HEAD only: `git archive HEAD | docker build -f docker/app.Dockerfile -`.
-
+- Decision numbers: D-104 onward.
