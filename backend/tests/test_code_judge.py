@@ -17,6 +17,7 @@ from app.grounding.code_checks import (
     SnapshotFiles,
     missing_identifiers,
     missing_literals,
+    text_units,
 )
 from app.grounding.code_judge import (
     JUDGE_SCHEMA,
@@ -32,6 +33,7 @@ from app.grounding.code_judge import (
     parse_judge_prompt,
     parse_verdicts,
     prepare,
+    render_chunk,
     split_identifier,
     terms_match,
 )
@@ -882,3 +884,29 @@ def test_layer_5_reads_what_a_document_header_states() -> None:
     assert missing_literals("connect retries 52 times.", [code]) == ["52"]
     assert missing_identifiers("Pass `52` to it.", [code]) == ["52"]
     assert missing_identifiers("Call `connect`.", [code]) == []
+
+
+def test_a_web_chunks_section_line_is_its_excerpt_title_not_a_numbered_line() -> None:
+    """D-105: the judge numbers a web chunk's body as before; the heading path of its
+    "Section:" line is named in the excerpt title, where it can never be evidence."""
+    text = "Section: Guide › Install\nRun pip to install it.\nThen import it."
+    chunk = RetrievedChunk("w", "s2", "Docs", text, {"heading": "Install", "offset": 0}, 10, 0.9)
+    numbered = number_chunk("c1", chunk)
+    assert numbered.lines == ("Run pip to install it.", "Then import it.")
+    assert render_chunk(numbered).split("\n")[0] == (
+        "[c1] Docs (section “Guide › Install”), lines 1-2"
+    )
+    old = RetrievedChunk("o", "s2", "Docs", "Run pip.", {"heading": "Install", "offset": 0}, 9, 0.9)
+    assert render_chunk(number_chunk("c2", old)).split("\n")[0] == (
+        "[c2] Docs (section “Install”), lines 1-1"
+    )
+
+
+def test_a_web_section_line_states_names_but_never_its_numbering() -> None:
+    """Layer 5 reads a "Section:" line like a document header (D-071, D-105): its names count,
+    a heading's numbering does not."""
+    web = "Section: 4 Limits › 4.2 Timeouts › `connect_timeout`\nThe default is ten seconds."
+    assert missing_identifiers("Set `connect_timeout`.", [web]) == []
+    assert missing_identifiers("Pass `4.2` to it.", [web]) == ["4.2"]
+    # The focus window holds the body's sentences only, as before the line existed.
+    assert text_units(web) == ["The default is ten seconds."]

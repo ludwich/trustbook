@@ -20,7 +20,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from app.chunking.header import complete_numbers, header_content, split_header, stated_in_full
+from app.chunking.header import (
+    complete_numbers,
+    header_content,
+    split_header,
+    stated_in_full,
+    without_section_header,
+)
 
 logger = logging.getLogger("trustbook.grounding")
 
@@ -316,11 +322,12 @@ def code_facts(chunk_texts: Sequence[str]) -> list[str]:
 
 
 def text_units(text: str) -> list[str]:
-    """A chunk's units: its lines for code (``File: …`` header left out), sentences for prose."""
+    """A chunk's units: its lines for code (``File: …`` header left out), sentences for prose
+    (a web chunk's ``Section: …`` line left out, D-105)."""
     if text.startswith("File: "):
         parts = text.splitlines()[1:]
     else:
-        parts = _PROSE_SPLIT.split(" ".join(text.split()))
+        parts = _PROSE_SPLIT.split(" ".join(without_section_header(text).split()))
     return [part.strip() for part in parts if part.strip()]
 
 

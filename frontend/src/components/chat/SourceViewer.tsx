@@ -69,6 +69,9 @@ export function SourceViewerBody({ spaceId, citation }: { spaceId: string; citat
     ? null
     : ((ctx?.view === "text" ? ctx.text?.label : null) ??
       formatLocator(ctx?.chunk.locator ?? citation.locator));
+  // A document file's chunk is shown as lines of the file; its section is named too. Chunks are
+  // split at headings (D-104), so the section holds every highlighted line.
+  const section = code ? (ctx?.chunk.locator.heading ?? null) : null;
 
   return (
     <>
@@ -89,6 +92,7 @@ export function SourceViewerBody({ spaceId, citation }: { spaceId: string; citat
               · {symbol}
             </span>
           )}
+          {section && <span data-testid="viewer-section">· Section: {section}</span>}
           {where && <span data-testid="viewer-label">· {where}</span>}
           {commit && (
             <span

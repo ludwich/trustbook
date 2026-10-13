@@ -34,10 +34,13 @@ from app.timeutil import utc_now_iso
 logger = logging.getLogger("trustbook.calibration")
 
 # 2: real speech STT, usable CPUs; 3: tuned threads + BF16; 4: parsing; 5: indexing streams, code;
-# 6: Phase 3 chunks, and the saved results name the pipeline they were measured with (D-057)
-CALIBRATION_VERSION = 6
+# 6: Phase 3 chunks, and the saved results name the pipeline they were measured with (D-057);
+# 7: documents and web pages split at every heading (chunker p5-headings-7, D-104, D-107)
+CALIBRATION_VERSION = 7
 CALIBRATE_KIND = "calibrate"
 CALIBRATE_TITLE = "Measure this computer's speed"
+# The queue's title for a run that replaces results measured for an older pipeline (D-107).
+RECALIBRATE_TITLE = "Measure this computer's speed again (indexing has changed)"
 EMBED_CHUNKS = 64
 EMBED_CODE_CHUNKS = 32
 SPEECH_SAMPLE = "calibration.wav"  # public-domain speech, see docker/download_models.py
@@ -76,6 +79,9 @@ class Calibration(BaseModel):
 class CalibrationState(BaseModel):
     status: CalibrationStatus
     results: Calibration | None
+    # The saved results were measured with older calibration code, another chunker or another
+    # embedding model; a new run is queued at start (D-057, D-107).
+    outdated: bool = False
 
 
 def synthetic_chunks(count: int, words_per_chunk: int = 350) -> list[str]:
@@ -139,20 +145,21 @@ class CalibrationService:
     def state(self) -> CalibrationState:
         latest = self._jobs.latest(CALIBRATE_KIND)
         results = self.read()
+        outdated = results is not None and self.outdated(results)
         if latest is not None and latest.status == "running":
-            return CalibrationState(status="running", results=results)
+            return CalibrationState(status="running", results=results, outdated=outdated)
         if results is not None:
-            return CalibrationState(status="done", results=results)
+            return CalibrationState(status="done", results=results, outdated=outdated)
         if latest is not None and latest.status == "failed":
             return CalibrationState(status="failed", results=None)
         return CalibrationState(status="pending", results=None)
 
-    def enqueue(self) -> Job:
+    def enqueue(self, title: str = CALIBRATE_TITLE) -> Job:
         """Queue a calibration run (or return the one already waiting/running)."""
         existing = self._jobs.find_unfinished(CALIBRATE_KIND)
         if existing is not None:
             return existing
-        return self._jobs.enqueue(CALIBRATE_KIND, CALIBRATE_TITLE)
+        return self._jobs.enqueue(CALIBRATE_KIND, title)
 
     def pipeline(self) -> str:
         """The :func:`pipeline_key` of this installation."""
@@ -164,11 +171,15 @@ class CalibrationService:
         return saved.version < CALIBRATION_VERSION or saved.pipeline != self.pipeline()
 
     def ensure_first_run(self) -> Job | None:
-        """Queue a calibration run on first start or when the saved one is outdated."""
+        """Queue a calibration run on first start or when the saved one is outdated; the queue
+        then says why it runs again (D-107)."""
         saved = self.read()
-        if saved is not None and not self.outdated(saved):
+        if saved is None:
+            return self.enqueue()
+        if not self.outdated(saved):
             return None
-        return self.enqueue()
+        logger.info("Speed test results are for an older pipeline; measuring again")
+        return self.enqueue(RECALIBRATE_TITLE)
 
     def run(self, ctx: JobContext) -> Calibration:
         """Job handler: measure each part, guarded, and save the results."""

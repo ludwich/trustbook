@@ -110,9 +110,12 @@ def test_text_context_without_a_matching_snapshot_shows_the_chunk(
     folder = services_of(client).ingest.repo(sid).folder(source_id)
     (folder / "snapshot.md").write_text("rewritten by a refresh", "utf-8")
     text = _context(client, sid, chunk.id)["text"]
-    assert (text["before"], text["highlight"], text["after"]) == ("", chunk.text, "")
+    # The stored text without its "Section:" line, which the label names (D-105).
+    body = chunk.text.partition("\n")[2]
+    assert chunk.text.startswith("Section: ")
+    assert (text["before"], text["highlight"], text["after"]) == ("", body, "")
     (folder / "snapshot.md").unlink()
-    assert _context(client, sid, chunk.id)["text"]["highlight"] == chunk.text
+    assert _context(client, sid, chunk.id)["text"]["highlight"] == body
 
 
 def test_unknown_chunk_is_404(client: TestClient, sid: str) -> None:

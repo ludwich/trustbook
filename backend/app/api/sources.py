@@ -45,6 +45,7 @@ from app.spaces.source_schemas import (
     FolderCreate,
     FromSearchCreate,
     PasteCreate,
+    ReindexOut,
     SecretFindingOut,
     SecretsReportOut,
     SnapshotOut,
@@ -410,6 +411,22 @@ def refresh_source(space_id: str, source_id: str, services: ServicesDep) -> Sour
         except RefreshNotAllowedError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     return services.ingest.out(source)
+
+
+@router.get("/spaces/{space_id}/reindex")
+def get_reindex(space_id: str, services: ServicesDep) -> ReindexOut:
+    """Whether sources of this space hold chunks an older chunker made (D-106), and how long
+    re-indexing them takes on this computer."""
+    services.spaces.get(space_id)
+    return services.ingest.reindex_status(space_id)
+
+
+@router.post("/spaces/{space_id}/reindex", status_code=status.HTTP_202_ACCEPTED)
+def start_reindex(space_id: str, services: ServicesDep) -> ReindexOut:
+    """Queue a re-index of every source with chunks of an older chunker (one ``ingest`` job each,
+    with its estimate). The sources stay usable in chat until their new chunks are ready."""
+    services.spaces.get(space_id)
+    return services.ingest.reindex(space_id)
 
 
 @router.delete("/spaces/{space_id}/sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import bisect
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from app.chunking.document import ChunkDraft, Header, Locate, Parent, chunk_document
-from app.chunking.header import document_header
+from app.chunking.header import document_header, section_header
 from app.chunking.headings import (
     FENCES,
     Heading,
@@ -33,30 +33,50 @@ def _overlapping(segments: list[Segment], start: int, end: int) -> list[Segment]
     return [s for s in segments if s.start < end and s.end > start]
 
 
-def page_locator(segments: list[Segment]) -> Locate:
+def chunk_section(sections: HeadingPaths, start: int, end: int) -> tuple[Heading, ...]:
+    """The heading path a chunk of ``text[start:end]`` is named by (D-104): the section of its last
+    character. Chunks are split at headings, so that is the section of all of its text; a chunk
+    that starts with headings without text of their own is named by the last of them."""
+    return sections.at(max(start, end - 1))
+
+
+def _title(path: tuple[Heading, ...]) -> str | None:
+    """The innermost title of ``path`` (``None`` for no heading)."""
+    return path[-1].title if path else None
+
+
+def page_locator(segments: list[Segment], sections: HeadingPaths | None = None) -> Locate:
+    """Pages of a parsed document; with ``sections`` also the chunk's ``heading`` when it is
+    under one (D-105)."""
+
     def locate(start: int, end: int) -> dict[str, Any]:
         pages = sorted({s.page for s in _overlapping(segments, start, end) if s.page is not None})
-        return {"pages": pages}
+        located: dict[str, Any] = {"pages": pages}
+        heading = _title(chunk_section(sections, start, end)) if sections is not None else None
+        if heading:
+            located["heading"] = heading
+        return located
 
     return locate
 
 
-def section_locator(segments: list[Segment]) -> Locate:
+def section_locator(sections: HeadingPaths) -> Locate:
+    """A web page's, pasted or uploaded text's chunk: the innermost heading of its section (D-053;
+    chunks are split at headings since D-104, so it names all of the chunk) and its offset."""
+
     def locate(start: int, end: int) -> dict[str, Any]:
-        # The section holding most of the chunk names it (a chunk that starts in the last lines
-        # of one section is about the next one); every section it spans is listed too (D-053).
-        spans = [
-            (min(end, s.end) - max(start, s.start), s.heading)
-            for s in _overlapping(segments, start, end)
-        ]
-        headings = list(dict.fromkeys(h for _, h in spans if h))
-        heading = max(spans, key=lambda item: item[0])[1] if spans else None
-        locator: dict[str, Any] = {"heading": heading, "offset": start}
-        if len(headings) > 1:
-            locator["headings"] = headings
-        return locator
+        return {"heading": _title(chunk_section(sections, start, end)), "offset": start}
 
     return locate
+
+
+def _section_header(sections: HeadingPaths) -> Header:
+    """``Section: Outer › Inner`` for a chunk under a heading, ``""`` before the first (D-105)."""
+
+    def header(start: int, end: int) -> str:
+        return section_header(path_text(chunk_section(sections, start, end)))
+
+    return header
 
 
 class _LineIndex:
@@ -80,11 +100,8 @@ def _file_document_locator(
     lines = _LineIndex(text, entry.start, entry.end)
 
     def locate(start: int, end: int) -> dict[str, Any]:
-        # Named like a web chunk (D-053): the innermost heading of the section holding most of
-        # the chunk, and every section it spans when there are several (D-068).
-        spans = sections.sections(start, end)
-        titles = list(dict.fromkeys(h.title for _, h in spans if h is not None))
-        biggest = max(spans, key=lambda item: item[0])[1] if spans else None
+        # The innermost heading of the chunk's section, the one its header names (D-068, D-104).
+        path = chunk_section(sections, start, end)
         located: dict[str, Any]
         if pages:
             numbers = sorted({s.page for s in _overlapping(pages, start, end) if s.page})
@@ -97,9 +114,7 @@ def _file_document_locator(
                 "symbol": None,
                 "kind": None,
             }
-        located["heading"] = biggest.title if biggest is not None else None
-        if len(titles) > 1:
-            located["headings"] = titles
+        located["heading"] = _title(path)
         return located
 
     return locate
@@ -111,7 +126,7 @@ def _file_document_header(
     lines = _LineIndex(text, entry.start, entry.end)
 
     def header(start: int, end: int) -> str:
-        where = path_text(sections.at(start))
+        where = path_text(chunk_section(sections, start, end))
         span = None if paged else (lines.line(start), lines.line(max(start, end - 1)))
         return document_header(entry.path, where, span)
 
@@ -119,36 +134,20 @@ def _file_document_header(
 
 
 def _section_parent(sections: HeadingPaths, key: Callable[[Heading], str]) -> Parent:
-    """A document chunk's parent (D-077): the section of its FIRST line, the one its header
-    names (D-068), so the parent title and the header path are the same string. ``head``: the
-    chunk's first line is a line of the section's heading block. No heading above: no parent."""
+    """A document chunk's parent (D-077): the section its header names (D-068; the section of
+    all of its text since D-104), so the parent title and the header path are the same string.
+    ``head``: the chunk starts at or inside the section's heading block. No heading: no parent.
+
+    Web pages, pasted and uploaded text use the same rule with offset keys (``#o<heading
+    start>``); their parent title is the heading path of their ``Section:`` line (D-105)."""
 
     def parent(start: int, end: int) -> tuple[str | None, Structure | None]:
-        path = sections.at(start)
+        path = chunk_section(sections, start, end)
         if not path:
             return None, None
         heading = path[-1]
         title = " ".join(path_text(path).split())
         return key(heading), Structure("section", title, None, start <= heading.end)
-
-    return parent
-
-
-def _segment_parent(segments: list[Segment]) -> Parent:
-    """A web, paste or upload chunk's parent (D-077): the segment holding most of it, the
-    section its locator names (D-053). ``head``: the chunk holds the segment's start."""
-
-    def parent(start: int, end: int) -> tuple[str | None, Structure | None]:
-        spans = [
-            (min(end, s.end) - max(start, s.start), s) for s in _overlapping(segments, start, end)
-        ]
-        if not spans:
-            return None, None
-        segment = max(spans, key=lambda item: item[0])[1]
-        if not segment.heading:
-            return None, None
-        structure = Structure("section", segment.heading, None, start <= segment.start)
-        return offset_section_key("", segment.start), structure
 
     return parent
 
@@ -159,8 +158,32 @@ def _segment_parent(segments: list[Segment]) -> Parent:
 # locator kind, document files chunked on whole lines (D-056); 5: document files carry their
 # heading path in the header and locator, headings found in Markdown, setext and
 # reStructuredText form (D-068); 6: every chunk stores its parent key and structure (section,
-# class or module; definitions, imports) for parent/child retrieval (D-077)
-CHUNKER_VERSION = "p3-treesitter-6"
+# class or module; definitions, imports) for parent/child retrieval (D-077); 7: documents, web
+# pages, pasted and uploaded text are split at every heading, and web, paste and upload chunks
+# under a heading start with a ``Section:`` line (D-104, D-105). Code and transcript chunks did not
+# change in 7, so their kinds keep version 6 in ``CHUNKER_VERSIONS`` and their chunks are kept.
+CHUNKER_VERSION = "p5-headings-7"
+
+ChunkKind = Literal["code", "document", "transcript"]
+# The chunker version that makes each kind of chunk (D-106). A kind's entry changes only when its
+# chunks change: a refresh keeps a file's chunks only when its kind's version made them, and a
+# source needs re-indexing when it holds chunks made by an older version.
+CHUNKER_VERSIONS: dict[str, str] = {
+    "code": "p3-treesitter-6",
+    "document": CHUNKER_VERSION,
+    "transcript": "p3-treesitter-6",
+}
+
+
+def snapshot_chunkers(snapshot: Snapshot) -> dict[str, str]:
+    """The chunker version per kind of chunk ``snapshot`` gives (D-106)."""
+    if snapshot.kind == "timestamps":
+        kinds: set[ChunkKind] = {"transcript"}
+    elif snapshot.kind == "files":
+        kinds = {"code" if e.kind == "code" else "document" for e in snapshot.files}
+    else:
+        kinds = {"document"}
+    return {kind: CHUNKER_VERSIONS[kind] for kind in sorted(kinds)}
 
 
 def snapshot_files(snapshot: Snapshot) -> SourceFiles:
@@ -219,18 +242,23 @@ def chunk_snapshot(snapshot: Snapshot, counter: TokenCounter) -> list[ChunkDraft
     if snapshot.kind == "files":
         files = snapshot_files(snapshot)
         return [d for entry in snapshot.files for d in chunk_file(snapshot, entry, counter, files)]
-    if snapshot.kind == "pages":
-        # Parsed PDFs: the Markdown ``#`` section (Docling writes them), keyed by offset (D-077).
-        sections = HeadingPaths(find_headings(text, 0, len(text), syntax="markdown"))
-        parent = _section_parent(sections, lambda h: offset_section_key("", h.start))
-        return chunk_document(
-            text, 0, len(text), counter, page_locator(snapshot.segments), parent=parent
-        )
+    # Parsed documents ("pages": PDF, Word, … uploads), web pages, pasted and uploaded text
+    # ("sections"): Markdown headings, each starting a chunk (D-104); a chunk under a heading starts
+    # with its ``Section:`` line (D-105), and its parent is that section, keyed by offset (D-077).
+    headings = find_headings(text, 0, len(text), syntax="markdown")
+    sections = HeadingPaths(headings)
+    locate = (
+        page_locator(snapshot.segments, sections)
+        if snapshot.kind == "pages"
+        else section_locator(sections)
+    )
     return chunk_document(
         text,
         0,
         len(text),
         counter,
-        section_locator(snapshot.segments),
-        parent=_segment_parent(snapshot.segments),
+        locate,
+        header=_section_header(sections),
+        parent=_section_parent(sections, lambda h: offset_section_key("", h.start)),
+        headings=headings,
     )

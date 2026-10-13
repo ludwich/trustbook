@@ -274,6 +274,8 @@ export interface CalibrationRuntime {
 export interface CalibrationState {
   status: CalibrationStatus;
   results: Calibration | null;
+  /** The results were measured for an older chunker or embedding model; a new run is queued. */
+  outdated?: boolean;
 }
 
 // ---- Phase 1: sources -------------------------------------------------------
@@ -568,6 +570,27 @@ export interface SourceEstimate {
   files: number | null;
   /** "About 4,200 files, roughly 25 min on this PC" */
   summary: string;
+  confirm: boolean;
+}
+
+/** A source whose chunks an older chunker made (D-106). */
+export interface ReindexSource {
+  id: string;
+  title: string;
+  /** Its re-index is queued or running. */
+  reindexing: boolean;
+}
+
+/** Whether a space needs re-indexing (`GET /api/spaces/{id}/reindex`). */
+export interface ReindexStatus {
+  needed: boolean;
+  sources: ReindexSource[];
+  reindexing: boolean;
+  /** For the sources not queued yet. */
+  estimate_seconds: number | null;
+  /** "About 3 min on this PC" */
+  estimate_summary: string | null;
+  /** Above two minutes: ask before starting (SPEC §11). */
   confirm: boolean;
 }
 

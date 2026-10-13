@@ -11,15 +11,17 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-/** "About 4,200 files, roughly 25 min on this PC" with Add / Cancel. */
+/** "About 4,200 files, roughly 25 min on this PC" with Add (or `actionLabel`) / Cancel. */
 export function EstimateConfirmDialog({
   estimate,
   onAdd,
   onCancel,
+  actionLabel = "Add",
 }: {
   estimate: SourceEstimate | null;
   onAdd: () => void;
   onCancel: () => void;
+  actionLabel?: string;
 }) {
   return (
     <AlertDialog open={estimate !== null} onOpenChange={(open) => !open && onCancel()}>
@@ -38,7 +40,7 @@ export function EstimateConfirmDialog({
         </p>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={onAdd}>Add</AlertDialogAction>
+          <AlertDialogAction onClick={onAdd}>{actionLabel}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

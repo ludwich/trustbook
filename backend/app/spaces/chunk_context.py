@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.chunking.header import without_section_header
 from app.parse.snapshot import Segment
 
 WHOLE_FILE_LINES = 2_000
@@ -242,7 +243,10 @@ def text_view(
     """The chunk as a string with up to ~1,500 characters of context on each side."""
     label = label_for(locator)
     if markdown is None or not _offsets_match(markdown, chunk_text, start_offset, end_offset):
-        return TextView(label=label, before="", highlight=chunk_text, after="")
+        # The stored text, without a web chunk's ``Section:`` line (D-105): the label names it.
+        return TextView(
+            label=label, before="", highlight=without_section_header(chunk_text), after=""
+        )
     low, high = 0, len(markdown)
     file = locator.get("file")
     mine = [s for s in segments if isinstance(file, str) and file and s.file == file]

@@ -77,6 +77,19 @@ def _qa(nodes: list[NodeOut]) -> list[str]:
     return out[:-1]
 
 
+def anchor_place(locator: dict[str, object]) -> str:
+    """Where a cited chunk is: :func:`describe_locator`, plus the section of a document file's or
+    parsed document's chunk (``docs/user/advanced.rst, lines 1032–1056, section “Example:
+    Automatic Retries”``). Chunks are split at headings (D-104), so it is the section of all of
+    the cited text; web chunks already name theirs."""
+    where = describe_locator(locator)
+    heading = locator.get("heading")
+    if (locator.get("file") or locator.get("pages")) and isinstance(heading, str) and heading:
+        section = f"section “{' '.join(heading.split())}”"
+        return f"{where}, {section}" if where else section
+    return where
+
+
 def _anchors(nodes: list[NodeOut]) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -92,7 +105,7 @@ def _anchors(nodes: list[NodeOut]) -> list[str]:
             seen.add(text)
             places: list[str] = []
             for citation in sentence.citations:
-                where = describe_locator(citation.locator)
+                where = anchor_place(citation.locator)
                 title = _line(citation.source_title) or "Untitled"
                 places.append(f"*{title}*" + (f", {where}" if where else ""))
             out.append(f"- {text} ({'; '.join(dict.fromkeys(places))})")

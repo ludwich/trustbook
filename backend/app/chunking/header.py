@@ -9,14 +9,19 @@ Document files (``.md``, ``.rst``, ``.txt``, …): ``File: <path> · <heading pa
 ``File: <path> (lines a-b)`` before the first heading, and without ``(lines a-b)`` for a paged
 document (D-068). The heading path (``Release History › 2.32.0 (2024-05-20)``) is the section the
 chunk's first line is under: context the model, the grounding checks and the judge may read, while
-line numbers stay on the body lines.
+line numbers stay on the body lines. Chunks are split at headings (D-104), so the heading path is
+the section of the chunk's whole text; a chunk that starts with headings without text of their own
+is named by the last of them.
+
+Web pages, pasted and uploaded text under a heading: ``Section: <heading path>`` (D-105), the same
+heading path without a file. Text before the first heading has no first line.
 """
 
 from __future__ import annotations
 
 import re
 
-from app.chunking.headings import SEPARATOR, find_headings, heading_syntax
+from app.chunking.headings import SEPARATOR, Heading, find_headings, heading_syntax
 
 # ``(part N)`` of a split data literal's header, which is always the chunk's first line.
 _PART_IN_HEADER = re.compile(r"\A(File: [^\n]*?) \(part (\d+)\)(?= \(lines \d+-\d+\))")
@@ -28,6 +33,7 @@ _NUMBERING = re.compile(r"\d+(?:\.\d+)*\.?[ \t]+(?=[^\W\d_])")
 # A number as written in full: a version (2.32.0, v2.32.0) or a date (2024-05-20) is one number.
 _COMPLETE_NUMBER = re.compile(r"(?:(?<=\b[vV])|(?<![\w.\-]))\d+(?:[.\-]\d+)*(?!\w|[.\-]\d)")
 FILE_PREFIX = "File: "
+SECTION_PREFIX = "Section: "
 CONTEXT_SEPARATOR = " · "
 
 
@@ -56,6 +62,26 @@ def document_header(path: str, heading_path: str, lines: tuple[int, int] | None)
     return f"{FILE_PREFIX}{where}" + (f" (lines {lines[0]}-{lines[1]})" if lines else "")
 
 
+def section_header(heading_path: str) -> str:
+    """``Section: Outer › Inner``: the first line of a web page's, pasted or uploaded text's chunk
+    under a heading (D-105); ``""`` (no first line) without a heading."""
+    heading_path = " ".join(heading_path.split())
+    return f"{SECTION_PREFIX}{heading_path}" if heading_path else ""
+
+
+def section_path(chunk_text: str) -> str:
+    """The heading path of a chunk's ``Section:`` first line, ``""`` for any other chunk."""
+    first = chunk_text.split("\n", 1)[0]
+    if not first.startswith(SECTION_PREFIX) or "\n" not in chunk_text:
+        return ""
+    return first[len(SECTION_PREFIX) :].strip()
+
+
+def without_section_header(chunk_text: str) -> str:
+    """A chunk's text without its ``Section:`` first line (the body only); others unchanged."""
+    return chunk_text.partition("\n")[2] if section_path(chunk_text) else chunk_text
+
+
 def header_context(chunk_text: str, path: str) -> str:
     """What a chunk's ``File: path · …`` header says after the path, without ``(lines a-b)``.
 
@@ -77,6 +103,11 @@ def section_of(chunk_text: str, path: str, first_line: int, start: int, end: int
 
     Strict on purpose: a line after a later heading in the chunk is never given the header's
     section, and only the innermost title of a heading inside the body is returned.
+
+    A chunk split at headings (D-104) may start with headings that have no text of their own and
+    is then named by the last of them, a heading inside the body. Lines above that heading are
+    not in its section: they get ``""``. The heading itself and the lines below it get the header's
+    path.
     """
     context = header_context(chunk_text, path)
     body = chunk_text.partition("\n")[2]
@@ -84,10 +115,26 @@ def section_of(chunk_text: str, path: str, first_line: int, start: int, end: int
     starts = [first_line + body.count("\n", 0, h.start) for h in headings]
     if any(start < at <= end for at in starts):
         return ""
+    named = _named_heading(context, headings, starts, first_line)
+    if named is not None and start < named:
+        return ""
     for heading, at in reversed(list(zip(headings, starts, strict=True))):
         if first_line < at <= start:
-            return heading.title
+            return context if at == named else heading.title
     return context
+
+
+def _named_heading(
+    context: str, headings: list[Heading], starts: list[int], first_line: int
+) -> int | None:
+    """The line of the heading inside the body that the header names: the last heading of the
+    body, after the first line, whose title is the innermost title of the header's path (D-104).
+    ``None`` when the header names the section the first line is in (every chunk made before
+    D-104, and every chunk that does not start with headings without text)."""
+    if not headings or starts[-1] <= first_line or not context:
+        return None
+    innermost = context.split(SEPARATOR)[-1]
+    return starts[-1] if " ".join(headings[-1].title.split()) == innermost else None
 
 
 def section_at(chunk_text: str, path: str, first_line: int, line: int) -> str:
@@ -103,8 +150,9 @@ def without_numbering(heading_path: str) -> str:
 
 
 def split_header(chunk_text: str) -> tuple[str, str]:
-    """``(header line, body)`` of a folder file's chunk; ``("", chunk_text)`` without a header."""
-    if not chunk_text.startswith(FILE_PREFIX):
+    """``(header line, body)`` of a folder file's chunk or a ``Section:`` chunk (D-105);
+    ``("", chunk_text)`` without a header."""
+    if not chunk_text.startswith(FILE_PREFIX) and not section_path(chunk_text):
         return "", chunk_text
     header, _, body = chunk_text.partition("\n")
     return header, body
@@ -112,7 +160,10 @@ def split_header(chunk_text: str) -> tuple[str, str]:
 
 def header_content(header: str) -> str:
     """What a ``File:`` header line states: path and section or symbol, without ``(part N)``,
-    ``(lines a-b)`` and the numbering of the headings (``""`` for a line that is no header)."""
+    ``(lines a-b)`` and the numbering of the headings (``""`` for a line that is no header).
+    A ``Section:`` line states its heading path without the numbering."""
+    if header.startswith(SECTION_PREFIX):
+        return f"{SECTION_PREFIX}{without_numbering(header[len(SECTION_PREFIX) :].strip())}"
     if not header.startswith(FILE_PREFIX):
         return ""
     where = _LOCATION_SUFFIX.sub("", header[len(FILE_PREFIX) :])

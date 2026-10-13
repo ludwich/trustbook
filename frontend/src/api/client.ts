@@ -38,6 +38,7 @@ import type {
   GateLogEntry,
   SourceEstimate,
   SourceEstimateItem,
+  ReindexStatus,
   IdeationAnswer,
   IdeationEstimate,
   IdeationSession,
@@ -420,6 +421,10 @@ export const api = {
   /** How long adding these would take on this computer (SPEC §11). */
   estimateSources: (sid: string, items: SourceEstimateItem[]) =>
     request<SourceEstimate>("POST", `/api/spaces/${enc(sid)}/sources/estimate`, { items }),
+  /** Sources of the space whose chunks an older chunker made (D-106). */
+  getReindex: (sid: string) => request<ReindexStatus>("GET", `/api/spaces/${enc(sid)}/reindex`),
+  /** Queue a re-index of those sources (one queue job each). */
+  startReindex: (sid: string) => request<ReindexStatus>("POST", `/api/spaces/${enc(sid)}/reindex`),
   browse: (path: string) => request<BrowseListing>("GET", `/api/browse?path=${enc(path)}`),
 
   // Chat
