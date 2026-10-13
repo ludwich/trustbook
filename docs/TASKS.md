@@ -1,11 +1,12 @@
 # Phase 4 — Ideation (branch `phase-4`)
 
 Gates 3 and 3b passed (2026-10-12 and 2026-10-13) and are merged into `main` (tags `phase-3`, `phase-3b`).
-`phase-4` is rebased onto `main`; PR #6 targets `main`.
+`phase-4` is rebased onto `main`; PR #6 targets `main`. All SPEC §14 phases are done; the next phase waits
+for Ludwig (proposal: `docs/BACKLOG.md`, "Priorities").
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
-## Status: built, Gate 4 waiting for Ludwig
+## Status: Gate 4 passed (Ludwig, 2026-10-13; #9 and seed dismiss not tested), #6 squash-merged, tagged `phase-4`
 - [x] Backend: schema v6, map, prompt, engine (per-sentence grounded recommendations), service, API + SSE, brief,
   estimate, shared `api/grounded.py`, isolation guards (D-093..D-101)
 - [x] Frontend: Ideation tab (entry, question card, branch map, finish/export/continue, resume, running state; D-102)

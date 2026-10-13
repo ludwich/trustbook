@@ -2,6 +2,43 @@
 
 Ideas accepted for later, not scheduled in a phase. SPEC §16 lists what is out of scope for the POC.
 
+## Priorities (after Gate 4, 2026-10-13)
+
+All SPEC §14 phases have passed. Order follows SPEC §15: grounding correctness > data safety > simplicity >
+performance > features. Details for each item are in the sections below.
+
+**P1: correctness of what the user reads (small, fix first)**
+- G4-3 risks attached to the wrong branch in the brief (off by one).
+- G4-1 a chunk spanning several headings is labelled with the first one (viewer header and brief anchors);
+  with "Web section header", the same problem for web, paste and upload chunks.
+- G3-2 ref-near-10 refused in a code-only space: find what retrieval misses before touching grounding.
+- G3-3 a two-model-family smoke check before every gate, so a change tuned to one model family is caught.
+- Gate items not yet tested: Gate 3b #8 (Claude Code skill behaviour), Gate 4 #9 (request log), Gate 4 seed
+  dismiss with ×.
+
+**P2: usability and setup (small)**
+- G3b-2 optional API key for custom chat and speech-to-text endpoints.
+- G3b-1 `python -m trustbook_cli` fallback and a Git Bash shim for locked-down Windows.
+- G3-1 code symbol in the citation viewer header.
+- G4-2 a reload keeps the Ideation tab.
+- G4-4 source-list warnings and long file names wrap; the folder warning shows one line per problem.
+- CLI nits: `http_status` on a known 401; a "loading models" state instead of "reading 0%".
+
+**P3: features (larger, each needs its own design)**
+- Questions that name a source (scope retrieval to it, or point to the overview).
+- Summary tree for overview questions ("what is this repo about?").
+- MCP server over the CLI's client; `trustbook ideas` in the CLI.
+- Embeddings via an endpoint (GPU indexing without a CUDA image).
+- Speaker labels in transcripts (diarization), so transcript windows show who spoke.
+
+**P4: retrieval tuning (measure first)**
+- Definition slices, smaller document children.
+
+**Done or superseded:** Phase 3b CLI (merged, tag `phase-3b`); code-aware verification (Phase 3, D-045);
+the citable transcript window (superseded by D-091's non-citable windows).
+
+**Out of scope for the POC (SPEC §16):** "Suggest ideas", studio outputs, analyzers and the rest of §16.
+
 ## From Gate 1 (2026-10-10)
 
 ### Questions that name a source
@@ -29,7 +66,7 @@ Options to evaluate in Phase 3:
 
 ## From Gate 3 (2026-10-11)
 
-### Phase 3b: CLI for agents (scheduled right after Gate 3; details in docs/TASKS.md)
+### Phase 3b: CLI for agents (done: merged after Gate 3b, tag `phase-3b`)
 A `trustbook` CLI over the local HTTP API with `--json` output and stable exit codes, plus a Claude Code
 skill, so agents can add sources and ask grounded questions. It goes through the same grounding as the UI.
 
@@ -45,7 +82,7 @@ premise, and are rebuilt on every `CHUNKER_VERSION` change.
 
 ## From Gate 3 round 2b, parent/child retrieval (2026-10-11, D-077)
 
-### Transcript window
+### Transcript window (superseded by D-091: non-citable windows, merged in Phase 3b)
 A transcript chunk's parent is a query-time window of its ordinal neighbours (±1, then ±2), promoted as
 ordinary citable chunks with their own `start_s` / `end_s` / speaker, within the same 900-token promotion
 budget (no separate, larger cap). `store.chunks_at_ordinals` already serves it. Ships with the first
@@ -101,3 +138,36 @@ retry, rephrase or answer from its own knowledge (D-090).
 - `sources add --wait` shows no progress for about 30 s while the embedder loads on first use. On a cold CI
   runner the first paste sat at "reading 0%" for 161–300+ s (startup calibration plus one embedder per
   indexing stream). Show a "loading models" state instead of reading 0%.
+
+## From Gate 4 pass (2026-10-13)
+
+### G4-1 Chunk heading for chunks that span several headings
+Document chunks can span several headings, and the viewer header and the brief's anchors show only the first
+("Example: Specific SSL Version" for a retry claim whose text is under "Example: Automatic Retries"). Either
+split chunks at headings (a chunker bump and re-index) or show the heading nearest the cited text.
+
+### G4-2 Reload keeps the Ideation tab
+Reloading the page lands on the Chat tab, not Ideation. The session itself resumes correctly.
+
+### G4-3 Risks attached to the wrong branch
+In the brief, risks are attributed to the branch answered just before the one they concern ("Retrying too
+aggressively" shows "from Progress bar implementation"). Attach a risk to the branch it concerns.
+
+### G4-4 Source-list messages are clipped
+Source-list warnings and errors, and long file names, do not wrap and are clipped at the sidebar edge.
+The folder warning also joins two unrelated messages into one sentence (the skipped brief, and "very little
+text" about `notes.md`); show one line per problem.
+
+### Gate items not yet tested
+- Gate 4 #9: every ideation call (seed, turns, judge) is in Settings → Request log.
+- Gate 4 #3: dismissing a waiting seed with × (covered by Playwright `ideation.spec.ts`).
+
+### Ideation in the CLI
+A `trustbook ideas` command over the ideation API (start, answer, finish, export), with the same JSON
+contract.
+
+## From Gate 3b known limits
+
+### Speaker labels in transcripts
+No reader sets speakers yet (speech-to-text and YouTube captions have none), so transcript windows show only
+times. A permissively licensed diarization step would label speakers.

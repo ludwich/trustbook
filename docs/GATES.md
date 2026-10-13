@@ -3,17 +3,11 @@
 Each phase ends at a gate (SPEC §14). Ludwig verifies it on his laptop with the published `-rc` image and
 reports **pass** or **fail**.
 
-## Waiting for Ludwig: Gate 4
+## Status: all SPEC phases passed (2026-10-13)
 
-**Gate 3 passed** on 2026-10-12 and **Gate 3b passed** on 2026-10-13 (results in their sections; #8, the
-Claude Code skill, was waived, not tested). Both are squash-merged into `main` and tagged `phase-3` and
-`phase-3b`.
-
-| # | Gate | Branch · PR | Image (`TRUSTBOOK_IMAGE_TAG`) | What to test | Section |
-|---|---|---|---|---|---|
-| 1 | **Gate 4: Ideation** | `phase-4` · #6 → `main` | `phase-4-rc` | **Back up your Trustbook folder first** (spaces migrate to schema v6, which older images cannot open). A session in `Smoke` with cited recommendations, accept/answer/skip/dismiss, resume, Finish now mid-session, Export, a full session to Complete, and briefs never reaching chat | "Gate 4 — Ideation" |
-
-**After a pass:** I squash-merge the PR and tag the phase on `main`. If a gate fails, I fix it on its own branch.
+Gates 0–4 have passed. Each phase is squash-merged into `main` and tagged (`phase-0` … `phase-4`, plus
+`phase-3b`). Not tested and waived items are recorded in each gate's "Result". No gate is waiting. What is left is
+in `docs/BACKLOG.md`, grouped by priority at the top.
 
 ---
 
@@ -610,6 +604,25 @@ Other checks:
   and a Mermaid mindmap. Export downloads it.
 - **Briefs never become a source.** Linking a folder skips them. Uploading or pasting a brief, or linking a
   Trustbook data or space folder, is refused.
+
+### Result: passed (Ludwig, 2026-10-13, `phase-4-rc`, Qwen3.6, `Smoke`)
+
+- **#1 pass:** the session starts with 4 branches.
+- **#2 pass:** the retry recommendation is verified and cites `advanced.rst` 1032–1056, followed by
+  Suggestion-tagged sentences. The viewer opens on the cited chunk.
+- **#3 pass:** own answer, accept (twice) and skip all work; the map and "X resolved, Y open" update.
+  **Dismissing a seed with × was not tested** (no waiting non-current branch appeared in his session; covered
+  by the Playwright test `ideation.spec.ts`).
+- **#4 pass:** resume keeps everything (reload lands on Chat, G4-2).
+- **#5 pass:** Finish now mid-session: the brief has the idea, the Q&A with accepted answers marked, cited
+  anchors, risks, open questions (waiting) and the mind map.
+- **#6 pass:** full session, 4 resolved / 0 open; open questions list only the skipped branch.
+- **#7 pass:** a chat question about his answers is refused (`not_in_sources`); the source list is unchanged.
+- **#8 pass:** the brief is skipped in a linked folder and refused on upload, with plain reasons.
+- **#9 not tested:** the request log.
+- **#10 pass (CLI):** `ask` exits 0 with a verified answer, a refusal exits 2.
+- **Backlog, not blocking** (`docs/BACKLOG.md`, "From Gate 4 pass"): G4-1 chunk heading, G4-2 reload tab,
+  G4-3 risk branch off by one, G4-4 clipped source-list messages, and the joined folder warning.
 
 ### Setup
 1. **Back up first.** Copy your `Trustbook` data folder. Opening a space with this image migrates its `space.db` to
