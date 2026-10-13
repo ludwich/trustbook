@@ -208,6 +208,8 @@ Calibration = {"version":int,"pipeline":str|null,"measured_at":str,"cpu_count":i
 // pipeline (version 6+) = "calibration-<CALIBRATION_VERSION>|chunker-<CHUNKER_VERSION>|embeddings-<model>@<revision>".
 // On startup calibration re-runs when version < CALIBRATION_VERSION or pipeline differs from the
 // installed one, so a chunker or embedding-model change always re-measures (D-057).
+// GET /api/calibration → {"status", "results", "outdated": bool}: outdated results show "Out of date" in
+// Settings and the queued re-run is titled "Measure this computer's speed again (indexing has changed)" (D-107).
 ```
 
 ## Phase 1: sources, index, retrieval and chat
@@ -218,7 +220,7 @@ Calibration = {"version":int,"pipeline":str|null,"measured_at":str,"cpu_count":i
 |---|---|
 | `ingest/` | One function per source type that turns an origin into a `Snapshot` (markdown text + offset map), plus the job handler that runs parse → chunk → embed → index and moves `status` along |
 | `parse/` | Docling (PDF, DOCX, PPTX, XLSX) with pypdf fallback, plain text/Markdown, Trafilatura + headless-browser fallback, yt-dlp captions, audio → STT (with a voice-activity check) |
-| `chunking/` | Document/web chunker (heading-aware, target 500, max 800, overlap 80 tokens), transcript chunker, fallback code chunker (SPEC §7.3) |
+| `chunking/` | Document/web chunker (heading-aware: every heading starts a chunk, D-104; target 500, max 800, overlap 80 tokens within a section), transcript chunker, fallback code chunker (SPEC §7.3) |
 | `index/` | `SpaceIndex`: LanceDB dataset in `<space>/vectors/`, table `chunks` (chunk_id, source_id, text, vector), vector + FTS search filtered by source ids |
 | `retrieval/` | Enabled-source filter → vector top 40 + FTS top 40 → RRF (k = 60) → rerank top 40 → top 8 within ~6,000 tokens (+ guarded chunks, constants and callee definitions; ties ordered by content, D-059) |
 | `chat/` | Conversations, prompt, forced-citation JSON (layer 3), refusal before generation (layer 2), SSE streaming, overview + suggested questions |
@@ -251,6 +253,13 @@ A **document file's** locator (`.md`, `.rst`, `.txt`, … and parsed documents i
 a paged document file: `{"file":"report.pdf","pages":[3],"heading":"Results"}`. Code locators never have
 `heading`, which is how a file chunk is told to be a document. Chunks indexed before `p3-treesitter-5` have no
 `heading` and a bare `File: <path>` first line.
+Since chunker `p5-headings-7` (D-104, D-105) every heading starts a chunk (documents, web pages, pasted and
+uploaded text, parsed PDFs), so a chunk holds one section's text and `heading`, the header path and the D-077
+parent all name that section; `"headings"` is no longer written (older chunks may still have it). Web, paste and
+upload chunks under a heading start with `Section: <heading path>` (`Section: Advanced Usage › Timeouts`), and
+uploaded PDF chunks under a heading get `"heading"` in their page locator. A source records the chunker version of
+each kind of chunk it holds in `stats.chunkers` (`{"code"?, "document"?, "transcript"?}`, D-106); when one is older
+than the installed chunker the space offers a re-index (below).
 
 ### Sources API
 - `GET /api/spaces/{sid}/sources` → `Source[]` (creation order)
@@ -263,6 +272,12 @@ a paged document file: `{"file":"report.pdf","pages":[3],"heading":"Results"}`. 
 - `PATCH /api/spaces/{sid}/sources/{source_id}` body `{"enabled"?: bool, "title"?: str}` → `Source`
 - `PUT /api/spaces/{sid}/sources/enabled` body `{"source_ids": [str], "enabled": bool}` → `Source[]` (group checkboxes)
 - `POST /api/spaces/{sid}/sources/{source_id}/refresh` → `Source` (url, youtube, folder: new dated snapshot)
+- `GET /api/spaces/{sid}/reindex` → `{"needed": bool, "sources": [{"id","title","reindexing": bool}],
+  "reindexing": bool, "estimate_seconds": int|null, "estimate_summary": str|null, "confirm": bool}`: the sources
+  holding chunks of an older chunker (D-106) and the estimate for those not queued yet
+- `POST /api/spaces/{sid}/reindex` → `202` same shape: one `ingest` job per such source ("Re-index “Title”", with
+  its estimate). The job chunks the stored snapshot again; the source stays `ready` and chat keeps using its
+  current chunks until the new rows replace them in one transaction (unchanged chunks keep id and vector)
 - `DELETE /api/spaces/{sid}/sources/{source_id}` → `204` (cancels its job, removes its folder, chunks and vectors)
 - `GET /api/spaces/{sid}/sources/{source_id}/snapshot` → `{"markdown": str, "map": Map}`
 - `GET /api/spaces/{sid}/sources/{source_id}/original` → the uploaded file

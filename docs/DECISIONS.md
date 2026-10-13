@@ -1938,3 +1938,107 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     said "by default, Requests does not retry failed connections… retries with backoff using urllib3.util.Retry",
     citing `advanced.rst` 1032–1056, followed by the model's own 502/503/504 suggestion, uncited. Turns took
     7–27 s, and the brief's "Cited anchors" lists both.
+
+## 2026-10-13 — Phase 5 (hardening)
+
+### D-104 Every heading starts a chunk, so a chunk's section label is true for all of its text (G4-1)
+- **Finding (Gate 4):** the source viewer header and the brief's anchors named "Example: Specific SSL Version" for a
+  retry claim whose text is under "Example: Automatic Retries" in requests' `docs/user/advanced.rst`. A chunk could
+  hold the text of several sections: a section under 100 tokens merged with the next one (or, D-068, the one
+  before), and a long section's next chunk began with up to 80 tokens of overlap, so a following heading arrived
+  while the chunk was still "small" and joined it. The header and parent then named the first section, the
+  locator the largest (D-053). Measured on the 30 document files of the Smoke corpus (`requests`, production
+  tokenizer; script `g41/stats.py` in the session scratchpad): **69 of 173 chunks** had a header or `heading` that
+  was not the section of every line of their text (`advanced.rst` lines 1–60 under no heading but holding
+  "Advanced Usage" and "Session Objects"; SOCKS 672–703 also holding "Compliance"). The corpus' own retry chunk
+  (1032–1056) was already correct; the Gate 4 label came from the same merging.
+- **Decision** (`app/chunking/document.py` `pack_units(split_headings=True)`, `dispatch.py`):
+  - With a document's headings (document files, web pages, pasted and uploaded text, parsed PDFs) **every heading
+    starts a new chunk**. Long sections are still cut at the 500-token target, and their overlap comes from the same
+    section only.
+  - **Tiny sections are never merged with another section.** The one exception: a heading with no text of its own
+    (the next line is another heading, as "Advanced Usage" right above "Session Objects", or an AsciiDoc document
+    title) stays with the next heading, and the chunk is named by the **nearest** heading, the last one: its path
+    already holds the outer heading (`Guide › Install`). Text before the first heading is a chunk of its own, with
+    no section.
+  - A chunk's section (`chunk_section`) is the section of its last character: the header path, the locator's
+    `heading` and the D-077 parent all come from it, so they always agree. `"headings"` is no longer written (no
+    chunk spans sections); the eval runner still reads it from older chunks.
+  - **Grounding is not loosened.** `section_of` (D-069/D-071): when the header names a heading inside the chunk (a
+    chunk starting with headings without text), the lines above that heading get no section; the heading and the
+    lines below it get the header's path. Chunks made before this read exactly as before.
+  - `CHUNKER_VERSION` = `p5-headings-7`.
+- **Measured** (same corpus and tokenizer): document chunks 173 → 345 (HISTORY.md 63 → 167: every release is its own
+  chunk), mean 328 → 181 tokens, max 560 unchanged, 25 chunks under 50 tokens (1 before); chunks whose label is not
+  the section of all their text 69 → **0**. The retry text is "File: docs/user/advanced.rst · Advanced Usage ›
+  Transport Adapters › Example: Automatic Retries (lines 1032-1056)", locator heading "Example: Automatic Retries";
+  a web page shaped like it (`### Example: Specific SSL Version` with one sentence, then the retry section) now
+  gives the retry text its own chunk (`test_a_retry_example_after_a_short_ssl_example_…`).
+- **Reason:** grounding correctness (§15): what the user reads must be true of every cited line. Ludwig chose
+  splitting over showing the heading nearest the cited text.
+- **Alternatives:** label a chunk with every heading it spans (`A + B`): the section would then vouch for lines in
+  the other section (D-069), a loosening; merge tiny sections only when they share a parent: still two sections
+  under one label; show the heading nearest the cited lines at display time: fixes the viewer, not the header the
+  model, the checker and the judge read. Not measured here: answer quality with smaller chunks (many changelog
+  entries are now 20–60 tokens); D-077's parent promotion and the 6,000-token budget absorb more, smaller chunks,
+  and the Gate 5 run measures it.
+
+### D-105 Web, paste and upload chunks start with `Section: <heading path>`
+- **Finding (backlog "Web section header"):** a web, pasted or uploaded chunk named its section only in the prompt's
+  `Source:` line, from the innermost heading of a flat list of `#` sections (no nesting, not fence-aware). The
+  embedding, full-text search and the grounding checker never saw it, unlike a document file's `File:` header
+  (D-068).
+- **Decision:** these sources use the same heading finder as Markdown files (`find_headings`, nested paths, ATX and
+  setext, fenced code holds none) and D-104's split. A chunk under a heading starts with `Section: Outer › Inner`
+  (`header.section_header`); text before the first heading has no first line. The locator keeps `heading`
+  (innermost) and `offset`; an uploaded PDF's page locator gains `heading`; the D-077 parent key stays
+  `#o<heading start>`. Consumers, like the `File:` header:
+  - embedded, searched (kept by `search_text`) and part of the grounding checker's premise;
+  - layer 5 reads it through `header_content`: names count, a heading's numbering never does (D-071);
+  - the judge's numbered lines and the focus window leave it out (numbering unchanged); the judge's excerpt title
+    names the path (`Docs (section “Guide › Install”), lines 1-2`);
+  - the prompt's `Source:` line no longer repeats the section when the chunk carries it (older chunks keep it);
+  - the mock never quotes it; the viewer's text fallback hides it (the label names the section).
+- **Reason:** the same section context for every document, whatever its source. **Alternatives:** keep the path in
+  the locator only (not embedded, not searchable, not seen by the checker); a `File:`-shaped line (would make every
+  `File:` consumer treat web chunks as files). Known limit (D-068): an uploaded single `.rst` file is still read
+  with Markdown headings only.
+
+### D-106 Per-kind chunker versions; a space says when it needs re-indexing and re-indexes in place
+- **Decision:**
+  - `CHUNKER_VERSIONS` gives the version that makes each kind of chunk: `code` and `transcript` stay
+    `p3-treesitter-6`, `document` is `p5-headings-7`. Folder file records store their kind's version, so a refresh
+    after this bump re-chunks document files and keeps code chunks (same ids and vectors).
+  - A ready source records `stats.chunkers` (version per kind it holds). Older sources are judged by their folder
+    file records, or by their first chunk (transcripts unchanged, everything else outdated).
+  - `GET /api/spaces/{sid}/reindex` lists the outdated sources and the estimate (embedding the outdated chunks,
+    an upper bound); `POST` queues one ordinary `ingest` job per source ("Re-index “Title”", estimate in the payload,
+    so the queue shows progress and ETA).
+  - **The space tells the user:** a banner on the space page, "This space was indexed with an older version.
+    Re-index to get accurate section labels." with the number of sources, the estimate and a **Re-index** button
+    (a confirmation above two minutes, as for adds). While it runs: "Re-indexing this space… Chat keeps using the
+    current index until it is done." with a link to the queue. The banner stays until every source is current.
+  - **The job chunks the stored snapshot again** (`snapshot.md` and `map.json`): nothing is read, fetched or parsed
+    again, so a re-index never changes what a source says, needs no network and works for pasted text and uploads
+    (which cannot be refreshed). Folder files whose records are current keep their chunks; any chunk whose offsets
+    and text are unchanged keeps its id and vector (old citations still open, nothing embedded twice).
+  - **Chat keeps working on the old index:** the source stays `ready`; the new chunks are embedded first as vectors
+    without rows (retrieval skips them); then the rows are swapped in one transaction, the old vectors deleted and
+    the full-text index refreshed. A failed or cancelled re-index removes only the new vectors; the source stays as
+    it was, the banner stays, and the queue shows the error. A refresh or delete meanwhile supersedes it.
+- **Known costs:** during the embedding the rowless vectors take part of the vector top 40 (fewer candidates; a log
+  warning per question); citations of chunks that changed no longer open their passage (as after a refresh of a
+  changed file). Re-indexing the `requests` folder embeds at most its 345 new document chunks (code is kept).
+- **Reason:** never silent (Ludwig): an index made by an older chunker shows wrong section labels until rebuilt.
+- **Alternatives:** re-index automatically at start (spends minutes of CPU unasked, and on all spaces); a
+  per-source Refresh (re-fetches web pages, impossible for pastes and uploads); one global version for all kinds
+  (re-embeds every code chunk for a document change); delete and rebuild (chat has no index meanwhile).
+
+### D-107 Calibration version 7, and an outdated speed test is shown, not silent
+- **Decision:** `CALIBRATION_VERSION` = 7 with the chunker bump (the pipeline key changes with `CHUNKER_VERSION`
+  anyway, D-057). On start an outdated result queues a run titled "Measure this computer's speed again (indexing
+  has changed)"; `GET /api/calibration` gains `outdated`, and Settings shows an **Out of date** badge with "Indexing
+  has changed since this was measured. The speed test runs again on its own; until then, estimates use these
+  numbers."
+- **Reason:** the rates are chunks per second, and documents now give about twice as many, smaller chunks.
+  **Alternatives:** re-run silently at start (the D-057 behaviour; the queue entry did not say why).
