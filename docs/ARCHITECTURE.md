@@ -860,7 +860,8 @@ What `eval/runner.py` relies on beyond the Phase 1–2 contract (details: `eval/
 
 Schema v6 (`space/006_ideation.sql`) adds `ideation_nodes.origin` (`seed`/`answer`, default `answer`),
 `recommendation` (JSON `Recommendation`), `asked_at`, `answered_at`, `diagnostics` (JSON, never returned), and
-`ideation_sessions.risks` (JSON `[{"text","node_id"}]`, default `[]`) and `brief_at`. `recommended_answer` holds
+`ideation_sessions.risks` (JSON `[{"text","node_id"}]`, default `[]`; since D-116 each risk also stores
+`branch_source`, `label`/`missing`/`unknown`, which the API never returns) and `brief_at`. `recommended_answer` holds
 the recommendation's plain text (what "accept" stores as the answer); `citations` the flat
 `[{"chunk_id","verifier_score"}]` of its verified sentences. Images before Phase 4 cannot open a v6 `space.db`.
 
@@ -928,7 +929,7 @@ SessionSummary = {"id": str, "title": str, "idea": str, "status": "active"|"fini
 Session = SessionSummary + {
   "nodes": Node[],                    // tree pre-order (parents before children, siblings by ordinal)
   "current_node_id": str|null,        // the branch whose question waits for an answer
-  "risks": [{"text": str, "node_id": str|null}],   // node_id: the branch whose answer raised it
+  "risks": [{"text": str, "node_id": str|null}],   // node_id: the branch it is about (D-108); null: general (D-116)
   "running": bool}                    // a turn of this session is in progress on the server
 Node = {"id": str, "parent_id": str|null, "ordinal": int, "depth": int,   // depth 0 = seed level; max 2
         "title": str, "status": "tentative"|"open"|"resolved"|"dismissed",

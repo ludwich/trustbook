@@ -9,6 +9,7 @@ delete changes nothing (D-098).
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -93,6 +94,24 @@ def decode_risks(raw: str | None) -> list[Risk]:
         return _risks.validate_json(raw or "[]")
     except ValidationError:
         return []
+
+
+def encode_risk(risk: Risk) -> dict[str, Any]:
+    """The stored shape: the API's ``{"text", "node_id"}`` plus ``branch_source`` when known
+    (it is excluded from the API, D-116)."""
+    stored: dict[str, Any] = risk.model_dump()
+    if risk.branch_source is not None:
+        stored["branch_source"] = risk.branch_source
+    return stored
+
+
+_PUNCTUATION = re.compile(r"[^\w\s]")
+
+
+def risk_key(text: str) -> str:
+    """``text`` for duplicate detection (D-116): lower case, punctuation as spaces, whitespace
+    collapsed. Exact match on this only, no fuzzy matching."""
+    return " ".join(_PUNCTUATION.sub(" ", text.casefold()).split())
 
 
 def _status(value: str) -> NodeStatus:
@@ -333,13 +352,20 @@ class IdeationStore:
                 self._add_nodes(session, session_id, branches, "answer", now)
             if risks:
                 current = decode_risks(row.risks)
+                # The same text anywhere, or the same normalised text on the same branch (a
+                # general risk's branch is None), is not added again (D-116).
                 seen = {r.text.casefold() for r in current}
+                keys = {(r.node_id, risk_key(r.text)) for r in current}
                 for risk in risks:
                     text = truncate(risk.text, RISK_CHARS)
-                    if text and text.casefold() not in seen and len(current) < MAX_RISKS:
+                    key = (risk.node_id, risk_key(text))
+                    if not text or text.casefold() in seen or key in keys:
+                        continue
+                    if len(current) < MAX_RISKS:
                         seen.add(text.casefold())
-                        current.append(Risk(text=text, node_id=risk.node_id))
-                row.risks = json.dumps([r.model_dump() for r in current], ensure_ascii=False)
+                        keys.add(key)
+                        current.append(risk.model_copy(update={"text": text}))
+                row.risks = json.dumps([encode_risk(r) for r in current], ensure_ascii=False)
             row.updated_at = now
             session.add(row)
             session.commit()

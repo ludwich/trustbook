@@ -5,7 +5,7 @@ Seed: ``{"title", "branches": [str]}`` with at least 3 distinct titles (else
 
 Turn: ``{"question", "recommendation": {"sentences": [...]}, "new_branches", "risks"}``. Each
 risk is ``{"text", "branch"}`` with the label of the branch it is about (a plain string is
-accepted and has no branch; the engine then attaches it to the answered branch, D-108).
+accepted and has no branch; the engine then stores it as a general risk, D-108/D-116).
 Recommendation sentences differ from chat answers in one way only (D-094): a sentence with an
 empty ``chunk_ids`` list is kept as a *suggestion* (chat drops it). A sentence citing any id that
 was not in the prompt is dropped, never turned into a suggestion. Inline citation markers are
