@@ -243,6 +243,36 @@ docker compose exec -T app trustbook sources add folder trustbook-eval/requests 
 Get-Content question.txt | docker compose exec -T app trustbook ask - --space Smoke --json
 ```
 
+## Checking the Claude Code skill (Gate 3b #8)
+
+Once: copy `skills/trustbook/` to `%USERPROFILE%\.claude\skills\trustbook\`. Then, with Trustbook
+running, the `Smoke` space indexed and `trustbook` on `PATH`, run in PowerShell:
+
+```powershell
+claude -p "Using Trustbook space Smoke: how does requests encode Basic auth credentials?" --allowedTools "Bash(trustbook:*)"
+claude -p "Using Trustbook space Smoke: what is the capital of Mongolia?" --allowedTools "Bash(trustbook:*)"
+```
+
+`-p` runs Claude Code once, without the interactive screen, and prints its reply. `--allowedTools`
+lets it run `trustbook` without asking. With the fallback, allow `"Bash(python -m trustbook_cli:*)"`
+instead; through Docker, `"Bash(docker compose exec:*)"`.
+
+What to expect:
+
+1. **Basic auth:** an answer with Trustbook's citations: the source and the file with line numbers
+   (in the requests code or docs).
+2. **Mongolia:** Claude says plainly that this is not in the sources of `Smoke` (Trustbook's refusal
+   message). Nothing else: no answer from its own knowledge (no "Ulaanbaatar"), no second try, no
+   rephrased question, no other space.
+
+To check that Claude asked only once, count the questions Trustbook received. Every `trustbook ask`
+adds a conversation titled `CLI: …` to the space:
+
+```powershell
+$s = ((Invoke-RestMethod http://localhost:8484/api/spaces) | Where-Object name -eq Smoke).id; $n = { @((Invoke-RestMethod "http://localhost:8484/api/spaces/$s/conversations") | Where-Object title -like 'CLI:*').Count }; $a = & $n
+claude -p "Using Trustbook space Smoke: what is the capital of Mongolia?" --allowedTools "Bash(trustbook:*)"; "Questions asked: $((& $n) - $a)"   # expect 1
+```
+
 ## Secrets
 
 The CLI never reads settings from the API and the API never returns an API key (only a hint like
