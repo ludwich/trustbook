@@ -108,6 +108,20 @@ describe("sources panel", () => {
         source({ id: "q1", title: "Waiting.pdf", status: "queued" }),
         source({ id: "r1", title: "Big.pdf", status: "indexing", progress: 0.4 }),
         source({
+          id: "w1",
+          title: "Notes.txt",
+          status: "reading",
+          progress: 0,
+          stage: "waiting_for_calibration",
+        }),
+        source({
+          id: "l1",
+          title: "Paste",
+          status: "indexing",
+          progress: 0.4,
+          stage: "loading_models",
+        }),
+        source({
           id: "a1",
           title: "Call.m4a",
           group: "transcripts",
@@ -130,6 +144,11 @@ describe("sources panel", () => {
 
     const busy = screen.getByTestId("source-r1");
     expect(within(busy).getByText("Indexing…")).toBeInTheDocument();
+    // A real wait the backend reports, instead of "Reading…" at 0 % (D-113).
+    const waiting = screen.getByTestId("source-w1");
+    expect(within(waiting).getByText("Waiting for calibration…")).toBeInTheDocument();
+    expect(within(waiting).queryByText("Reading…")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("source-l1")).getByText("Loading models…")).toBeInTheDocument();
     expect(within(busy).getByRole("progressbar", { name: "Indexing Big.pdf" })).toHaveAttribute(
       "aria-valuenow",
       "40",

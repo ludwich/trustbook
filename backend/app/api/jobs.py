@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from app.api.deps import ServicesDep
 from app.db.models import Job
 from app.jobs.eta import queue_eta, remaining_seconds
+from app.jobs.handlers import JobStage
 
 router = APIRouter()
 
@@ -30,9 +31,11 @@ class JobOut(BaseModel):
     started_at: str | None
     finished_at: str | None
     eta_seconds: int | None = None  # remaining estimate for queued/running jobs
+    # Why a running job shows no progress yet: it waits for calibration or loads a model (D-113).
+    stage: JobStage | None = None
 
     @classmethod
-    def build(cls, job: Job, names: dict[str, str]) -> JobOut:
+    def build(cls, job: Job, names: dict[str, str], stage: JobStage | None = None) -> JobOut:
         return cls(
             id=job.id,
             kind=job.kind,
@@ -47,6 +50,7 @@ class JobOut(BaseModel):
             started_at=job.started_at,
             finished_at=job.finished_at,
             eta_seconds=_rounded(remaining_seconds(job)),
+            stage=stage,
         )
 
 
@@ -72,7 +76,8 @@ class ReorderBody(BaseModel):
 
 
 def job_out(services: ServicesDep, job: Job) -> JobOut:
-    return JobOut.build(job, services.spaces.names() if job.space_id else {})
+    names = services.spaces.names() if job.space_id else {}
+    return JobOut.build(job, names, services.jobs.stage(job))
 
 
 @router.get("/jobs")
@@ -82,7 +87,7 @@ def list_jobs(services: ServicesDep) -> JobsOut:
     jobs = services.jobs.list_for_view()
     workers = services.pool.workers
     return JobsOut(
-        jobs=[JobOut.build(job, names) for job in jobs],
+        jobs=[JobOut.build(job, names, services.jobs.stage(job)) for job in jobs],
         summary=QueueSummary(
             queued=counts.get("queued", 0),
             running=counts.get("running", 0),

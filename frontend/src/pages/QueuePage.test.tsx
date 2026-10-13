@@ -78,7 +78,13 @@ describe("queue view", () => {
         HttpResponse.json(
           jobList(
             [
-              job({ id: "r", title: "Indexing repo", status: "running", eta_seconds: 600 }),
+              job({
+                id: "r",
+                title: "Indexing repo",
+                status: "running",
+                eta_seconds: 600,
+                stage: "loading_models",
+              }),
               job({ id: "q", title: "Reading a.pdf", eta_seconds: 30 }),
               job({ id: "n", title: "Reading b.pdf", eta_seconds: null }),
               job({
@@ -96,6 +102,8 @@ describe("queue view", () => {
     );
     renderApp("/queue");
     expect(await screen.findByTestId("job-eta-r")).toHaveTextContent("about 10 min left");
+    expect(screen.getByTestId("job-stage-r")).toHaveTextContent("Loading models…");
+    expect(screen.queryByTestId("job-stage-q")).not.toBeInTheDocument();
     expect(screen.getByTestId("job-eta-q")).toHaveTextContent("less than a minute left");
     expect(screen.queryByTestId("job-eta-n")).not.toBeInTheDocument();
     // Finished jobs have nothing left.

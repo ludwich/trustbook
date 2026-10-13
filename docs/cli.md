@@ -193,15 +193,19 @@ Shown indented; the CLI writes it on one line.
 |---|---|
 | `trustbook.spaces/1` | `spaces[]`: `{id, slug, name, description, source_count, created_at}` |
 | `trustbook.space/1` | `space`: as above |
-| `trustbook.sources/1` | `space {id, name}`, `sources[]`: `{id, type, title, origin, group, status, progress, failure_reason, failure_next_step, quality_warning, enabled, snapshot_at, commit_hash, stats, created_at, job_id, ahead}` |
+| `trustbook.sources/1` | `space {id, name}`, `sources[]`: `{id, type, title, origin, group, status, progress, failure_reason, failure_next_step, quality_warning, enabled, snapshot_at, commit_hash, stats, created_at, job_id, ahead, stage}` |
 | `trustbook.source/1` | `space {id, name}`, `source`: as above |
 | `trustbook.search/1` | `space {id, name}`, `query`, `results[]`: `{n, title, url, snippet}` |
-| `trustbook.jobs/1` | `jobs[]`: `{id, kind, title, space_id, space_name, status, progress, position, error, created_at, started_at, finished_at, eta_seconds}`, `summary {queued, running, paused, eta_seconds, workers}` |
+| `trustbook.jobs/1` | `jobs[]`: `{id, kind, title, space_id, space_name, status, progress, position, error, created_at, started_at, finished_at, eta_seconds, stage}`, `summary {queued, running, paused, eta_seconds, workers}` |
 | `trustbook.gate_log/1` | `space {id, name}`, `entries[]`: `{id, created, input, decision, confidence, user_correction}` |
 | `trustbook.deleted/1` | `kind` (`space` or `source`), `id`, `name` |
 | `trustbook.error/1` | `message`, `http_status` (the status code of the response that failed: the API's, or for `ask` the chat endpoint's when it answered with an error, e.g. `401` for a rejected key; `null` only when no response was received); `created` only when a `sources add` with several items failed part-way: the sources already added before the error (as in `trustbook.sources/1`), so don't add them again |
 
 Source `status`: `queued`, `reading`, `indexing`, `ready`, `failed`; `progress` is 0–1 or `null`.
+`stage` (sources and running jobs) says why there is no progress yet, else `null`:
+`waiting_for_calibration` (the app measures this computer on first start, after an update that changes the
+models or the chunker, and on "Run again" in Settings; minutes on a slow machine) or `loading_models` (the
+embedding model loads before the first batch). `--wait` shows "waiting for calibration (reading 0%)" or "loading models (indexing 40%)".
 
 ## Examples
 

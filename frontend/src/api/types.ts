@@ -193,7 +193,12 @@ export interface Job {
    * "ingest jobs store their estimate"); absent or null → the queue view shows no per-job time.
    */
   eta_seconds?: number | null;
+  /** Why a running job shows no progress yet (D-113); absent on older backends. */
+  stage?: JobStage | null;
 }
+
+/** A running job waits for the calibration run, or a bundled model is loading (D-113). */
+export type JobStage = "waiting_for_calibration" | "loading_models";
 
 export interface QueueSummary {
   queued: number;
@@ -318,6 +323,8 @@ export interface Source {
   ahead?: SourceAhead | null;
   created_at: string;
   job_id: string | null;
+  /** While reading or indexing: why there is no progress yet (D-113). */
+  stage?: JobStage | null;
 }
 
 export interface PasteSourceCreate {

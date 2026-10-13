@@ -13,6 +13,7 @@ import type { Job, JobStatus, QueueSummary } from "@/api/types";
 import { EmptyState } from "@/components/common/EmptyState";
 import { PageHeader } from "@/components/common/PageHeader";
 import { QueryError } from "@/components/common/QueryError";
+import { STAGE_TEXT } from "@/components/sources/sourceMeta";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -238,6 +239,9 @@ function JobRow({ job, children }: { job: Job; children?: ReactNode }) {
                 ? `Started ${formatTime(job.started_at)}`
                 : `Added ${formatTime(job.created_at)}`}
           </span>
+          {job.status === "running" && job.stage && (
+            <span data-testid={`job-stage-${job.id}`}>{STAGE_TEXT[job.stage]}…</span>
+          )}
           {eta && <span data-testid={`job-eta-${job.id}`}>{eta}</span>}
         </div>
         {showProgress && (

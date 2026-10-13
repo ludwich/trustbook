@@ -106,7 +106,7 @@ def test_paste_source_is_indexed_end_to_end(client: TestClient, space: dict[str,
     assert set(created) == {
         "id", "type", "title", "origin", "group", "status", "progress", "failure_reason",
         "failure_next_step", "quality_warning", "enabled", "snapshot_at", "commit_hash",
-        "stats", "created_at", "job_id", "ahead",
+        "stats", "created_at", "job_id", "ahead", "stage",
     }  # fmt: skip
     assert created["ahead"] is None  # only folder sources whose HEAD moved
 

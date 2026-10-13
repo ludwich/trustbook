@@ -233,7 +233,12 @@ class ModelUseLock:
         self._writers_waiting = 0
 
     @contextmanager
-    def shared(self) -> Iterator[None]:
+    def shared(self, on_wait: Callable[[], None] | None = None) -> Iterator[None]:
+        """Use the models alongside others; ``on_wait`` runs first if calibration holds them."""
+        with self._cond:
+            blocked = self._writer or self._writers_waiting > 0
+        if blocked and on_wait is not None:
+            on_wait()
         with self._cond:
             while self._writer or self._writers_waiting:
                 self._cond.wait()
@@ -403,6 +408,14 @@ class ProviderRegistry:
                 if generation != self._generation:
                     return cast(Embedder, instance)  # settings changed while loading: don't keep it
                 return cast(Embedder, self._replicas.setdefault(slot, instance))
+
+    def ingest_embedder_loaded(self, stream: int) -> bool:
+        """Whether :meth:`ingest_embedder` for ``stream`` is in memory (False: it loads first)."""
+        streams = self.ingest_streams()
+        with self._lock:
+            if streams <= 1:
+                return "embeddings" in self._overrides or "embeddings" in self._instances
+            return stream % streams in self._replicas
 
     def release_replicas(self) -> int:
         """Drop the indexing replicas (about 0.55 GB each in BF16) once indexing is idle (D-054).

@@ -1968,3 +1968,21 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   reachable, bad arguments).
 - **Reason:** simplicity for agents: one field says whether and how the far side answered; the 401 is what a
   user needs to see to fix the key. The event's message is unchanged and still carries no secret.
+
+### D-113 A running job reports "waiting for calibration" or "loading models"
+- **Context:** `sources add --wait` sat at "reading 0%" for 30 s locally and 160–300 s on a cold CI runner. The
+  ingest job was not reading: it waited for the model lock that startup calibration holds, then the first batch
+  of each indexing stream loaded its embedder.
+- **Decision:**
+  - Jobs and sources get a `stage`: `waiting_for_calibration` or `loading_models`, `null` otherwise, shown only
+    while the job runs. It is a state the job is really in, never a guess from elapsed time: the shared model
+    lock reports when a reader has to wait for calibration, and an indexing stream reports that its embedder is
+    not loaded just before it loads it. The first finished batch clears it.
+  - Kept in memory in the job repository (no schema change): it describes this process's threads right now, and
+    a restarted app runs the job again from the start.
+  - Shown in `GET /api/jobs`, the source API, the CLI (`--wait`: "waiting for calibration (reading 0%)",
+    "loading models (indexing 40%)"; `sources list`; `queue`) and the UI ("Waiting for calibration…",
+    "Loading models…" in the source row and the queue).
+- **Reason:** honesty and simplicity: the user sees why nothing moves, and the backend already knows both states.
+- **Alternatives:** a time-based "still starting" hint (a heuristic, wrong on fast and slow machines alike);
+  a stored column (a migration for a value that is stale after a restart).
