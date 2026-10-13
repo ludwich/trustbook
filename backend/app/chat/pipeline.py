@@ -4,9 +4,10 @@
 2. Layer 2: top reranker score below ``refuse_threshold`` → refuse (``not_in_sources``) before
    any model call.
 3. Layer 3: numbered chunks, forced-citation JSON, one retry on unusable JSON, sentences without
-   valid chunk ids dropped. No sentences returned → ``not_in_sources``; sentences returned but
-   none valid, or unusable JSON twice → ``invalid_output``. The model's citations are checked as
-   given (never completed, D-064).
+   valid chunk ids and parts that are only JSON/Markdown syntax dropped, repeated sentences
+   merged into their first occurrence (D-117). No sentences returned → ``not_in_sources``;
+   sentences returned but none valid, or unusable JSON twice → ``invalid_output``. The model's
+   citations are checked as given (never completed, D-064).
 4. Layers 4 and 5 (:mod:`app.grounding.verify`): every sentence is checked against its cited
    chunks. When the refusal rule would fire (more than half failing, or the first sentence
    failing), one regeneration with the same chunks plus
@@ -330,6 +331,21 @@ def failed_sentences_out(
     ]
 
 
+def cleanup_diagnostics(parsed: ParsedAnswer) -> dict[str, object]:
+    """Layer 3's clean-up of a reply (D-117): the syntax fragments it dropped and how many
+    repeated sentences it merged."""
+    if parsed.fragments or parsed.duplicates:
+        logger.info(
+            "Dropped %d syntax fragment(s), merged %d repeated sentence(s)",
+            len(parsed.fragments),
+            parsed.duplicates,
+        )
+    return {
+        "syntax_fragments": [_cap(f) for f in parsed.fragments],
+        "duplicate_sentences": parsed.duplicates,
+    }
+
+
 def retrieval_fingerprint(chunks: Sequence[RetrievedChunk]) -> str | None:
     """A short hash of the ordered context chunk ids (None without a context)."""
     if not chunks:
@@ -568,6 +584,7 @@ def _answer(
     except InvalidOutputError:
         logger.info("Refused: the chat reply was unusable twice")
         return Refused(refusal("invalid_output", question), diagnostics)
+    diagnostics = diagnostics.model_copy(update=cleanup_diagnostics(parsed))
 
     on_stage("checking")
     if not parsed.sentences:
@@ -604,6 +621,7 @@ def _answer(
                 _diagnostics(diagnostics, checked, verifier, True, _Changes(), chunks, sentences),
             )
         parsed = second
+        diagnostics = diagnostics.model_copy(update=cleanup_diagnostics(parsed))
         sentences = parsed.sentences
         checked = meter.check(verifier, sentences, chunks)
 

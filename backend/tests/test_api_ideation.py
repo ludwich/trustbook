@@ -426,6 +426,49 @@ def test_risk_is_attached_to_the_branch_it_concerns(
     assert "- Retrying too aggressively (from “Retry logic”)" in brief
 
 
+def test_risk_without_a_known_label_is_a_general_risk(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-116: the G4-3 pattern again. After answering "Progress bar", a risk with no label, or
+    with a label not on the map, is a general risk, never one of "Progress bar"; a label in its
+    text becomes the branch title. The brief lists general risks without "from"."""
+    sid = env.create("A download tool")["id"]
+    seed = json.dumps({"title": "T", "branches": ["Progress bar", "Retry logic", "File names"]})
+
+    def turn(risks: list[Any]) -> str:
+        sentences = [{"text": "Keep it simple.", "chunk_ids": []}]
+        return json.dumps(
+            {
+                "question": "Q?",
+                "recommendation": {"sentences": sentences},
+                "new_branches": [],
+                "risks": risks,
+            }
+        )
+
+    risks = [
+        "Retrying POST as well as GET has side effects, as asked in n2",
+        {"text": "Downloads may fill the disk", "branch": "n7"},
+    ]
+    chat = ScriptedChat(seed, turn([]), turn(risks))
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
+    session = env.turn(sid)
+    ids = {n["title"]: n["id"] for n in session["nodes"]}
+    session = env.answer(sid, ids["Progress bar"], "answer", "A simple bar.")
+    assert session["risks"] == [
+        {
+            "text": "Retrying POST as well as GET has side effects, as asked in “Retry logic”",
+            "node_id": None,
+        },
+        {"text": "Downloads may fill the disk", "node_id": None},
+    ]
+    env.client.post(env.url(f"/sessions/{sid}/finish"))
+    brief = env.client.get(env.url(f"/sessions/{sid}/brief")).text
+    risks_section = brief.split("## Open risks")[1].split("## Open questions")[0]
+    assert "- Downloads may fill the disk\n" in risks_section
+    assert "(from" not in risks_section
+
+
 def test_unusable_reply_is_an_error_and_ask_again_works(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:

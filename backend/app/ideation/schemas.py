@@ -44,9 +44,21 @@ class Recommendation(BaseModel):
     removed: list[str] = Field(default_factory=list)
 
 
+RiskBranchSource = Literal["label", "missing", "unknown"]
+"""Where a risk's branch came from (D-116): ``label``: the model's label named a branch on the
+map; ``missing``: no label (no branch); ``unknown``: a label not on the map (no branch)."""
+
+
 class Risk(BaseModel):
+    """A risk raised in an answer; ``node_id`` None is a general risk (no branch).
+
+    ``branch_source`` is stored with the session's risks (None: stored before D-116) and never
+    returned by the API, like the turn diagnostics.
+    """
+
     text: str
     node_id: str | None = None
+    branch_source: RiskBranchSource | None = Field(default=None, exclude=True)
 
 
 class NodeOut(BaseModel):

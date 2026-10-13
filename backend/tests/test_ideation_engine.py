@@ -149,6 +149,30 @@ def test_parse_turn_keeps_suggestions_and_drops_unknown_ids() -> None:
     assert parsed.risks == [("Weather", "n2"), ("Cost", None)]
 
 
+def test_parse_turn_drops_syntax_fragments_and_merges_repeats() -> None:
+    """D-117 in recommendations: a fragment is never shown (not even as a suggestion), a
+    repeated sentence is shown once with its citations merged."""
+    reply = turn_json(
+        sentences=[
+            ("Run it in summer.", ["c1"]),
+            ("}]}]}```json{", []),
+            ("Offer a rain plan.", []),
+            ("Run it in summer.", ["c2"]),
+            ("Offer a rain plan.", []),
+        ]
+    )
+    parsed = parse_turn(reply, ["c1", "c2"], expect_question=True)
+    assert [(s.text, s.chunk_ids) for s in parsed.sentences] == [
+        ("Run it in summer.", ("c1", "c2")),
+        ("Offer a rain plan.", ()),
+    ]
+    assert parsed.dropped == ["}]}]}```json{"]
+
+
+def test_turn_prompt_asks_for_titles_not_ids_in_risks() -> None:
+    assert 'Never write an id such as "n3" in the risk\'s text' in TURN_SYSTEM
+
+
 def test_parse_turn_question_rules() -> None:
     with pytest.raises(InvalidOutputError):
         parse_turn(turn_json(question=" "), [], expect_question=True)
@@ -282,13 +306,58 @@ def test_a_risk_is_attached_to_the_branch_it_concerns() -> None:
     assert [(r.text, r.node_id) for r in result.risks] == [("Too costly", "s2")]
 
 
-def test_a_risk_without_a_known_branch_falls_back_to_the_answered_one() -> None:
+def test_a_risk_without_a_known_branch_is_a_general_risk() -> None:
+    """D-116: a missing or unknown label never falls back to the answered branch (s0)."""
     reply = turn_json(risks=[{"text": "Bad weather", "branch": "n9"}, "Cost"])
     result, _ = run_turn(ScriptedChat(reply), retrieval())
-    assert [(r.text, r.node_id) for r in result.risks] == [("Bad weather", "s0"), ("Cost", "s0")]
-    gone = Exchange("s9", "Old?", "An answer on a dismissed branch", "user")
-    result, _ = run_turn(ScriptedChat(reply), retrieval(), last=gone)
-    assert [r.node_id for r in result.risks] == [None, None]  # never a branch not on the map
+    assert [(r.text, r.node_id, r.branch_source) for r in result.risks] == [
+        ("Bad weather", None, "unknown"),
+        ("Cost", None, "missing"),
+    ]
+    empty = turn_json(risks=[{"text": "Noise", "branch": ""}, {"text": "Rain"}])
+    result, _ = run_turn(ScriptedChat(empty), retrieval())
+    assert [(r.node_id, r.branch_source) for r in result.risks] == [
+        (None, "missing"),
+        (None, "missing"),
+    ]
+
+
+def test_a_named_branch_is_recorded_as_coming_from_the_label() -> None:
+    reply = turn_json(risks=[{"text": "Ferry cancelled in storms", "branch": "n2"}])
+    result, _ = run_turn(ScriptedChat(reply), retrieval())
+    assert [(r.node_id, r.branch_source) for r in result.risks] == [("s1", "label")]
+    assert result.risks[0].model_dump() == {"text": "Ferry cancelled in storms", "node_id": "s1"}
+
+
+def test_map_labels_in_a_risk_become_branch_titles() -> None:
+    """The G4 measurement's "as requested in n5": a label naming a branch becomes its title in
+    quotes; a label not on the map and other words are left as they are."""
+    reply = turn_json(
+        risks=[
+            {"text": "Retrying 4xx forever, as requested in n2, may hang.", "branch": "n2"},
+            {"text": "Costs [N3] and (n1) overlap; n9 and N2 stay.", "branch": "n3"},
+        ]
+    )
+    result, _ = run_turn(ScriptedChat(reply), retrieval())
+    assert [r.text for r in result.risks] == [
+        "Retrying 4xx forever, as requested in “When it runs”, may hang.",
+        "Costs “Costs” and “Who it is for” overlap; n9 and N2 stay.",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("as requested in n5", "as requested in “Retry logic”"),
+        ("see [n5] first", "see “Retry logic” first"),
+        ("see ( n5 ) first", "see “Retry logic” first"),
+        ("n50 and n5x are not labels", "n50 and n5x are not labels"),
+        ("N5 masks", "N5 masks"),
+        ("no labels here", "no labels here"),
+    ],
+)
+def test_name_labels(text: str, expected: str) -> None:
+    assert engine.name_labels(text, {"n5": "Retry logic"}) == expected
 
 
 def test_nothing_left_to_ask_only_adds_branches() -> None:

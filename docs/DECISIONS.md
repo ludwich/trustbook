@@ -2052,7 +2052,8 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   branch the risk is about. The server maps the label to a branch on the map (the same labels as `parent`). An
   unknown or missing label, or a plain string, falls back to the answered branch if it is still on the map,
   else to no branch (the brief then shows the risk without "from …"). The stored and API shape
-  (`{"text", "node_id"}`) is unchanged.
+  (`{"text", "node_id"}`) is unchanged. *Changed by D-116*: an unknown or missing label gives no branch (a
+  general risk), never the answered branch.
 - **Reason:** grounding correctness of what the user reads (§15): the label is checked against the map, so a
   risk can only name a real branch, and the attribution is testable. No extra call (D-093).
 - **Alternatives:** attaching risks to the branch being asked (also wrong when the risk is about the answer);
@@ -2172,3 +2173,70 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Alternatives:** a second command with `--chat-model` and `--compare` (two reports, two runs to remember;
   what Gate 3 did); judging the comparison model with its own targets (rejected: it is reported only);
   running the comparison first (a slow comparison model would delay the gate result).
+
+### D-116 A risk without a known branch label is a general risk; the branch source is stored (D-108 follow-up)
+- **Finding (Phase 5 measurement, Qwen3.6):** 14 of 15 risks landed on the right branch. The one that did not,
+  "Retrying POST requests as well as GET requests may cause unintended side effects …", was attached to "Progress
+  Bar Implementation" in the turn that answered that branch: the G4-3 pattern. Nothing recorded whether the model
+  gave a wrong label or the server fell back to the answered branch. One risk text said "as requested in n5" (a
+  map label in user-visible text; labels are renumbered as the map grows, so it would later name another
+  branch), and near-duplicate "infinite retries" risks piled up across turns.
+- **Decision:**
+  - **No fallback:** a missing label (a plain string, no `branch`, an empty one) or a label not on the map gives
+    the risk no branch: a general risk, shown in the brief without "from …" and in the map's risk list as
+    before. Attaching it to the answered branch was exactly the G4-3 misattribution.
+  - **Branch source:** each risk records `branch_source`: `label` (the model's label named a branch on the
+    map), `missing` or `unknown`. It is stored with the session's risks (`ideation_sessions.risks`) and logged
+    per risk (source and label, never the text); the API does not return it, like the turn diagnostics, so the
+    public shape stays `{"text", "node_id"}`. Risks stored before D-116 have none.
+  - **Labels in the text:** a map label in a risk's text that names a branch on the map (`n5`, `[n5]`, `(n5)`;
+    bare labels only in the prompt's lower-case form, since "N2" may be a real term) is replaced by that
+    branch's title in quotes, `“Retry configuration logic”`, before the risk is stored. Other text, and labels
+    not on the map, are left as they are. The turn prompt adds: never write an id such as "n3" in the risk's
+    text; name a branch by its title.
+  - **Repeats:** a risk is not added when its normalised text (lower case, punctuation as spaces, whitespace
+    collapsed) equals an existing risk's on the same branch (general risks are one group). Exact match on that
+    key only, no fuzzy matching: "Infinite retries with no delay can cause high CPU usage" and "… will likely
+    cause CPU exhaustion" both stay. The earlier rule (the same text, case ignored, on any branch) stands.
+- **Reason:** grounding correctness of what the user reads (§15): a wrong "from …" is a false statement, a
+  missing one is not; the stored source makes the next measurement say whether a misattribution was the
+  model's label. Deterministic and testable; no extra call (D-093).
+- **Alternatives:** keeping the fallback and only logging it (keeps the known bug); removing labels from the
+  text instead of naming the branch (loses what the model referred to); fuzzy duplicate detection (untestable,
+  would merge distinct risks).
+
+### D-117 Answer replies: syntax fragments are dropped and repeated sentences merged at layer 3 (ref-near-05)
+- **Finding (Phase 5 measurement, Qwen3.6, temperature 0, seed 42):** the ref-near-05 answer was stored as six
+  sentences: A, B, C, `}]}]}```json{`, B, C. The checker removed the fragment (score 0.01), so the badge was
+  `partially_verified` and B and C were shown twice, each verified again. `answer_calls` 1, `regenerated` false:
+  the first reply parsed. **Mechanism:** the answer call uses strict `json_schema` output (llama-server turns
+  it into a grammar), so the reply is always valid JSON and nothing outside the object can reach the parser.
+  The model, at the end of its answer, tried to close the JSON and open a second fenced answer (`}]}]}` +
+  "```json{"); under the grammar those characters can only be string content, so they became the `text` of a
+  sentence (or a part between inline markers) carrying a valid chunk id, followed by the restarted answer's
+  sentences. Layer 3 checked only "non-empty text, valid ids", so the fragment went to the checker and the
+  repeats went through as new sentences. The raw reply was not kept (the request log stores what is sent), so
+  whether the fragment was its own item or a part of C's text split at inline markers is inferred; both give
+  the stored list and both are tested.
+- **Decision (layer 3, `chat/output.py`, also for overview replies and ideation recommendations):**
+  - A sentence part with no word character once code-fence markers (```` ```json ````) are removed is a syntax
+    fragment, not a statement: it is dropped like an uncited sentence (not shown, not verified). A reply of
+    fragments only has no sentences (`invalid_output`, as for uncited sentences).
+  - A sentence whose text (whitespace already normalised) equals an earlier sentence's text in the same reply
+    is merged into the earlier one, which then cites its own ids followed by the new ones. The merged sentence
+    is verified like any sentence; every id it cites is one the model gave for that exact text, so nothing is
+    checked more loosely than if the model had written the sentence once. Case or punctuation differences are
+    different sentences. In ideation a cited sentence and a suggestion are never merged.
+  - Trailing junk after the reply object (non-strict modes) stays as before: junk without braces is ignored,
+    junk holding another object makes the reply unusable (the one retry, layer 3). A fragment inside a string
+    is not treated as an unusable reply: the rest of the reply is valid and each sentence is still verified,
+    and a retry costs a full answer call.
+  - Diagnostics: `syntax_fragments` (the dropped fragments, 300 characters each) and `duplicate_sentences`
+    for the reply the outcome rests on. Mock hook `TB-GARBLED` reproduces the reply shape.
+- **Reason:** what the user reads (§15): a fragment is not a claim and a repeated sentence is one claim; the
+  ref-near-05 answer becomes A, B, C, each verified. No grounding layer is loosened: every shown sentence is
+  still checked against all the chunks it cites.
+- **Alternatives:** stripping the fragment out of a sentence that also has words (edits the model's text;
+  such a part still goes to the checker and fails there); treating a fragment as an unusable reply and
+  retrying (a second answer call for a reply whose sentences are fine); `raw_decode` of the first object
+  (does not apply: under strict output the fragment is inside the object).
