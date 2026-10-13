@@ -2123,3 +2123,52 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Reason:** honesty and simplicity: the user sees why nothing moves, and the backend already knows both states.
 - **Alternatives:** a time-based "still starting" hint (a heuristic, wrong on fast and slow machines alike);
   a stored column (a migration for a value that is stale after a restart).
+
+### D-114 Settings lists the spaces that need re-indexing, using the per-space endpoints
+- **Decision:** Settings gets a "Re-index outdated spaces" section (SPEC §12 item 5), after the speed test: one
+  row per space whose sources an older chunker made (name linking to the space, "2 sources need it.", the
+  estimate) with a **Re-index** button, and "All spaces are up to date." when none does. A running re-index
+  shows "Re-indexing… See progress in the queue." in its row. Above two minutes the same confirmation as the
+  banner (D-106) is asked first. A space whose status cannot be read shows "Could not check every space"
+  instead of "up to date".
+  - **No new endpoint:** the page lists the spaces (`GET /api/spaces`) and reads each one's
+    `GET /api/spaces/{sid}/reindex`, starting with `POST` on the same path. A personal library has a handful
+    of spaces; the backend does the same work per space either way (one list endpoint would loop over the
+    same `reindex_status`), and sharing each space's query key with its banner keeps the two in step (a start
+    in Settings shows in the space, polling stops when done).
+  - **No "Re-index all":** each space has its own estimate and confirmation; one button would need a summed
+    estimate and one confirmation for several queues of work, so it is left out until asked for.
+- **Reason:** simplicity (§15): reuse what the banner already uses; never silent about an outdated index.
+- **Alternatives:** `GET /api/reindex` listing all spaces (one request, but a second contract for the same
+  data); a "Re-index all" button (see above).
+
+### D-115 The gate command runs comparison models in the same command, reported and never judged (G3-3)
+- **Decision:** `eval/runner.py --also-model NAME` (repeatable), with an optional `--also-endpoint URL` (default:
+  the main run's endpoint, i.e. `--chat-endpoint` or the saved one).
+  - **Order:** the main run first, exactly as before; then each comparison model in turn: switch the chat
+    capability (`PUT …/capabilities/chat`, model and, with an endpoint, the `custom` preset), test it, ask the
+    same questions in the same space with the same generation settings. No setup, refresh or re-index again.
+  - **Never a criterion:** the verdicts and the exit code come from the main model only (`run_met`, shared by
+    the report and the exit code). The report adds a "Comparison models (reported, not a criterion)" section
+    after the main report: one side-by-side row per model (precision, correct refusals, false refusals
+    docs / code / multi, p50 / p95, cited ranges valid, result; the main row carries pass/**FAIL**, each
+    comparison row "reported, not a criterion"), then per comparison model the main table's metrics without
+    targets, the per-question table and its wrong citations, cited-range problems and errors. The sweep,
+    latency and failed-sentence sections stay main-only.
+  - **Failure handling:** every comparison model's chat body is checked before anything changes (bad URL, empty
+    name, an endpoint that would lose a saved API key: exit 2). After the main run, nothing about a comparison
+    model can stop the main report: a failed endpoint test marks it `failed` and the next one runs; an
+    unreachable API or Ctrl-C/SIGTERM marks it `failed`/`interrupted after k of n questions` and the rest
+    `skipped`, and the main report and exit code are written as usual. The saved chat settings are restored
+    in the existing `finally` in every case (restore is skipped only when nothing was changed yet).
+  - **No up-front test of the comparison endpoint:** testing it before the main run would make llama-server
+    load the comparison model and then the main model again (minutes each on one GPU) for every gate run.
+  - **Sidecar version 6:** `summary` (the main model's metrics) and `comparison` (per model: requested name, chat
+    as read back, status, reason, `criterion: false`, `summary` when done, per-question rows as asked).
+    Older sidecars are read as before; `--compare` compares the top-level (main) questions.
+- **Reason:** Ludwig wants the Gate 3 command run once with both model families (G3-3), with the second one
+  reported next to Qwen3.6 and not pass/fail. Reusing the `--chat-model` switch and restore keeps one
+  mechanism for changing and restoring the chat settings.
+- **Alternatives:** a second command with `--chat-model` and `--compare` (two reports, two runs to remember;
+  what Gate 3 did); judging the comparison model with its own targets (rejected: it is reported only);
+  running the comparison first (a slow comparison model would delay the gate result).

@@ -219,6 +219,70 @@ host. The runner could not put such a key back, so when a key is saved, an endpo
 is refused (exit 2, nothing changed); a model change on the same server is fine. The gate capability
 follows the chat model when it is set to "use the chat model".
 
+## Comparison models in the same run (`--also-model`, `--also-endpoint`; D-115)
+
+`--also-model NAME` (repeatable) runs one or more **comparison models** in the same command, so that
+a change tuned to one model family shows up early (G3-3). The main model (the saved chat settings, or
+`--chat-endpoint`/`--chat-model`) runs first and is judged exactly as without the option. Then, for
+each `--also-model` in order:
+
+1. `PUT /api/capabilities/chat` with `{"model": NAME}`, plus `{"preset": "custom", "base_url": URL}`
+   when an endpoint applies, then `POST /api/capabilities/chat/test`.
+2. The same questions are asked again, in the same space, with the same generation settings. Nothing
+   is set up, refreshed or re-indexed again.
+
+`--also-endpoint URL` (an OpenAI-compatible base URL) is where the comparison models run; without it
+they run on the main run's endpoint (`--chat-endpoint` if given, else the saved one). The same API
+key rule as `--chat-endpoint` applies: an endpoint on another server is refused when a key is saved.
+`--also-endpoint` without `--also-model` is a usage error.
+
+**Reported, not a criterion.** The result, the `--min-*`/`--max-*` verdicts and the exit code depend
+on the main model only. A comparison model whose numbers miss every target still exits 0 when the
+main model passed, and a perfect comparison model does not turn a failed main run into a pass.
+
+Before anything changes, every comparison model's settings are checked (a URL that is not one, an
+empty name, an endpoint that would lose a saved API key: exit 2). After the main run, problems with
+a comparison model never stop the report:
+
+| What happens | Comparison model | Report and exit code |
+|---|---|---|
+| Its endpoint test fails | `failed` (with the reason); the next one runs | main report as usual |
+| Trustbook becomes unreachable | `failed`; the rest `skipped` | main report as usual |
+| Ctrl-C or `kill` (SIGTERM) | `interrupted after k of n questions`; the rest `skipped` | main report as usual, main exit code |
+
+The saved chat settings (preset, base URL, model, API version) are put back afterwards in every case,
+as for `--chat-endpoint`; the runner then reads them back and warns if they differ.
+
+The report header adds "Comparison models: `NAME`, asked the same questions after this run (…;
+reported, not a criterion)", and a section follows the main report:
+
+```markdown
+### Comparison models (reported, not a criterion)
+
+The same questions, in the same space with the same generation settings, asked again after the main run with each comparison model. Only the main model decides the result and the exit code; the comparison models are reported next to it.
+
+| Model | Role | Precision | Correct refusals | False refusals docs / code / multi | p50 / p95 | Cited ranges valid | Result |
+|---|---|---|---|---|---|---|---|
+| `small-model` at `host.docker.internal:8080` | main | 100.0% (2/2) | 1/1 | 0/1 · 0/1 · 0/0 | 1.0 s / 1.0 s | 1/1 | pass |
+| `Other-9B` at `host.docker.internal:8080` | comparison | 50.0% (1/2) | 0/1 | 0/1 · 0/1 · 0/0 | 1.0 s / 1.0 s | 1/1 | reported, not a criterion |
+
+#### Comparison model: `Other-9B` at `host.docker.internal:8080` (reported, not a criterion)
+
+| Metric | Value |
+|---|---|
+| Citation precision (answerable) | 50.0% (1/2) |
+| Correct-refusal rate (unanswerable) | 0.0% (0/1) |
+| … the main table's metrics, without targets … | |
+
+(the per-question table, "Wrong citations", and "Cited ranges" / "Errors" when there are any)
+```
+
+The main row's Result is the main run's (`pass`, `**FAIL**`, or "no targets set"); the cited ranges
+column is `-` without `--code-root`. A comparison model that did not finish has one row with its
+status and reason and no section. The threshold sweep, the latency section and the failed sentences
+are for the main model only; the sidecar keeps every comparison model's per-question numbers
+(`failed_sentences` included).
+
 ## Comparing two runs (`--compare A.json B.json`)
 
 Prints a Markdown table of the questions whose outcome differs between two sidecars (`answered 2/3`
@@ -243,10 +307,11 @@ another name gets `.json` appended). It holds ids and numbers, never question te
 written anywhere else, so a private set stays wherever you keep it. The only answer text is
 `failed_sentences` (version 3, D-076): the sentences of a refused or partially verified answer that
 failed verification, and why, each capped at 300 characters. Version 4 (D-080) adds the latency,
-judge-call and parent context numbers; version 5 (D-091) the transcript window numbers.
+judge-call and parent context numbers; version 5 (D-091) the transcript window numbers; version 6
+(D-115) the run's `summary` and the `comparison` models.
 
 ```json
-{"version": 5, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
+{"version": 6, "date": "2026-10-10T12:00:00Z", "api_version": "phase-2-rc", "space_id": "…",
  "thresholds": {"refuse": 0.15, "verify": 0.5},          // GET /api/settings; null if unavailable
  "retrieval_settings": {"parent_context": true, "outline": true},  // GET /api/settings; null if unavailable
  "generation_requested": {"temperature": 0, "seed": 42}, // null with --app-default
@@ -290,7 +355,20 @@ judge-call and parent context numbers; version 5 (D-091) the transcript window n
  "false_refusals_code": {"num": 1, "den": 17, "value": 0.06},
  "cited_ranges": {"num": 48, "den": 48, "value": 1.0},     // only with --code-root
  "sweep": [{"refuse": 0.05, "verify": 0.3, "correct_refusal": {"num": 3, "den": 3, "value": 1.0},
-            "answered": {…}, "precision_proxy": {…}}]}
+            "answered": {…}, "precision_proxy": {…}}],
+ "summary": {"precision": {"num": 38, "den": 38, "value": 1.0},   // the main model's numbers
+             "correct_refusal": {…}, "must_contain": {…}, "false_refusals": {…},
+             "false_refusals_by_group": {"docs": {…}, "code": {…}, "multi": {…}, "other": {…}},
+             "false_refusals_code": {…}, "errors": 0, "latency_p50": 21.1, "latency_p95": 48.6,
+             "latency_count": 45, "cited_ranges": {…}},          // cited_ranges null without --code-root
+ "comparison": [{"model_requested": "Other-9B",                  // [] without --also-model
+                 "chat": {"model": "Other-9B", "endpoint_host": "…", "preset": "custom",
+                          "overridden": true},                   // null if it never switched
+                 "status": "done",                              // done | failed | interrupted | skipped
+                 "reason": null,                                // why it did not finish
+                 "criterion": false,                            // always: reported only
+                 "summary": {…},                                // as above; null unless done
+                 "questions": [{…}]}]}                          // rows as in "questions", as asked
 ```
 
 `top_rerank`, `sentence_scores`, `sentence_methods`, `regenerated`, `retrieval_fingerprint` (which
@@ -321,6 +399,10 @@ Version 5 adds, per question, the transcript windows (D-091): `windows` (per win
 numbered chunks it names by their times only, the neighbours whose text it shows, in time order, and
 its prompt tokens), `window_tokens`, `window_fingerprint` (a hash of the windows' text; `null`
 without one) and `window_only` (per pass); versions 1 to 4 lack them.
+Version 6 adds `summary` (the main model's metrics as in the report's table) and `comparison` (one
+entry per `--also-model`, see "Comparison models in the same run"; an empty list without it);
+versions 1 to 5 lack both. `--compare` reads every version; it compares the top-level `questions`
+(the main models of two runs).
 `promoted_citations` is computed by the runner. `latency` holds the run's numbers of the "Latency and
 judge calls" table.
 

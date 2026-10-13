@@ -8,10 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { errorMessage } from "@/lib/utils";
 import { EstimateConfirmDialog } from "./EstimateConfirmDialog";
-
-function sourcesNeedIt(count: number): string {
-  return count === 1 ? "1 source needs it." : `${count} sources need it.`;
-}
+import { reindexConfirmation, sourcesNeedIt } from "./reindex";
 
 /**
  * Tells the user that sources of this space were indexed by an older chunker (D-106) and offers
@@ -45,16 +42,9 @@ export function ReindexBanner({ spaceId }: { spaceId: string }) {
 
   const run = () => start.mutate();
   const onClick = () => {
-    if (data.confirm && data.estimate_summary && data.estimate_seconds !== null) {
-      setConfirm({
-        seconds: data.estimate_seconds,
-        files: null,
-        summary: data.estimate_summary,
-        confirm: true,
-      });
-    } else {
-      run();
-    }
+    const ask = reindexConfirmation(data);
+    if (ask) setConfirm(ask);
+    else run();
   };
 
   return (
