@@ -214,9 +214,15 @@ test("Gate 4: a cited recommendation, accept / answer / skip / dismiss, resume, 
   const rows = await mapRows(page);
   expect(rows.filter((r) => r[2] === "true")).toHaveLength(1);
 
-  // 6. Reload: the same question and the same map come back, with no new model call needed.
+  // 6. Reload: the Ideation tab stays open (G4-2, `?tab=ideation`), and the same question and the
+  //    same map come back, with no new model call needed.
+  await expect(page).toHaveURL(/[?&]tab=ideation(&|$)/);
   await page.reload();
-  await openIdeation(page);
+  await expect(page.getByRole("tab", { name: "Ideation" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+    { timeout: 30_000 },
+  );
   await expect(page.getByTestId("question-text")).toHaveText(waiting, { timeout: 30_000 });
   await expect.poll(() => mapRows(page)).toEqual(rows);
   await expect(page.getByTestId("map-progress")).toHaveText("3 resolved, 1 open");

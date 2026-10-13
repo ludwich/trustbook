@@ -7,7 +7,7 @@ import {
 } from "@tabler/icons-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useParams, useSearchParams } from "react-router";
 import { api, ApiError } from "@/api/client";
 import { queryKeys, useSources, useSpace } from "@/api/queries";
 import { ChatView } from "@/components/chat/ChatView";
@@ -30,6 +30,28 @@ import { formatDate } from "@/lib/format";
 
 /** Below the 52 px sticky header (h-13 + 1 px border). */
 const PAGE_HEIGHT = "h-[calc(100svh-3.25rem-1px)] min-h-[520px]";
+
+type SpaceTab = "chat" | "ideation";
+
+/**
+ * The open tab lives in the URL (`?tab=ideation`), so a reload or a shared link keeps it. Chat, the
+ * default, has no parameter. Switching tabs replaces the history entry instead of adding one.
+ */
+function useSpaceTab(): [SpaceTab, (tab: string) => void] {
+  const [params, setParams] = useSearchParams();
+  const tab: SpaceTab = params.get("tab") === "ideation" ? "ideation" : "chat";
+  const setTab = (next: string) =>
+    setParams(
+      (prev) => {
+        const out = new URLSearchParams(prev);
+        if (next === "ideation") out.set("tab", "ideation");
+        else out.delete("tab");
+        return out;
+      },
+      { replace: true },
+    );
+  return [tab, setTab];
+}
 
 /**
  * When a source changes status or is ticked/unticked, "Using X of Y sources" and the overview may
@@ -101,7 +123,7 @@ export function SpacePage() {
 function SpaceWorkspace({ spaceId }: { spaceId: string }) {
   const space = useSpace(spaceId);
   useSyncChatWithSources(spaceId);
-  const [tab, setTab] = useState("chat");
+  const [tab, setTab] = useSpaceTab();
   const [gateLogOpen, setGateLogOpen] = useState(false);
   const s = space.data;
   if (!s) return null;

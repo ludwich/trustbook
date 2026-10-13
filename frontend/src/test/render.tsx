@@ -14,10 +14,10 @@ export function testQueryClient(): QueryClient {
   });
 }
 
-/** Shows the current path so tests can assert navigation. */
+/** Shows the current path (with any query) so tests can assert navigation. */
 export function LocationProbe() {
   const loc = useLocation();
-  return <div data-testid="location">{loc.pathname + loc.hash}</div>;
+  return <div data-testid="location">{loc.pathname + loc.search + loc.hash}</div>;
 }
 
 function Providers({

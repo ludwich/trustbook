@@ -1955,3 +1955,12 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   risk can only name a real branch, and the attribution is testable. No extra call (D-093).
 - **Alternatives:** attaching risks to the branch being asked (also wrong when the risk is about the answer);
   matching risk words to branch titles (fuzzy, untestable).
+
+### D-109 The space's open tab lives in the URL (G4-2)
+- **Decision:** the space page keeps its tab in the query string: `/spaces/{id}?tab=ideation`; Chat, the default,
+  has no parameter, and an unknown value opens Chat. Switching tabs replaces the history entry, so Back still
+  leaves the space. Which session the Ideation tab shows is unchanged (D-102).
+- **Reason:** simplicity (§15): the app already routes with React Router, so a reload or a copied link keeps the
+  tab with no stored state to go stale.
+- **Alternatives:** local storage (per browser, not per link; one more key to guard); a nested route per tab
+  (more routing for two tabs).
