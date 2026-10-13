@@ -98,4 +98,6 @@ retry, rephrase or answer from its own knowledge (D-090).
 
 ### CLI nits
 - `trustbook.error/1` shows `"http_status": null` on a known 401.
-- `sources add --wait` shows no progress for about 30 s while the embedder loads on first use.
+- `sources add --wait` shows no progress for about 30 s while the embedder loads on first use. On a cold CI
+  runner the first paste sat at "reading 0%" for 161–300+ s (startup calibration plus one embedder per
+  indexing stream). Show a "loading models" state instead of reading 0%.

@@ -27,8 +27,10 @@ echo "$out"
 out=$(tb spaces create "$space" --json) || fail "spaces create: $out"
 jq -e '.schema == "trustbook.space/1"' <<<"$out" >/dev/null || fail "spaces create: $out"
 
+# The first source on a fresh container waits for the startup calibration and the indexing models
+# to load: 161 s on a typical runner, over 300 s on a slow one. 600 s leaves room for both.
 text="The Gull Island lighthouse was built in 1874 by the harbour board. Its lamp was converted to electricity in 1952."
-out=$(printf '%s\n' "$text" | tb sources add paste - --title "Gull Island" --space "$space" --wait --timeout 300 --json) \
+out=$(printf '%s\n' "$text" | tb sources add paste - --title "Gull Island" --space "$space" --wait --timeout 600 --json) \
   || fail "sources add paste: $out"
 jq -e '.schema == "trustbook.sources/1" and .sources[0].status == "ready"' <<<"$out" >/dev/null \
   || fail "sources add paste: $out"
