@@ -10,7 +10,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [~] G4-1 chunks split at headings (documents) and a stored section header for web/paste/upload chunks;
       bump `CHUNKER_VERSION` and the calibration version; the UI says a space needs re-indexing and offers a
       button (never silent)
-- [~] G3-2 ref-near-10: **diagnose first** and report to Ludwig what retrieval misses, before any change. Never
+- [~] G3-2 ref-near-10: diagnosis done (docs/reports/G3-2-ref-near-10.md): verification refusals, not retrieval;
+      **waiting for Ludwig** to choose fixes. **Diagnose first** and report to Ludwig what retrieval misses, before any change. Never
       weaken a grounding layer; never widen the answer key without his approval
 - [ ] G3-3 second model family (non-Qwen): propose 2–3 GGUF candidates for llama-server on Strix Halo (Vulkan)
       with size and speed; **Ludwig chooses before anything runs**. Results reported next to Qwen3.6, not
