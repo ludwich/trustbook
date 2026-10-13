@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app.capabilities.bundled import ProviderRegistry
+from app.chunking.dispatch import CHUNKER_VERSION
 from app.config import Paths
 from app.db.engine import get_engine
 from app.db.models import Chunk
@@ -115,6 +116,7 @@ def test_paste_source_is_indexed_end_to_end(client: TestClient, space: dict[str,
     assert source["status"] == "ready", source
     assert source["stats"]["chunks"] >= 2
     assert source["stats"]["chars"] == len(LONG_TEXT)
+    assert source["stats"]["chunkers"] == {"document": CHUNKER_VERSION}  # D-106
     assert source["quality_warning"] is None
     assert ready == [(sid, created["id"])]
     assert client.get(f"/api/spaces/{sid}").json()["source_count"] == 1

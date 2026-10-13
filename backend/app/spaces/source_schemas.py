@@ -44,6 +44,26 @@ class SourceOut(BaseModel):
     ahead: AheadOut | None = None
 
 
+class ReindexSourceOut(BaseModel):
+    """A source whose chunks an older chunker made (D-106)."""
+
+    id: str
+    title: str
+    reindexing: bool  # its re-index job is queued or running
+
+
+class ReindexOut(BaseModel):
+    """Whether a space needs re-indexing, and how long it takes (D-106)."""
+
+    needed: bool  # a source holds chunks an older chunker made
+    sources: list[ReindexSourceOut]
+    reindexing: bool  # a re-index of one of them is queued or running
+    # For the sources not queued yet: seconds, "About 3 min on this PC", confirm above 2 min.
+    estimate_seconds: int | None
+    estimate_summary: str | None
+    confirm: bool
+
+
 class PasteCreate(BaseModel):
     title: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = None
     text: Annotated[str, StringConstraints(max_length=MAX_PASTE_CHARS)]

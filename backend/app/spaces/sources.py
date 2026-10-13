@@ -129,6 +129,15 @@ class SourceRepository:
             query = select(Chunk).where(col(Chunk.source_id) == source_id)
             return list(session.exec(query.order_by(col(Chunk.ordinal))).all())
 
+    def chunk_locators(self, source_id: str, limit: int | None = None) -> list[str]:
+        """The JSON locators of a source's chunks in reading order (the first ``limit``)."""
+        with Session(self._engine) as session:
+            query = select(Chunk.locator).where(col(Chunk.source_id) == source_id)
+            query = query.order_by(col(Chunk.ordinal))
+            if limit is not None:
+                query = query.limit(limit)
+            return [str(row) for row in session.exec(query).all()]
+
     def chunk_count(self, source_id: str) -> int:
         with Session(self._engine) as session:
             return len(session.exec(select(Chunk.id).where(Chunk.source_id == source_id)).all())

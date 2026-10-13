@@ -144,6 +144,10 @@ EMBEDDING_CHANGED = (
     "This space was indexed with a different embedding model.",
     "Create a new space for new sources.",
 )
+REINDEX_NO_SNAPSHOT = (
+    "The saved copy of this source could not be read, so it was not re-indexed.",
+    "Refresh the source, or remove it and add it again.",
+)
 CANCELLED = ("Processing was cancelled.", "Remove this source, or add it again.")
 CANCELLED_REFRESHABLE = ("Processing was cancelled.", REFRESH)
 INTERNAL = ("Something went wrong while processing this source.", REFRESH)
