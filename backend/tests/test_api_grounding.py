@@ -191,6 +191,9 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
         "window_tokens": 0,
         "window_fingerprint": None,
         "window_only": [0, 0],
+        # Layer 3 clean-up (D-117): nothing to drop or merge.
+        "syntax_fragments": [],
+        "duplicate_sentences": 0,
     }
     assert len(chat.calls) == 2  # answer, regeneration
     # The regeneration is told which sentence of the first reply failed and why (D-074), in the

@@ -94,6 +94,8 @@ PARENTS_OFF: dict[str, object] = {
     "windows": [],
     "window_tokens": 0,
     "window_fingerprint": None,
+    "syntax_fragments": [],  # D-117
+    "duplicate_sentences": 0,
 }
 
 
