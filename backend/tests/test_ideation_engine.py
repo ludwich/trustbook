@@ -57,7 +57,7 @@ def turn_json(
     question: str = "When should the trip run?",
     sentences: list[tuple[str, list[str]]] | None = None,
     branches: list[dict[str, str]] | None = None,
-    risks: list[str] | None = None,
+    risks: list[Any] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -129,7 +129,12 @@ def test_parse_turn_keeps_suggestions_and_drops_unknown_ids() -> None:
             ('Book early ["c2"]. Then advertise.', []),
         ],
         branches=[{"title": "Boats [c1]", "parent": "[N1]"}, {"title": "", "parent": ""}],
-        risks=["Weather", "Weather", "Cost", "Third"],
+        risks=[
+            {"text": "Weather", "branch": "[N2]"},
+            {"text": "Weather", "branch": "n3"},
+            "Cost",
+            "Third",
+        ],
     )
     parsed = parse_turn(reply, ["c1", "c2"], expect_question=True)
     assert [(s.text, s.chunk_ids) for s in parsed.sentences] == [
@@ -141,7 +146,7 @@ def test_parse_turn_keeps_suggestions_and_drops_unknown_ids() -> None:
     assert parsed.dropped == ["The hostel is free."]
     assert [s.text for s in parsed.cited] == ["Run it in summer.", "Book early."]
     assert parsed.branches == [("Boats", "n1")]
-    assert parsed.risks == ["Weather", "Cost"]
+    assert parsed.risks == [("Weather", "n2"), ("Cost", None)]
 
 
 def test_parse_turn_question_rules() -> None:
@@ -257,13 +262,33 @@ def test_checker_off_keeps_citations_badged_unverified() -> None:
 def test_new_branches_and_risks_come_from_the_last_answer() -> None:
     reply = turn_json(
         branches=[{"title": "Rain plan", "parent": "n1"}, {"title": "Boats", "parent": "n99"}],
-        risks=["Bad weather"],
+        risks=[{"text": "Bad weather", "branch": "n1"}],
     )
     result, _ = run_turn(ScriptedChat(reply), retrieval())
     assert result.branches == [("Rain plan", "s0"), ("Boats", "s0")]
     assert [(r.text, r.node_id) for r in result.risks] == [("Bad weather", "s0")]
     first, _ = run_turn(ScriptedChat(reply), retrieval(), last=None)
     assert first.branches == [] and first.risks == []  # no answer yet: nothing opened up
+
+
+def test_a_risk_is_attached_to_the_branch_it_concerns() -> None:
+    # G4-3: after answering "Who it is for" (n1) the turn asks about "When it runs" (n2), and the
+    # model's risk is about the branch being asked, not the one just answered.
+    reply = turn_json(risks=[{"text": "Ferry cancelled in storms", "branch": "n2"}])
+    result, _ = run_turn(ScriptedChat(reply), retrieval())
+    assert [(r.text, r.node_id) for r in result.risks] == [("Ferry cancelled in storms", "s1")]
+    later = turn_json(risks=[{"text": "Too costly", "branch": "[N3]"}])
+    result, _ = run_turn(ScriptedChat(later), retrieval())
+    assert [(r.text, r.node_id) for r in result.risks] == [("Too costly", "s2")]
+
+
+def test_a_risk_without_a_known_branch_falls_back_to_the_answered_one() -> None:
+    reply = turn_json(risks=[{"text": "Bad weather", "branch": "n9"}, "Cost"])
+    result, _ = run_turn(ScriptedChat(reply), retrieval())
+    assert [(r.text, r.node_id) for r in result.risks] == [("Bad weather", "s0"), ("Cost", "s0")]
+    gone = Exchange("s9", "Old?", "An answer on a dismissed branch", "user")
+    result, _ = run_turn(ScriptedChat(reply), retrieval(), last=gone)
+    assert [r.node_id for r in result.risks] == [None, None]  # never a branch not on the map
 
 
 def test_nothing_left_to_ask_only_adds_branches() -> None:
@@ -315,7 +340,9 @@ def test_mock_seed_and_turn_hooks() -> None:
     assert data["new_branches"] == [
         {"title": "Follow-up on families; risk of storms", "parent": "n1"}
     ]
-    assert data["risks"] == ["Raised in an answer: TB-BRANCH families; risk of storms"]
+    assert data["risks"] == [
+        {"text": "Raised in an answer: TB-BRANCH families; risk of storms", "branch": "n1"}
+    ]
     plain = turn_messages("Unrelated plan", [chunk(1, HOSTEL)], nodes, target=NODES[1])
     suggestion = _mock(plain, TURN_SCHEMA)["recommendation"]["sentences"]
     assert suggestion == [{"text": IDEA_SUGGESTION, "chunk_ids": []}]

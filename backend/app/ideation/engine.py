@@ -276,5 +276,14 @@ def turn(
         if context.last is not None
         else []
     )
-    risks = [Risk(text=r, node_id=last_id) for r in parsed.risks] if context.last else []
+    risks = risks_of(parsed.risks, names, last_id) if context.last is not None else []
     return TurnResult(asked, branches, risks)
+
+
+def risks_of(
+    proposed: Sequence[tuple[str, str | None]], names: Mapping[str, str], answered: str | None
+) -> list[Risk]:
+    """Attach each risk to the branch the model named (a label on the map, D-108). An unknown
+    or missing label falls back to the answered branch, if it is still on the map, else none."""
+    fallback = answered if answered in names.values() else None
+    return [Risk(text=text, node_id=names.get(label or "", fallback)) for text, label in proposed]

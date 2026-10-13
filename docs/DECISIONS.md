@@ -1938,3 +1938,20 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     said "by default, Requests does not retry failed connections… retries with backoff using urllib3.util.Retry",
     citing `advanced.rst` 1032–1056, followed by the model's own 502/503/504 suggestion, uncited. Turns took
     7–27 s, and the brief's "Cited anchors" lists both.
+
+## 2026-10-13 — Phase 5 (hardening)
+
+### D-108 A risk names the branch it is about (G4-3)
+- **Finding (Gate 4):** every risk was attached to the branch answered just before the turn
+  (`engine.turn`: `Risk(node_id=last_id)`). The turn prompt also names the branch to ask next, and the model's
+  risks were often about that branch, so the brief showed "Retrying too aggressively (from “Progress bar
+  implementation”)".
+- **Decision:** each turn risk is `{"text", "branch"}`, where `branch` is a short map label (`n3`) for the
+  branch the risk is about. The server maps the label to a branch on the map (the same labels as `parent`). An
+  unknown or missing label, or a plain string, falls back to the answered branch if it is still on the map,
+  else to no branch (the brief then shows the risk without "from …"). The stored and API shape
+  (`{"text", "node_id"}`) is unchanged.
+- **Reason:** grounding correctness of what the user reads (§15): the label is checked against the map, so a
+  risk can only name a real branch, and the attribution is testable. No extra call (D-093).
+- **Alternatives:** attaching risks to the branch being asked (also wrong when the risk is about the answer);
+  matching risk words to branch titles (fuzzy, untestable).

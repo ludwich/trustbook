@@ -392,6 +392,40 @@ def test_accept_needs_a_recommendation(env: Env, monkeypatch: pytest.MonkeyPatch
     assert response.status_code == 409 and "no recommended answer" in response.json()["detail"]
 
 
+def test_risk_is_attached_to_the_branch_it_concerns(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G4-3: the turn after answering "Progress bar" asks about "Retry logic"; its risk about
+    retrying belongs to "Retry logic" (n2), in the session and in the brief."""
+    sid = env.create("A download tool")["id"]
+    seed = json.dumps({"title": "T", "branches": ["Progress bar", "Retry logic", "File names"]})
+
+    def turn(risks: list[dict[str, str]]) -> str:
+        sentences = [{"text": "Keep it simple.", "chunk_ids": []}]
+        return json.dumps(
+            {
+                "question": "Q?",
+                "recommendation": {"sentences": sentences},
+                "new_branches": [],
+                "risks": risks,
+            }
+        )
+
+    chat = ScriptedChat(
+        seed, turn([]), turn([{"text": "Retrying too aggressively", "branch": "n2"}])
+    )
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
+    session = env.turn(sid)
+    ids = {n["title"]: n["id"] for n in session["nodes"]}
+    session = env.answer(sid, ids["Progress bar"], "answer", "A simple bar.")
+    assert session["risks"] == [
+        {"text": "Retrying too aggressively", "node_id": ids["Retry logic"]}
+    ]
+    env.client.post(env.url(f"/sessions/{sid}/finish"))
+    brief = env.client.get(env.url(f"/sessions/{sid}/brief")).text
+    assert "- Retrying too aggressively (from “Retry logic”)" in brief
+
+
 def test_unusable_reply_is_an_error_and_ask_again_works(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:

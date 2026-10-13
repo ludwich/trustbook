@@ -31,7 +31,7 @@ numbered chunks (:func:`~app.chat.prompt.parse_prompt` returns both separately).
   words with the idea and branch, citing it; without such a chunk, one uncited suggestion.
   ``TB-UNSUPPORTED`` in the idea adds :data:`UNSUPPORTED_SENTENCE` citing ``c1`` (it fails
   verification and is removed). A last answer containing ``TB-BRANCH`` adds one new branch under
-  the answered one; one containing "risk" adds a risk.
+  the answered one; one containing "risk" adds a risk about the answered branch.
 - Judge prompts (schema with ``verdicts``): a statement is supported when its cited lines share
   at least two content words with it; each cited chunk's whole line range is the evidence.
 - :class:`MockSearchAdapter`: the ``mock`` web-search provider, fixed results for any query.
@@ -277,7 +277,10 @@ def ideation_turn(prompt: str) -> dict[str, Any]:
     if BRANCH_TRIGGER in answer and parts.last_label:
         topic = truncate(answer.replace(BRANCH_TRIGGER, " "), 40) or "the answer"
         branches.append({"title": f"Follow-up on {topic}", "parent": parts.last_label})
-    risks = [f"Raised in an answer: {truncate(answer, 80)}"] if "risk" in answer.lower() else []
+    risks: list[dict[str, str]] = []
+    if "risk" in answer.lower():
+        text = f"Raised in an answer: {truncate(answer, 80)}"
+        risks.append({"text": text, "branch": parts.last_label or ""})
     return {
         "question": question,
         "recommendation": {"sentences": sentences},
