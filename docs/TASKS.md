@@ -15,18 +15,18 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [ ] G3-3 second model family (non-Qwen): propose 2–3 GGUF candidates for llama-server on Strix Halo (Vulkan)
       with size and speed; **Ludwig chooses before anything runs**. Results reported next to Qwen3.6, not
       pass/fail. The gate command runs both models in one command
-- [~] Untested gate items made one-step: Gate 3b #8 skill behaviour, Gate 4 #9 request log (test extended to a
+- [x] Untested gate items made one-step: Gate 3b #8 skill behaviour (docs/cli.md one-liners, `claude -p`), Gate 4 #9 request log (test extended to a
       full session: seed, 4 turns, judge), Gate 4 seed dismiss
 - [ ] Real-model check of the new risk schema (G4-3, D-108) with Qwen3.6: risks name the right branch
 
 ## P2: usability and setup
-- [~] G3b-2 optional API key for "Other OpenAI-compatible" chat and the speech-to-text endpoint
-      (`settings.json` only, never logged or echoed)
-- [~] G3b-1 `python -m trustbook_cli` + Git Bash shim, documented in docs/cli.md and SKILL.md
+- [x] G3b-2 optional API key for "Other OpenAI-compatible" chat and the speech-to-text endpoint
+      (`settings.json` only, never logged or echoed); shown for every endpoint preset (D-111)
+- [x] G3b-1 `python -m trustbook_cli` + Git Bash shim, documented in docs/cli.md and SKILL.md
 - [x] G3-1 code symbol in the citation viewer header
 - [x] G4-2 a reload keeps the Ideation tab
 - [x] G4-4 source-list messages and long file names wrap; one line per problem
-- [~] CLI nits: `http_status` on a known 401; "loading models" instead of "reading 0%"
+- [x] CLI nits: `http_status` on a known 401; "loading models" instead of "reading 0%"
 - [ ] docs/MODELS.md: tested chat models with their gate results (Qwen3.6 recommended; Qwen3.8-27B ~78%
       precision, p95 ~85 s; the second family once run)
 
