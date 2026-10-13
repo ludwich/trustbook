@@ -62,6 +62,48 @@ jobs:
           uv run mypy --strict ../eval/runner.py ../eval/smoke/fetch_corpus.py
           uv run pytest ../eval/tests
 
+  cli:
+    # The CLI is pip-installed on laptops too (Windows first, Gate 3b), so it is tested there.
+    name: CLI (ruff, mypy, pytest) on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: cli/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+      - name: Mypy
+        run: uv run mypy --strict src tests
+
+      - name: Pytest
+        run: uv run pytest
+
+      - name: Console script
+        run: uv run trustbook --version
+
   frontend:
     name: Frontend (lint, typecheck, test, build)
     runs-on: ubuntu-24.04

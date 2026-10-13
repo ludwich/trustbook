@@ -31,22 +31,21 @@ the app's own settings). ``--chat-endpoint`` / ``--chat-model`` switch the chat 
 run and restore it afterwards, also on an error or Ctrl-C. ``--compare A.json B.json`` lists the
 per-question differences between two sidecars and exits.
 
-Only ``httpx`` and ``PyYAML`` are used. The runner talks to the API contract in
+Only ``httpx``, ``PyYAML`` and the CLI's API client (``cli/``, package ``trustbook-cli``, installed
+with the backend and in the image; D-087) are used. The runner talks to the API contract in
 ``docs/ARCHITECTURE.md`` ("Phase 1: sources, index, retrieval and chat").
 """
 
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import math
 import re
 import signal
 import sys
 import time
-import unicodedata
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,6 +55,18 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import yaml
+from trustbook_cli.client import (
+    ApiUnreachableError,
+    TrustbookError,
+    find_space,
+    iter_sse,
+    norm_text,
+    request_json,
+    sse_lines,
+)
+from trustbook_cli.client import (
+    SseEvent as SseEvent,  # re-exported (tests)
+)
 
 QUESTION_TYPES = ("answerable", "unanswerable")
 CATEGORIES = ("docs", "code", "multi", "unanswerable")
@@ -82,12 +93,9 @@ EXIT_UNAVAILABLE = 2
 EXIT_INTERRUPTED = 130
 
 
-class EvalError(Exception):
-    """Invalid input or an unusable API answer (exit code 2)."""
-
-
-class ApiUnreachableError(EvalError):
-    """The Trustbook API cannot be reached."""
+# Invalid input or an unusable API answer (exit code 2). The shared client's errors are kinds of
+# it: ApiError (an HTTP error status) and ApiUnreachableError (no connection, D-087).
+EvalError = TrustbookError
 
 
 class GenerationUnsupportedError(EvalError):
@@ -296,45 +304,6 @@ def load_questions(paths: Sequence[str]) -> list[Question]:
 
 
 # ---------------------------------------------------------------------------------------------
-# SSE
-# ---------------------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class SseEvent:
-    event: str
-    data: str
-
-
-def iter_sse(lines: Iterable[str]) -> Iterator[SseEvent]:
-    """Parse a ``text/event-stream`` (WHATWG rules, minus ``id``/``retry`` which are unused).
-
-    Data lines are joined with ``\\n``; comment lines (``:``) are ignored; an event without a
-    blank line before the end of the stream is still delivered.
-    """
-    event = ""
-    data: list[str] = []
-    for raw in lines:
-        line = raw.rstrip("\r\n")
-        if not line:
-            if data:
-                yield SseEvent(event or "message", "\n".join(data))
-            event, data = "", []
-            continue
-        if line.startswith(":"):
-            continue
-        name, sep, value = line.partition(":")
-        if sep and value.startswith(" "):
-            value = value[1:]
-        if name == "event":
-            event = value
-        elif name == "data":
-            data.append(value)
-    if data:
-        yield SseEvent(event or "message", "\n".join(data))
-
-
-# ---------------------------------------------------------------------------------------------
 # Matching (sources and locators)
 # ---------------------------------------------------------------------------------------------
 
@@ -364,16 +333,6 @@ class SourceInfo:
             progress=raw.get("progress") if isinstance(raw.get("progress"), int | float) else None,
             job_id=raw["job_id"] if isinstance(raw.get("job_id"), str) and raw["job_id"] else None,
         )
-
-
-_DASHES = dict.fromkeys(map(ord, "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"), "-")
-
-
-def norm_text(value: str) -> str:
-    """Case-, whitespace-, entity- and dash-insensitive form used for titles and headings."""
-    value = unicodedata.normalize("NFKC", html.unescape(value)).translate(_DASHES)
-    value = value.replace("\u00b6", "").strip().strip("#").strip()
-    return " ".join(value.casefold().split())
 
 
 def is_url(value: str) -> bool:
@@ -623,6 +582,11 @@ class QuestionResult:
     outline_fingerprint: str | None = None
     outline_only: list[int] | None = None
     promoted_cited: list[int] | None = None
+    # Transcript windows (D-091) from ``diagnostics``; None when not sent.
+    windows: list[dict[str, Any]] | None = None
+    window_tokens: int | None = None
+    window_fingerprint: str | None = None
+    window_only: list[int] | None = None
 
     @property
     def answer_text(self) -> str:
@@ -920,6 +884,10 @@ class Latency:
         return [r for r in self.generated if r.outline_only and any(r.outline_only)]
 
     @property
+    def window_only(self) -> list[QuestionResult]:
+        return [r for r in self.generated if r.window_only and any(r.window_only)]
+
+    @property
     def promoted_citations(self) -> tuple[int, int]:
         found = [p for p in (promoted_citations(r) for r in self.generated) if p is not None]
         return sum(p["n"] for p in found), sum(p["correct"] for p in found)
@@ -987,6 +955,12 @@ def latency_json(results: Sequence[QuestionResult]) -> dict[str, Any]:
             "regenerated": sum(1 for r in lat.outline_only if r.regenerated),
         },
         "promoted_citations": {"n": promoted, "correct": correct},
+        "window_tokens": _stats(lat.tokens("window_tokens")),
+        "window_only": {
+            "answers": [r.question.id for r in lat.window_only],
+            "sentences": sum(sum(r.window_only or []) for r in lat.window_only),
+            "regenerated": sum(1 for r in lat.window_only if r.regenerated),
+        },
     }
 
 
@@ -1030,6 +1004,9 @@ def render_latency(results: Sequence[QuestionResult]) -> list[str]:
     only = lat.outline_only
     only_sentences = sum(sum(r.outline_only or []) for r in only)
     only_regen = sum(1 for r in only if r.regenerated)
+    windowed = lat.window_only
+    window_sentences = sum(sum(r.window_only or []) for r in windowed)
+    window_regen = sum(1 for r in windowed if r.regenerated)
     promoted, correct = lat.promoted_citations
     out = ["#### Latency and judge calls", ""]
     out.append("| Measure | Value |")
@@ -1064,9 +1041,14 @@ def render_latency(results: Sequence[QuestionResult]) -> list[str]:
     )
     out.append(f"| Promoted tokens: p50 / p95 | {tokens(lat.tokens('promoted_tokens'))} |")
     out.append(f"| Outline tokens: p50 / p95 | {tokens(lat.tokens('outline_tokens'))} |")
+    out.append(f"| Transcript window tokens: p50 / p95 | {tokens(lat.tokens('window_tokens'))} |")
     out.append(
         f"| Outline-only failures | {only_sentences} sentence(s) in {len(only)} answer(s), "
         f"{only_regen} of them regenerated |"
+    )
+    out.append(
+        f"| Window-only failures | {window_sentences} sentence(s) in {len(windowed)} "
+        f"answer(s), {window_regen} of them regenerated |"
     )
     out.append(
         f"| Citations to promoted chunks | {promoted} ({correct} inside an expected locator) |"
@@ -1105,7 +1087,9 @@ def _ratio_json(r: Ratio) -> dict[str, Any]:
 
 
 # 4: wf-2's version 3 plus the D-080 latency fields and the D-077 parent context fields.
-SIDECAR_VERSION = 4
+# 5: the D-091 transcript window fields (``windows``, ``window_tokens``, ``window_fingerprint``,
+# ``window_only``) per question and ``window_tokens`` / ``window_only`` in ``latency``.
+SIDECAR_VERSION = 5
 FAILED_TEXT_CHARS = 300  # the app caps failed sentences at this; the runner does too
 
 
@@ -1195,6 +1179,10 @@ def sidecar(
                 "outline_only": r.outline_only,
                 "promoted_cited": r.promoted_cited,
                 "promoted_citations": promoted_citations(r),
+                "windows": r.windows,
+                "window_tokens": r.window_tokens,
+                "window_fingerprint": r.window_fingerprint,
+                "window_only": r.window_only,
             }
             for r in results
         ],
@@ -1238,22 +1226,6 @@ def score(result: QuestionResult, sources: dict[str, SourceInfo]) -> None:
 # ---------------------------------------------------------------------------------------------
 
 
-def _json(resp: httpx.Response, what: str) -> Any:
-    if resp.status_code >= 400:
-        detail = resp.text[:300]
-        try:
-            body = resp.json()
-            if isinstance(body, dict) and "detail" in body:
-                detail = str(body["detail"])
-        except ValueError:
-            pass
-        raise EvalError(f"{what} failed: HTTP {resp.status_code}: {detail}")
-    try:
-        return resp.json()
-    except ValueError as exc:
-        raise EvalError(f"{what}: response is not JSON") from exc
-
-
 class Api:
     """Thin wrapper over the Trustbook HTTP API (docs/ARCHITECTURE.md)."""
 
@@ -1261,11 +1233,7 @@ class Api:
         self.client = client
 
     def _request(self, method: str, url: str, what: str, **kwargs: Any) -> Any:
-        try:
-            resp = self.client.request(method, url, **kwargs)
-        except httpx.TransportError as exc:
-            raise ApiUnreachableError(f"{what}: {type(exc).__name__}: {exc}") from exc
-        return _json(resp, what)
+        return request_json(self.client, method, url, what, **kwargs)
 
     def thresholds(self) -> Thresholds | None:
         """The grounding thresholds in use, or None if the API does not report them."""
@@ -1383,19 +1351,6 @@ class Api:
         return str(data["id"])
 
 
-def find_space(spaces: Iterable[dict[str, Any]], key: str) -> dict[str, Any] | None:
-    """Match ``--space`` by id, then slug, then name (case-insensitive)."""
-    spaces = list(spaces)
-    for field_name in ("id", "slug"):
-        for s in spaces:
-            if str(s.get(field_name, "")) == key:
-                return s
-    for s in spaces:
-        if norm_text(str(s.get("name", ""))) == norm_text(key):
-            return s
-    return None
-
-
 def ask(
     client: httpx.Client,
     space_id: str,
@@ -1443,7 +1398,7 @@ def ask(
                     )
                 result.error = f"HTTP {resp.status_code}: {resp.text[:300]}"
                 return result
-            for ev in iter_sse(resp.iter_lines()):
+            for ev in iter_sse(sse_lines(resp.iter_bytes())):
                 if ev.event in ("status", "message"):
                     continue
                 try:
@@ -1603,6 +1558,22 @@ def read_latency(result: QuestionResult, diagnostics: dict[str, Any]) -> None:
     result.outline_fingerprint = outline if isinstance(outline, str) and outline else None
     result.outline_only = _counts(diagnostics.get("outline_only"))
     result.promoted_cited = _counts(diagnostics.get("promoted_cited"))
+    windows = diagnostics.get("windows")
+    if isinstance(windows, list):
+        result.windows = [
+            {
+                "source_id": w.get("source_id"),
+                "numbered": [i for i in w.get("numbered") or [] if isinstance(i, str)],
+                "chunk_ids": [i for i in w.get("chunk_ids") or [] if isinstance(i, str)],
+                "tokens": _int_value(w.get("tokens")),
+            }
+            for w in windows
+            if isinstance(w, dict)
+        ]
+    result.window_tokens = _int_value(diagnostics.get("window_tokens"))
+    window = diagnostics.get("window_fingerprint")
+    result.window_fingerprint = window if isinstance(window, str) and window else None
+    result.window_only = _counts(diagnostics.get("window_only"))
 
 
 def _capped(value: str) -> str:
@@ -2733,6 +2704,14 @@ def outline_same(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
     return bool(a.get("outline_fingerprint") == b.get("outline_fingerprint"))
 
 
+def windows_same(a: dict[str, Any], b: dict[str, Any]) -> bool | None:
+    """Same transcript windows (D-091)? None when either sidecar predates
+    ``window_fingerprint`` (version 5)."""
+    if "window_fingerprint" not in a or "window_fingerprint" not in b:
+        return None
+    return bool(a.get("window_fingerprint") == b.get("window_fingerprint"))
+
+
 def _run_label(data: dict[str, Any]) -> str:
     chat = data.get("chat") if isinstance(data.get("chat"), dict) else None
     model = f"`{chat.get('model')}` at `{chat.get('endpoint_host')}`" if chat else "chat unknown"
@@ -2772,7 +2751,14 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
         for qid in common
         if retrieval_same(qa[qid], qb[qid]) is True and outline_same(qa[qid], qb[qid]) is False
     ]
-    causes = {"model": 0, "outline": 0, "retrieval": 0, "unknown": 0}
+    window_moved = [
+        qid
+        for qid in common
+        if retrieval_same(qa[qid], qb[qid]) is True
+        and outline_same(qa[qid], qb[qid]) is not False
+        and windows_same(qa[qid], qb[qid]) is False
+    ]
+    causes = {"model": 0, "outline": 0, "window": 0, "retrieval": 0, "unknown": 0}
     if changed:
         out.append("| ID | A | B | Retrieval | Likely cause |")
         out.append("|---|---|---|---|---|")
@@ -2783,6 +2769,8 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
             )
             if same is True and outline_same(qa[qid], qb[qid]) is False:
                 where, cause = "same chunks, different outline", "outline"
+            elif same is True and windows_same(qa[qid], qb[qid]) is False:
+                where, cause = "same chunks, different transcript window", "window"
             elif same is True:
                 where = "same" if fingerprinted else "same top score"
                 cause = "model"
@@ -2794,6 +2782,7 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
             label = {
                 "model": "model / sampling",
                 "outline": "outline only",
+                "window": "transcript window only",
                 "retrieval": "pipeline / index",
                 "unknown": "unknown",
             }[cause]
@@ -2807,7 +2796,14 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
     out.append(
         f"{len(changed)} of {len(common)} questions differ: {causes['model']} with the same "
         f"retrieval (model / sampling), {causes['outline']} with the same chunks and a "
-        f"different outline (outline only), {causes['retrieval']} with different retrieval "
+        f"different outline (outline only), "
+        + (
+            f"{causes['window']} with the same chunks and a different transcript window "
+            "(transcript window only), "
+            if causes["window"]
+            else ""
+        )
+        + f"{causes['retrieval']} with different retrieval "
         f"(pipeline / index), {causes['unknown']} unknown (no fingerprint or scores). "
         f"Retrieval differs on {len(retrieval_moved)} question(s) in all"
         + (": " + ", ".join(f"`{q}`" for q in retrieval_moved) if retrieval_moved else "")
@@ -2817,6 +2813,12 @@ def compare_runs(a: dict[str, Any], b: dict[str, Any], names: tuple[str, str]) -
         out.append(
             f"Only the outline differs on {len(outline_moved)} question(s): "
             + ", ".join(f"`{q}`" for q in outline_moved)
+            + "."
+        )
+    if window_moved:
+        out.append(
+            f"Only the transcript windows differ on {len(window_moved)} question(s): "
+            + ", ".join(f"`{q}`" for q in window_moved)
             + "."
         )
     only_a = [qid for qid in qa if qid not in qb]

@@ -81,13 +81,16 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 # --- Dependencies (CPU torch comes from the pytorch-cpu index pinned in pyproject/uv.lock) ---
+# The CLI (../cli, a path dependency) is installed with the app code below, so changing it does
+# not rebuild this layer; only its pyproject is needed here.
 COPY backend/pyproject.toml backend/uv.lock ./
+COPY cli/pyproject.toml /cli/pyproject.toml
 RUN --mount=type=cache,id=trustbook-uv,target=/root/.cache/uv \
     set -eu; \
     if [ "$BAKE_MODELS" = "1" ]; then \
-        uv sync --frozen --no-dev --no-install-project --extra ml; \
+        uv sync --frozen --no-dev --no-install-project --no-install-package trustbook-cli --extra ml; \
     else \
-        uv sync --frozen --no-dev --no-install-project; \
+        uv sync --frozen --no-dev --no-install-project --no-install-package trustbook-cli; \
     fi
 
 # --- Headless Chromium for JavaScript-only pages (Playwright, D-025). Video ffmpeg is not needed. ---
@@ -130,6 +133,17 @@ COPY --from=frontend /src/frontend/dist /app/static
 COPY backend/app /app/app
 COPY eval /app/eval
 RUN chmod -R a+rX /app/app /app/static /app/searxng /app/eval
+
+# --- The `trustbook` CLI (D-087): `docker compose exec app trustbook …`; the eval runner imports
+# its API client. Installed from a copy of cli/ (a wheel, not editable), without dependencies
+# (httpx is already in the environment).
+RUN --mount=type=cache,id=trustbook-uv,target=/root/.cache/uv \
+    --mount=type=bind,source=cli,target=/tmp/build/cli,rw \
+    set -eu; \
+    rm -rf /cli; \
+    uv pip install --python /app/.venv/bin/python --no-deps /tmp/build/cli; \
+    test "$(command -v trustbook)" = /app/.venv/bin/trustbook; \
+    trustbook --version
 
 # Prove every baked model loads offline and scores sensibly (fails the build otherwise).
 # No network: a model that tries to fetch anything at load time breaks the build here.

@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
+from app.api.chat import sse
 from app.capabilities.adapters.base import AdapterError
 from app.capabilities.bundled import ProviderRegistry
 from app.chat.repository import ChatStore
@@ -173,6 +174,43 @@ def test_low_score_question_is_refused_before_generating(
     assert message["content"]["sentences"] == [] and message["sources_used"] == []
     assert built == []  # no model was even built
     assert env.client.get(env.url(f"/conversations/{cid}/messages")).json()[1] == message
+
+
+LINE_SEPARATORS = "\u2028\u2029\u0085"
+
+
+def test_sse_events_are_ascii_so_unicode_line_separators_stay_in_one_event() -> None:
+    text = "Line one\u2028line two\u2029para\u0085next “quoted”."
+    raw = sse("sentence", {"index": 0, "text": text, "citations": []})
+    assert raw.isascii()
+    # httpx's iter_lines() splits like str.splitlines(): the event must still be whole.
+    assert parse_sse("\n".join(raw.splitlines()) + "\n\n") == [
+        ("sentence", {"index": 0, "text": text, "citations": []})
+    ]
+
+
+def test_streamed_sentence_with_a_line_separator_arrives_in_one_event(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    title = "Requests\u2028guide\u2029v2\u0085(“draft”)"
+    text = "Proxies are configured with the proxies argument."
+    add_chunk(env.engine, env.index, add_source(env.engine, title), GUIDE)
+    chat = ScriptedChat(answer_json((text, ["c1"])))
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
+    response = env.client.post(
+        env.url(f"/conversations/{env.conversation()}/messages"),
+        json={"content": "How are proxies configured?"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    assert body.isascii() and not any(c in body for c in LINE_SEPARATORS)
+    # httpx's iter_lines() splits like str.splitlines(): every event must still parse whole.
+    events = parse_sse("\n".join(body.splitlines()) + "\n\n")
+    assert [n for n, _ in events][-2:] == ["sentence", "done"]
+    sentence = events[-2][1]
+    assert sentence["text"] == text
+    assert sentence["citations"][0]["source_title"] == title
+    assert events[-1][1]["message"]["sources_used"][0]["title"] == title
 
 
 def test_no_ticked_ready_sources_is_refused(env: Env) -> None:

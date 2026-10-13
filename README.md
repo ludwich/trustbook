@@ -68,6 +68,16 @@ Stop with `docker compose down`. Your data stays in `TRUSTBOOK_DATA`.
 Inside the container, `localhost` is the container itself. To reach Ollama, llama-server or LM Studio
 running on your computer, use `http://host.docker.internal:<port>/v1` (the presets do this for you).
 
+### Command line and Claude Code
+
+The image includes a `trustbook` command for scripts and agents: `docker compose exec app trustbook ask
+"…" --space MySpace --json`. It gives the same checked answers as the UI, with stable JSON and exit codes (2 means
+"not in your sources"). It can also be installed with pip on your own machine. A Claude Code skill is in
+[`skills/trustbook/`](skills/trustbook/SKILL.md). See [`docs/cli.md`](docs/cli.md).
+
+Which chat model to use: [`docs/MODELS.md`](docs/MODELS.md) lists the models measured on the Gate 3 evaluation
+and the recommended minimum.
+
 ## Adding sources
 
 Open a space and use **Add source**: upload files (PDF, Word, PowerPoint, Excel, text, audio), link a

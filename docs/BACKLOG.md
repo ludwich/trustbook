@@ -79,3 +79,25 @@ call for this question before touching grounding.
 The Qwen3.8-27B reference run stays around 78% precision. Before each gate, run the smoke set with a second
 model family next to the main model and report both, so a prompt or grounding change tuned to one family is
 seen early.
+
+## From Gate 3b pass (2026-10-13)
+
+### G3b-1 `python -m trustbook_cli` fallback for locked-down Windows
+Application control can block the pip-generated `trustbook.exe` ("Access denied"). Add
+`cli/src/trustbook_cli/__main__.py` so `python -m trustbook_cli` works, and document it in `docs/cli.md` and
+`skills/trustbook/SKILL.md` as the fallback, with a Git Bash shim (`~/bin/trustbook`) for Claude Code on Windows.
+
+### G3b-2 Optional API key for custom endpoints
+"Other OpenAI-compatible" chat endpoints and the speech-to-text endpoint have no API key field; only the
+OpenAI/Azure/Anthropic presets show one. OpenRouter, LiteLLM or `llama-server --api-key` need an optional key
+(stored only in `settings.json`, like the preset keys).
+
+### Gate 3b #8: Claude Code skill behaviour test (waived)
+Ludwig waived #8 at Gate 3b. Still to test: a cited answer through the skill, and a refusal that Claude does not
+retry, rephrase or answer from its own knowledge (D-090).
+
+### CLI nits
+- `trustbook.error/1` shows `"http_status": null` on a known 401.
+- `sources add --wait` shows no progress for about 30 s while the embedder loads on first use. On a cold CI
+  runner the first paste sat at "reading 0%" for 161–300+ s (startup calibration plus one embedder per
+  indexing stream). Show a "loading models" state instead of reading 0%.

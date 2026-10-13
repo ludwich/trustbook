@@ -48,8 +48,8 @@ as possible secrets: they contain private keys by design. No question depends on
 ## 2. Run the smoke set (Gate 1)
 
 Prerequisites: Trustbook is running (`http://localhost:8484`), setup is complete with your chat
-endpoint, and the corpus is in place. The runner needs Python 3.12 with `httpx` and `PyYAML`; the
-backend environment has both:
+endpoint, and the corpus is in place. The runner needs Python 3.12 with the `trustbook-cli` package
+(its API client, `cli/`) and `PyYAML`; the backend environment has both:
 
 ```sh
 uv run --project backend python eval/runner.py \
@@ -61,7 +61,10 @@ uv run --project backend python eval/runner.py \
   --min-precision 0.9
 ```
 
-Without uv: `pip install httpx pyyaml`, then `python eval/runner.py …` with the same arguments.
+Without uv: from the repository root, `pip install "./cli[eval]"` (the CLI with its `eval` extra:
+`httpx` and `PyYAML`), then `python eval/runner.py …` with the same arguments, or
+`trustbook eval …` (it adds `--base-url` from `TRUSTBOOK_URL` and maps the exit codes, see
+`docs/cli.md`).
 
 What happens:
 

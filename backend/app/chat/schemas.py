@@ -119,6 +119,17 @@ class ExpansionOut(BaseModel):
     referrer: str | None
 
 
+class WindowOut(BaseModel):
+    """A transcript window (D-091): the numbered chunks it names by their times only (its
+    children, and any neighbour that is also numbered), the neighbours whose text it shows (time
+    order) and the prompt tokens it adds. Never citable."""
+
+    source_id: str
+    numbered: list[str]
+    chunk_ids: list[str]
+    tokens: int
+
+
 class Diagnostics(BaseModel):
     """Scores behind an answer, for threshold tuning (the eval runner reads them; the UI doesn't).
 
@@ -148,6 +159,11 @@ class Diagnostics(BaseModel):
     verification pass, how many failed sentences miss a name or literal that the outline shows
     and no chunk holds. ``promoted_cited``: [kept sentences citing a promoted chunk, those of them
     also citing another chunk].
+
+    Transcript windows (D-091): ``windows`` (see :class:`WindowOut`), ``window_tokens`` (their
+    prompt tokens), ``window_fingerprint`` (a hash of their text; None: no window) and
+    ``window_only``: per verification pass, how many failed sentences miss a name, or use a word,
+    that a window shows and no chunk holds.
     """
 
     top_rerank: float | None = None
@@ -172,6 +188,10 @@ class Diagnostics(BaseModel):
     outline_fingerprint: str | None = None
     outline_only: list[int] = Field(default_factory=list)
     promoted_cited: list[int] = Field(default_factory=lambda: [0, 0])
+    windows: list[WindowOut] = Field(default_factory=list)
+    window_tokens: int = 0
+    window_fingerprint: str | None = None
+    window_only: list[int] = Field(default_factory=list)
 
 
 class MessageOut(BaseModel):

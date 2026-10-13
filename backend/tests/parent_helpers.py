@@ -298,3 +298,40 @@ class AllFiles(SnapshotFiles):
 
     def files(self, source_id: str) -> dict[str, list[LineRange | None]]:
         return {name: [(1, 100_000)] for name in self.FILES}
+
+
+# --- transcripts (D-091) ----------------------------------------------------------------------
+
+MEETING_TEXTS = (
+    ("Anna", "Welcome everyone to the planning call."),
+    ("Bo", "The budget for the bridge project is forty thousand euros."),
+    ("Anna", "We agreed to ship the release on Friday."),
+    ("Bo", "Carla will write the release notes."),
+    ("Anna", "The venue for the launch party is the harbour hall."),
+    ("Bo", "Testing starts on Monday morning."),
+    ("Anna", "Thanks, see you next week."),
+)
+
+
+def turn(
+    ordinal: int,
+    text: str,
+    *,
+    speaker: str | None = None,
+    seconds: int = 60,
+    tokens: int | None = None,
+) -> Spec:
+    """A transcript chunk ``seconds`` long at ``ordinal`` (start = ordinal × seconds)."""
+    start = ordinal * seconds
+    locator: dict[str, Any] = {"start_s": float(start), "end_s": float(start + seconds)}
+    locator["speaker"] = speaker
+    return Spec(ordinal, text, locator, None, None, tokens)
+
+
+def meeting_specs(*, tokens: int | None = None) -> list[Spec]:
+    """Seven one-minute turns of a planning call (ordinals 0-6), speakers set by hand: today's
+    readers set none, so only fixture locators carry them."""
+    return [
+        turn(n, text, speaker=speaker, tokens=tokens)
+        for n, (speaker, text) in enumerate(MEETING_TEXTS)
+    ]

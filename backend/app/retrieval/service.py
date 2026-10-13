@@ -30,7 +30,7 @@ from app.retrieval.fusion import (
     reciprocal_rank_fusion,
     select_within_budget,
 )
-from app.retrieval.parents import Expansion, OutlineBlock, expand
+from app.retrieval.parents import Expansion, OutlineBlock, TranscriptWindow, expand
 from app.retrieval.store import ChunkRow, FileRows, load_chunks, usable_sources
 
 logger = logging.getLogger("trustbook.retrieval")
@@ -99,13 +99,15 @@ class Retrieval:
     D-060 extras, then the chunks promoted as parent context (D-077).
     ``ranked``: every reranked candidate, best first (promoted chunks never enter it).
     ``source_ids``: the sources searched. ``outline``: the non-citable code outline (D-077,
-    D-079); never a chunk, never a premise, judge item or anchor.
+    D-079); never a chunk, never a premise, judge item or anchor. ``transcript_windows``: what was
+    said around the top transcript chunks (D-091); not citable either, in the same way.
     """
 
     chunks: list[RetrievedChunk]
     ranked: list[RetrievedChunk] = field(default_factory=list)
     source_ids: list[str] = field(default_factory=list)
     outline: tuple[OutlineBlock, ...] = ()
+    transcript_windows: tuple[TranscriptWindow, ...] = ()
 
     @property
     def promoted(self) -> list[RetrievedChunk]:
@@ -349,12 +351,13 @@ def with_parents(
     allowed_source_ids: Sequence[str],
     outline: bool = True,
     max_tokens: int = CONTEXT_TOKENS,
-) -> tuple[list[RetrievedChunk], tuple[OutlineBlock, ...]]:
-    """``chunks`` plus the chunks promoted as parent context, and the code outline (D-077).
+) -> tuple[list[RetrievedChunk], tuple[OutlineBlock, ...], tuple[TranscriptWindow, ...]]:
+    """``chunks`` plus the chunks promoted as parent context, the code outline (D-077) and the
+    transcript windows (D-091).
 
     See :mod:`app.retrieval.parents`. Promoted chunks go after every other chunk, in the order of
-    the children they were promoted for, and only into the free part of ``max_tokens``. Any
-    error gives no expansion: the context stays as it was.
+    the children they were promoted for, and only into the free part of ``max_tokens``; the
+    windows use what is left of it. Any error gives no expansion: the context stays as it was.
     """
     try:
         found = expand(
@@ -386,7 +389,14 @@ def with_parents(
             len(found.outline),
             found.outline_tokens,
         )
-    return [*chunks, *promoted], found.outline
+    for window in found.windows:
+        logger.info(
+            "Parent context: transcript window of %d chunk(s) around %s, %d tokens",
+            len(window.chunk_ids),
+            ", ".join(window.numbered_ids),
+            window.tokens,
+        )
+    return [*chunks, *promoted], found.outline, found.windows
 
 
 def retrieve(
@@ -403,7 +413,8 @@ def retrieve(
     """Run the full retrieval for ``query`` over the enabled, ready sources of a space.
 
     ``parent_context`` / ``outline``: the D-077 kill switches (``retrieval`` in settings). Off,
-    no chunk is promoted and no outline is built; ``outline`` off keeps the promotions.
+    no chunk is promoted and neither an outline nor a transcript window (D-091) is built;
+    ``outline`` off keeps the promotions and the windows.
     """
     allowed = list(source_ids) if source_ids is not None else usable_source_ids(engine)
     if not allowed:
@@ -419,8 +430,15 @@ def retrieve(
         file_rows=file_rows,
     )
     blocks: tuple[OutlineBlock, ...] = ()
+    windows: tuple[TranscriptWindow, ...] = ()
     if parent_context:
-        chunks, blocks = with_parents(
+        chunks, blocks, windows = with_parents(
             engine, chunks, ranked, file_rows=file_rows, allowed_source_ids=allowed, outline=outline
         )
-    return Retrieval(chunks=chunks, ranked=ranked, source_ids=allowed, outline=blocks)
+    return Retrieval(
+        chunks=chunks,
+        ranked=ranked,
+        source_ids=allowed,
+        outline=blocks,
+        transcript_windows=windows,
+    )

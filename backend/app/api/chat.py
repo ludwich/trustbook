@@ -59,8 +59,13 @@ def _conversation(store: ChatStore, conversation_id: str) -> ConversationOut:
 
 
 def sse(event: str, data: dict[str, Any]) -> str:
-    """One Server-Sent Event."""
-    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    """One Server-Sent Event.
+
+    The JSON is ASCII-only (``\\uXXXX`` escapes): line splitters such as Python's
+    ``str.splitlines`` (httpx ``iter_lines``) also break at U+2028, U+2029 and U+0085, which would
+    cut an event that quotes them in half. The escapes parse to the same strings.
+    """
+    payload = json.dumps(data, ensure_ascii=True, separators=(",", ":"))
     return f"event: {event}\ndata: {payload}\n\n"
 
 
