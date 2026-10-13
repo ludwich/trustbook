@@ -5,6 +5,10 @@ import type {
   Chunk,
   ChunkContext,
   Conversation,
+  IdeationAnswer,
+  IdeationEstimate,
+  IdeationSession,
+  IdeationSessionSummary,
   Message,
   Overview,
   SecretsReport,
@@ -28,6 +32,8 @@ import {
   sttCapability,
   ttsCapability,
   conversation as conversationFixture,
+  ideationSession as ideationSessionFixture,
+  withProgress,
 } from "./fixtures";
 import { server } from "./server";
 
@@ -59,6 +65,19 @@ export interface SpaceBackendOptions {
   estimate?: (items: SourceEstimateItem[]) => SourceEstimate;
   /** GET …/gate-log, as the server would send it (raw rows). */
   gateLog?: Record<string, unknown>[];
+  /** Stored idea sessions, most recently updated first. */
+  ideationSessions?: IdeationSession[];
+  ideationEstimate?: IdeationEstimate;
+  /** POST …/turn (answer null) and …/answer. Default: 500. */
+  ideationStream?: (args: {
+    sessionId: string;
+    answer: IdeationAnswer | null;
+  }) => Response | Promise<Response>;
+}
+
+function summaryOf(s: IdeationSession): IdeationSessionSummary {
+  const { nodes: _n, current_node_id: _c, risks: _r, ...summary } = s;
+  return summary;
 }
 
 /**
@@ -96,6 +115,15 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
       gateCorrect: [] as { id: number; body: unknown }[],
     },
     gateLog: [...(opts.gateLog ?? [])],
+    ideation: [...(opts.ideationSessions ?? [])],
+    ideationCalls: {
+      created: [] as unknown[],
+      streams: [] as { sessionId: string; answer: IdeationAnswer | null }[],
+      dismissed: [] as string[],
+      finished: [] as string[],
+      continued: [] as string[],
+      deleted: [] as string[],
+    },
   };
   let nextId = 1;
   const newSource = (over: Partial<Source>): Source => {
@@ -326,10 +354,99 @@ export function spaceBackend(opts: SpaceBackendOptions = {}) {
     }),
   );
 
+  /** Stores (or replaces) a session as the real backend would; it becomes the most recent one. */
+  const putSession = (session: IdeationSession) => {
+    state.ideation = [session, ...state.ideation.filter((x) => x.id !== session.id)];
+  };
+
+  server.use(
+    http.get("*/api/spaces/:sid/ideation/estimate", () =>
+      HttpResponse.json(
+        opts.ideationEstimate ?? { tokens_per_turn: 1800, seed_tokens: 400, remote: false },
+      ),
+    ),
+    http.get("*/api/spaces/:sid/ideation/sessions", () =>
+      HttpResponse.json(state.ideation.map(summaryOf)),
+    ),
+    http.post("*/api/spaces/:sid/ideation/sessions", async ({ request }) => {
+      const body = (await request.json()) as { idea: string };
+      state.ideationCalls.created.push(body);
+      const s = ideationSessionFixture({
+        id: `is_new${nextId++}`,
+        title: "",
+        idea: body.idea.trim(),
+      });
+      putSession(s);
+      return HttpResponse.json(s, { status: 201 });
+    }),
+    http.get("*/api/spaces/:sid/ideation/sessions/:id", ({ params }) => {
+      const s = state.ideation.find((x) => x.id === params.id);
+      return s
+        ? HttpResponse.json(s)
+        : HttpResponse.json({ detail: "Idea session not found." }, { status: 404 });
+    }),
+    http.delete("*/api/spaces/:sid/ideation/sessions/:id", ({ params }) => {
+      state.ideationCalls.deleted.push(String(params.id));
+      state.ideation = state.ideation.filter((x) => x.id !== params.id);
+      return new HttpResponse(null, { status: 204 });
+    }),
+    http.post("*/api/spaces/:sid/ideation/sessions/:id/turn", async ({ params }) => {
+      const args = { sessionId: String(params.id), answer: null };
+      state.ideationCalls.streams.push(args);
+      if (!opts.ideationStream) return HttpResponse.json({ detail: "No stream." }, { status: 500 });
+      return opts.ideationStream(args);
+    }),
+    http.post("*/api/spaces/:sid/ideation/sessions/:id/answer", async ({ params, request }) => {
+      const args = {
+        sessionId: String(params.id),
+        answer: (await request.json()) as IdeationAnswer,
+      };
+      state.ideationCalls.streams.push(args);
+      if (!opts.ideationStream) return HttpResponse.json({ detail: "No stream." }, { status: 500 });
+      return opts.ideationStream(args);
+    }),
+    http.post("*/api/spaces/:sid/ideation/sessions/:id/nodes/:nid/dismiss", ({ params }) => {
+      state.ideationCalls.dismissed.push(String(params.nid));
+      const s = state.ideation.find((x) => x.id === params.id);
+      if (!s) return HttpResponse.json({ detail: "Idea session not found." }, { status: 404 });
+      const gone = new Set([String(params.nid)]);
+      for (const n of s.nodes) if (n.parent_id && gone.has(n.parent_id)) gone.add(n.id);
+      const next = withProgress({
+        ...s,
+        nodes: s.nodes.map((n) =>
+          gone.has(n.id) ? { ...n, status: "dismissed", dismissible: false } : n,
+        ),
+      });
+      putSession(next);
+      return HttpResponse.json(next);
+    }),
+    http.post("*/api/spaces/:sid/ideation/sessions/:id/finish", ({ params }) => {
+      state.ideationCalls.finished.push(String(params.id));
+      const s = state.ideation.find((x) => x.id === params.id);
+      if (!s) return HttpResponse.json({ detail: "Idea session not found." }, { status: 404 });
+      const next: IdeationSession = {
+        ...s,
+        status: "finished",
+        finished_at: "2026-10-10T10:00:00Z",
+        brief_at: "2026-10-10T10:00:00Z",
+      };
+      putSession(next);
+      return HttpResponse.json(next);
+    }),
+    http.post("*/api/spaces/:sid/ideation/sessions/:id/continue", ({ params }) => {
+      state.ideationCalls.continued.push(String(params.id));
+      const s = state.ideation.find((x) => x.id === params.id);
+      if (!s) return HttpResponse.json({ detail: "Idea session not found." }, { status: 404 });
+      const next: IdeationSession = { ...s, status: "active", finished_at: null };
+      putSession(next);
+      return HttpResponse.json(next);
+    }),
+  );
+
   /** Stores the exchange as the real backend would, so a refetch after `done` sees it. */
   const persist = (conversationId: string, messages: Message[]) => {
     state.messages[conversationId] = [...(state.messages[conversationId] ?? []), ...messages];
   };
 
-  return { state, persist };
+  return { state, persist, putSession };
 }

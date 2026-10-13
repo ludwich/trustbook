@@ -1777,3 +1777,164 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   model, real bundled models), before the Playwright specs. It creates a space, pastes a source with `--wait`, asks
   an answerable question (exit 0, a verified answer whose first citation's text holds the fact), asks an
   unanswerable one (exit 2, `refused`, no citations), and deletes the space. Nothing is published unless it passes.
+
+## 2026-10-12 — Phase 4 (ideation)
+
+### D-093 One model call per turn; the server picks the branch
+- **Context:** SPEC §10 asks for one question at a time, each with a recommended answer, and a growing branch map.
+  It does not say who chooses the next branch or how many calls a turn takes.
+- **Decision:**
+  - The server picks the next branch (`ideation/map.py:next_node`). Depth first: a waiting question first, then
+    the first tentative branch under the most recently answered one, then the first tentative branch in tree
+    pre-order.
+  - One call per turn returns the question for that branch, the recommendation, at most 2 new branches the last
+    answer opened (with a parent from the map's short labels `n1`, `n2` …) and at most 2 risks. The question is
+    chosen before the call, so a branch an answer opens is asked right after the question already chosen for
+    that turn. Only when nothing is left to ask does an answer's turn make a second call, to ask the first new
+    branch.
+  - The first turn makes one extra call that seeds 3–4 branches and the session title (no chunks).
+  - Caps: 3–4 seeds, 2 new branches per answer, 3 levels, 30 live branches. Proposals with an unknown parent go
+    under the answered branch; ones too deep go under the deepest allowed ancestor; repeated titles are left out.
+- **Reason:** simplicity, then performance (§15): one call keeps a turn short on local models. A deterministic
+  order is testable and does not loop.
+- **Alternatives:** letting the model choose the branch (non-deterministic, loops); two calls per turn (branches,
+  then the question), slower for every turn.
+- **Mock:** seed and turn prompts are answered by the mock adapter; `TB-UNSUPPORTED` and `TB-SEEDS4` (idea: four
+  seeds, so the Gate 4 e2e stays mid-session), `TB-BRANCH` and "risk" (answer) are test hooks
+  (docs/ARCHITECTURE.md, "Test hooks").
+- **Prompts:** Trustbook's own wording; only the interview pattern is credited to Matt Pocock's grill-me (README).
+
+### D-094 Recommendations are grounded per sentence; a failing cited sentence is removed, never relabelled
+- **Decision:**
+  - Retrieval and the verifier are the chat ones (`api/grounded.py`, a refactor of `chat_service` with no change in
+    behaviour). The query is the idea plus the branch title.
+  - Layer 2: no ready, ticked source, or a top reranker score below `refuse_threshold` → the model gets no chunks,
+    so the recommendation can only hold suggestions.
+  - Layer 3: a sentence citing an id that was not in the prompt is dropped. A sentence with an empty `chunk_ids`
+    list is a **suggestion** (chat drops it) and is labelled "Suggestion" in the UI.
+  - Layers 4 and 5: cited sentences are checked like answer sentences (grounding checker, code checks, code judge
+    rescue and confirmation) and their citations chosen with `choose_citations`. A failing cited sentence goes to
+    `removed` (the "Unverified, not from your sources" drawer). It is **never** shown as a suggestion: the model
+    claimed it came from the sources, and it did not.
+  - The refusal rule applies to the cited sentences: more than half failing, or the first failing, removes every
+    cited sentence. Suggestions stay.
+  - No regeneration (turns stay short). Grounding checker off: citations stay, badge `unverified`, as in chat.
+  - `grounding` is `cited` / `partly_cited` / `suggestion` (all / some / none of the shown sentences cited);
+    `badge` is the chat badge over the cited sentences (null when none is shown).
+- **Reason:** grounding correctness first (§15); SPEC §10 says "same retrieval + verification" and "otherwise
+  labelled suggestion". Relabelling a failed cited sentence would present an unsupported claim in the same
+  place as the model's own ideas and hide that it failed.
+- **Alternatives:** dropping uncited sentences as chat does (there would be no "suggestion"); demoting failures to
+  suggestions (weakens layer 4).
+
+### D-095 Questions, branch titles and risks are not checked against the sources
+- **Decision:** they carry no citations, no badge, and are never shown as grounded. The prompts forbid stating
+  facts about the sources in them; facts belong only in cited recommendation sentences. Inline citation markers
+  in them are removed.
+- **Reason:** they are prompts for the user's thinking, not claims; checking them would need a premise they do
+  not have. Keeping facts out of them keeps every shown fact verifiable.
+- **Alternatives:** verifying questions as sentences (most would fail as "unsupported" questions).
+
+### D-096 Skip resolves the branch; the brief lists it as an open question again
+- **Decision:** skip sets `status: resolved`, `answer_source: skipped`, no answer. The brief shows it in the Q&A
+  as "Skipped" and again under "Open questions".
+- **Reason:** otherwise a session with one skip could never be complete; the brief still keeps the question.
+- **Alternatives:** keeping skipped branches open (sessions never complete); dropping them (the question is lost).
+
+### D-097 Tentative counts as open; only tentative branches can be dismissed
+- **Decision:** progress "X resolved, Y open" counts tentative and open branches as open; dismissed ones are not
+  counted. A session is complete when it has branches and none is open. Branches an answer opens are tentative
+  too (dashed until asked). Any tentative branch with nothing asked under it can be dismissed (seeds and
+  answer branches), which dismisses its descendants.
+- **Reason:** a branch not yet asked is not resolved. Allowing answer branches to be dismissed keeps sessions
+  finite when a model over-proposes.
+- **Alternatives:** dismissing only seeds (SPEC's minimum; answer branches could not be removed).
+
+### D-098 The brief is deterministic and rewritten on every finish; finished sessions can be continued
+- **Decision:**
+  - "Finish now" works at any time, even while a turn runs. It marks the session finished first; the running turn
+    then stores nothing (every turn write checks, in one transaction, that the session is active and the branch
+    still waits).
+  - The brief is rendered from the stored session without a model call: idea, Q&A in answer order (accepted
+    recommendations marked "(accepted recommendation)", skips marked), cited anchors (verified recommendation
+    sentences only, with source title and place), open risks, open questions (not asked, waiting, skipped) and a
+    Mermaid `mindmap` (titles reduced to safe characters). Written atomically to `ideas/<session>/brief.md`.
+  - "Continue" reopens a finished session; the next finish rewrites the brief.
+- **Reason:** simplicity and grounding (a model-written brief would need its own verification); reproducible.
+- **Alternatives:** an LLM-written summary (unverified text in a document that looks authoritative).
+
+### D-099 Briefs are kept out of every ingestion path
+- **Decision:**
+  - Ideation cannot reach ingestion, parsing, the index or fetch code (static test).
+  - Every brief starts with `<!-- trustbook:idea-brief -->`. A linked folder skips files that start with it; an
+    upload that starts with it fails at once ("This file is a Trustbook idea brief. Idea briefs are never used
+    as sources, …") and its file is not kept; a paste gets `422` with the same text.
+  - A linked folder skips Trustbook space folders (`space.json` + `space.db`) and the data folder (`global.db` +
+    `config/settings.json` + `spaces`): the home folder is the browse root and `~/Trustbook` usually sits in
+    it. Linking one directly fails with a plain reason. This also keeps `settings.json` (API keys) and other
+    spaces' snapshots out of a source.
+- **Reason:** SPEC §10 ("never indexed as sources") and Gate 4 ("briefs never appear in chat citations"); data
+  safety (§15).
+- **Known limit:** a brief's text pasted without its first line, or retyped, is ordinary text.
+- **Alternatives:** a path check only (an exported brief moved elsewhere would be read).
+
+### D-100 Ideation works without sources but needs the chat model
+- **Decision:** a space with no ready, ticked source can run sessions; every recommendation is then a suggestion.
+  Turns need chat to be set up (`409` "Set up the chat model in Settings first."); creating, reading,
+  finishing, exporting and deleting sessions do not.
+- **Reason:** ideas often come before sources; the labels keep it honest.
+
+### D-101 Turns stream Server-Sent Events like chat; every call is logged; estimate before remote sessions
+- **Decision:**
+  - `/turn` and `/answer` reuse the chat stream (`status`, then `done` with the stored session, or `error`), run in
+    the space's request-log context, so every seed, turn and judge call is in the request log with the space.
+  - A per-session lock gives `409` while a turn runs. `Session.running` reports that lock, so a page reloaded
+    during a turn waits for it instead of asking again (D-102).
+  - `GET …/ideation/estimate` returns the approximate tokens per turn and for the seed call, and whether the chat
+    endpoint is remote; the UI shows it before a session when remote (SPEC §11).
+  - Node diagnostics (scores, failed sentences, timings, calls) are stored but not returned.
+- **Reason:** simplicity (one stream format and client), SPEC §11.
+- **Alternatives:** blocking JSON (no progress for 10–60 s turns on local models).
+
+### D-102 Ideation tab: a reload opens the newest session; turn state lives outside React
+- **Context:** SPEC §10 asks for sessions that survive a reload; it does not say which session the tab shows or
+  what the page does with a turn the server is still running.
+- **Decision:**
+  - After a reload the Ideation tab opens the most recently updated session (the first of `GET /sessions`), with
+    its waiting question and map; picking another session or "New idea" overrides that until the next reload.
+  - The state of a turn (running, stage, the answer being sent, the error) is kept in a module-level store
+    outside React (`useIdeationStream.ts`), keyed by space and session. The stream keeps reading when the tab
+    unmounts (e.g. the user looks at Chat), and the tab shows the running turn again when it comes back.
+  - API contract: `Session.running` (`GET /sessions/{id}` and every `Session` response) is true while the
+    session's turn lock is held. A page that is not streaming that turn (after a reload) shows "Preparing the
+    next question…", hides "Ask the next question" and Dismiss, and refetches the session every second until
+    `running` is false. The `done` event's session always has `running: false`.
+- **Reason:** simplicity (§15): the newest session is almost always the one being worked on; the server finishes
+  a turn whether or not anyone listens, so the page must not lose it or offer a request that only gets a `409`.
+- **Alternatives:** remembering the selected session in local storage (more state, stale after deletes);
+  re-attaching to the running stream (needs server-side fan-out of events); turn state in React state (lost on
+  tab switch).
+
+### D-103 Ideation turns: report the sources first, then suggest; no thinking before the JSON
+- **Finding (real model, before handing over):** a session on the `Smoke` space (requests code and docs, Qwen3.6-35B-A3B
+  on llama-server) with the idea "a command-line tool, built on requests, that downloads URLs with retries, Basic
+  auth and a progress bar" had two problems.
+  - **No citations.** Every recommendation was an uncited suggestion. The one cited sentence mixed the model's own
+    choice ("a total of 3 attempts, a backoff factor of 0.1") into a sentence citing `advanced.rst`, and the judge
+    correctly vetoed it. The brief's "Cited anchors" was empty, which fails Gate 4's "brief with cited anchors".
+  - **Empty replies.** With thinking on, a turn's reasoning used the whole 4,096-token budget twice (about 50 s
+    each), and the reply was empty: "The chat model's reply could not be used".
+- **Decision:**
+  1. **The recommendation has two parts.** First, when chunks bear on the question, 1–2 sentences that only report
+     what the chunks state, in their words, citing them. Then the model's own suggestion, in separate uncited
+     sentences that hold every choice (numbers, settings, designs). Sentences about the chunks themselves ("the
+     chunks do not say…") are not allowed. Grounding is unchanged: a cited sentence still passes every layer or is
+     removed (D-094).
+  2. **Seed and turn calls ask the model not to think first** (`think=False`, through `generate_structured`). A
+     turn is a short structured reply. Chat answers keep thinking, so the chat request and Gate 3 are unchanged.
+- **Measured (same space and idea, 4 turns + finish):**
+  - **Before:** 0 cited sentences; turns of 26–61 s, and one turn failed with an empty reply.
+  - **After:** a verified cited sentence in turn 1 (README) and a partly cited recommendation in turn 3. The latter
+    said "by default, Requests does not retry failed connections… retries with backoff using urllib3.util.Retry",
+    citing `advanced.rst` 1032–1056, followed by the model's own 502/503/504 suggestion, uncited. Turns took
+    7–27 s, and the brief's "Cited anchors" lists both.

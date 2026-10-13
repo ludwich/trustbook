@@ -19,6 +19,7 @@ from app.api import (
     capabilities,
     chat,
     gate_log,
+    ideation,
     jobs,
     overview,
     request_log,
@@ -63,6 +64,7 @@ def _api_router() -> APIRouter:
         chat,
         overview,
         gate_log,
+        ideation,
     ):
         router.include_router(module.router)
     return router

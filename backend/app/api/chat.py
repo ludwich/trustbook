@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
 from app.api.deps import ServicesDep
+from app.api.grounded import refuse_threshold, retriever, verifier_factory
 from app.capabilities.adapters.base import AdapterError, ChatAdapter
 from app.capabilities.adapters.factory import build_chat_adapter
 from app.capabilities.bundled import ProviderUnavailableError
@@ -31,9 +32,6 @@ from app.chat.schemas import (
 )
 from app.chat.service import ChatService, EventSink
 from app.db.engine import get_engine
-from app.grounding.code_judge import CodeJudge
-from app.grounding.verify import Verifier, build_verifier, checker_scores
-from app.retrieval.service import Retrieval, retrieve
 from app.retrieval.store import source_counts
 from app.services import Services
 from app.spaces.service import SpaceRecord
@@ -119,36 +117,12 @@ def chat_service(
     temperature and seed; the seed also goes to the gate and the judge."""
     engine = get_engine(space.db_path)
     seed = generation.seed if generation is not None else None
-    index = services.indexes.for_space(space.id)
-    settings = services.settings.load()
-
-    def run_retrieval(question: str) -> Retrieval:
-        providers = services.providers
-        with providers.use.shared():  # waits while calibration measures
-            return retrieve(
-                engine,
-                index,
-                providers.embedder(),
-                providers.reranker(),
-                question,
-                parent_context=settings.retrieval.parent_context,
-                outline=settings.retrieval.outline,
-            )
-
-    def verifier() -> Verifier:
-        return build_verifier(
-            services.grounding_settings(),
-            checker_scores(services.providers),
-            space.folder,
-            CodeJudge(services.chat_adapter, seed=seed),
-        )
-
     return ChatService(
         ChatStore(engine),
-        retrieve=run_retrieval,
+        retrieve=retriever(services, space),
         chat_adapter=services.chat_adapter,
-        refuse_threshold=settings.thresholds.refuse,
-        verifier=verifier,
+        refuse_threshold=refuse_threshold(services),
+        verifier=verifier_factory(services, space, seed),
         gate=Gate(GateLogStore(engine), adapter=gate_adapter(services), seed=seed),
         generation=generation,
     )

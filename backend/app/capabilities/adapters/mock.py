@@ -22,6 +22,16 @@ Test hooks (docs/ARCHITECTURE.md, "Test hooks"):
 
 The mock never quotes the outline or a window otherwise: answers and judge verdicts read only the
 numbered chunks (:func:`~app.chat.prompt.parse_prompt` returns both separately).
+- Ideation (D-093): seed prompts (schema with ``branches``) get three branches from the idea's
+  first content word ("Who it is for", "What your sources say about <word>", "Risks and open
+  problems"). An idea containing ``TB-SEEDS4`` gets a fourth, "How it is paid for", before the
+  risks (within the map's four-seed cap), so a session stays mid-session for longer; the trigger
+  is left out of the title and branch names. Turn prompts (schema with ``question``) get a fixed
+  question about the branch and a recommendation quoting the chunk sentence that shares most
+  words with the idea and branch, citing it; without such a chunk, one uncited suggestion.
+  ``TB-UNSUPPORTED`` in the idea adds :data:`UNSUPPORTED_SENTENCE` citing ``c1`` (it fails
+  verification and is removed). A last answer containing ``TB-BRANCH`` adds one new branch under
+  the answered one; one containing "risk" adds a risk.
 - Judge prompts (schema with ``verdicts``): a statement is supported when its cited lines share
   at least two content words with it; each cited chunk's whole line range is the evidence.
 - :class:`MockSearchAdapter`: the ``mock`` web-search provider, fixed results for any query.
@@ -41,6 +51,7 @@ from app.capabilities.adapters.search import demote_homepages
 from app.chat.prompt import PromptChunk, parse_prompt
 from app.chat.text import content_terms, truncate
 from app.grounding.code_judge import parse_judge_prompt
+from app.ideation.prompt import parse_ideation_prompt
 from app.retrieval.parents import WINDOW_PLACEHOLDER
 
 MOCK_MODEL = "mock"
@@ -55,6 +66,10 @@ WINDOW_FACT_TRIGGER = "TB-WINDOW-FACT"
 _WINDOW_LINE = re.compile(r"^\s+\[[^\]]*\]\s+(.*)$")
 _SPEAKER = re.compile(r"^[^\s:][^:]{0,38}:\s+")
 JUDGE_MIN_SHARED = 2
+BRANCH_TRIGGER = "TB-BRANCH"
+SEEDS4_TRIGGER = "TB-SEEDS4"
+SEEDS4_BRANCH = "How it is paid for"
+IDEA_SUGGESTION = "Start small and try it with one real user before building more."
 
 
 def _sentences(text: str) -> list[str]:
@@ -227,6 +242,50 @@ def grounded_overview(chunks: Sequence[PromptChunk]) -> dict[str, Any]:
     return {"sentences": sentences, "questions": questions}
 
 
+def ideation_seed(prompt: str) -> dict[str, Any]:
+    """Three branches named after the idea's first content word (four with ``TB-SEEDS4``), and a
+    title from the idea's start."""
+    parts = parse_ideation_prompt(prompt)
+    idea = parts.idea.replace(SEEDS4_TRIGGER, " ")
+    terms = content_terms(idea)
+    about = f"What your sources say about {terms[0]}" if terms else "What your sources say"
+    title = truncate(idea, 40) or "Untitled idea"
+    extra = [SEEDS4_BRANCH] if SEEDS4_TRIGGER in parts.idea else []
+    return {"title": title, "branches": ["Who it is for", about, *extra, "Risks and open problems"]}
+
+
+def ideation_turn(prompt: str) -> dict[str, Any]:
+    """A fixed question about the branch, a recommendation quoting the best chunk (or one
+    suggestion), and the ``TB-BRANCH`` / "risk" hooks on the last answer."""
+    parts = parse_ideation_prompt(prompt)
+    question = ""
+    sentences: list[dict[str, Any]] = []
+    if parts.target_title:
+        question = f"What should be decided about “{parts.target_title}”?"
+        terms = set(content_terms(f"{parts.idea} {parts.target_title}"))
+        scored = [(_overlap(terms, c.text), i, c) for i, c in enumerate(parts.chunks)]
+        matching = sorted((s for s in scored if s[0] > 0), key=lambda s: (-s[0], s[1]))
+        if matching:
+            best = matching[0][2]
+            sentences.append({"text": _best_sentence(best, terms), "chunk_ids": [best.label]})
+        else:
+            sentences.append({"text": IDEA_SUGGESTION, "chunk_ids": []})
+        if UNSUPPORTED_TRIGGER in parts.idea and parts.chunks:
+            sentences.append({"text": UNSUPPORTED_SENTENCE, "chunk_ids": [parts.chunks[0].label]})
+    answer = parts.last_answer or ""
+    branches: list[dict[str, str]] = []
+    if BRANCH_TRIGGER in answer and parts.last_label:
+        topic = truncate(answer.replace(BRANCH_TRIGGER, " "), 40) or "the answer"
+        branches.append({"title": f"Follow-up on {topic}", "parent": parts.last_label})
+    risks = [f"Raised in an answer: {truncate(answer, 80)}"] if "risk" in answer.lower() else []
+    return {
+        "question": question,
+        "recommendation": {"sentences": sentences},
+        "new_branches": branches,
+        "risks": risks,
+    }
+
+
 class MockChatAdapter:
     """Replies "OK" to the health ping; grounded JSON for chat prompts; otherwise an echo."""
 
@@ -252,6 +311,11 @@ class MockChatAdapter:
             return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
         if isinstance(properties, dict) and "verdicts" in properties:
             text = json.dumps(judge_verdicts(last_user))
+            return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
+        if isinstance(properties, dict) and ("branches" in properties or "question" in properties):
+            prompt = next((m["content"] for m in messages if m["role"] == "user"), "")
+            data = ideation_seed(prompt) if "branches" in properties else ideation_turn(prompt)
+            text = json.dumps(data, ensure_ascii=False)
             return ChatResult(text=text, usage=Usage(prompt_tokens, len(text.split())))
         if isinstance(properties, dict) and "sentences" in properties:
             # The prompt with the chunks is the first user message (a retry appends more).

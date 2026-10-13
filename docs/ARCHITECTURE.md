@@ -782,6 +782,15 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
     window otherwise.
   - The mock code judge supports a sentence when it shares at least two content words with the cited lines,
     and names those lines as evidence.
+- **Mock ideation (D-093):** seed prompts get "Who it is for", "What your sources say about <first content word
+  of the idea>", "Risks and open problems"; an idea containing `TB-SEEDS4` gets a fourth, "How it is paid for",
+  before the risks (within the four-seed cap; the trigger is left out of the title and branch names), so a
+  session stays mid-session after a few answers (Gate 4 e2e). Turn prompts get "What should be decided about “<branch>”?" and a
+  recommendation quoting the chunk sentence sharing most words with idea + branch, citing it (else the
+  suggestion "Start small and try it with one real user before building more."). `TB-UNSUPPORTED` in the idea
+  adds the unsupported sentence citing c1 (removed). A last answer with `TB-BRANCH` adds a branch
+  "Follow-up on <answer>" under the answered one; one containing "risk" adds the risk
+  "Raised in an answer: <answer>".
 - **Mock web search:** a `mock` web-search provider returns fixed results for any query, including bare
   homepages (`https://www.example.com/sv-se/`, `https://example.org/`) and specific pages
   (`https://docs.example.com/certificates/ab-731`, `https://learn.example.com/exams/ab-731`).
@@ -807,3 +816,136 @@ What `eval/runner.py` relies on beyond the Phase 1–2 contract (details: `eval/
   (per the first `GET /api/jobs`) is only noted; its source must still have the expected status. `--refresh`
   calls `POST /api/spaces/{sid}/sources/{source_id}/refresh` for every corpus source already in the space, so
   every job is checked on the running image (a refused refresh fails the run).
+
+## Phase 4: ideation (SPEC §10, D-093 to D-101)
+
+### Modules
+| Module | Responsibility |
+|---|---|
+| `ideation/map.py` | Pure branch-map functions: tree order, next branch, progress, completion, dismissal, caps, Mermaid |
+| `ideation/prompt.py` | Seed and turn prompts and JSON schemas (Trustbook's own wording); `parse_ideation_prompt` for the mock |
+| `ideation/output.py` | Seed and turn reply validation (uncited recommendation sentences are suggestions) |
+| `ideation/engine.py` | One turn: retrieval, layer 2, generation, layers 4-5 on cited sentences, new branches and risks |
+| `ideation/repository.py` | `IdeationStore` over `ideation_sessions` / `ideation_nodes`; API shapes |
+| `ideation/brief.py` | Deterministic `ideas/<session>/brief.md` |
+| `ideation/marker.py` | The brief marker (`<!-- trustbook:idea-brief -->`); ingestion imports it to keep briefs out |
+| `ideation/service.py` | Turn runner (per-session lock), answer, dismiss, finish, continue, delete, token estimate |
+| `api/ideation.py` | Routes below |
+| `api/grounded.py` | Retrieval and verifier construction shared by chat and ideation |
+
+Schema v6 (`space/006_ideation.sql`) adds `ideation_nodes.origin` (`seed`/`answer`, default `answer`),
+`recommendation` (JSON `Recommendation`), `asked_at`, `answered_at`, `diagnostics` (JSON, never returned), and
+`ideation_sessions.risks` (JSON `[{"text","node_id"}]`, default `[]`) and `brief_at`. `recommended_answer` holds
+the recommendation's plain text (what "accept" stores as the answer); `citations` the flat
+`[{"chunk_id","verifier_score"}]` of its verified sentences. Images before Phase 4 cannot open a v6 `space.db`.
+
+### Ideation API (prefix `/api/spaces/{sid}/ideation`)
+- `GET /estimate` → `{"tokens_per_turn": int, "seed_tokens": int, "remote": bool}`. Show "About N tokens per
+  question are sent to <host>" before starting a session when `remote` (SPEC §11). The code judge's calls for
+  code sentences come on top.
+- `GET /sessions` → `SessionSummary[]`, most recently updated first.
+- `POST /sessions` body `{"idea": str}` (1–4,000 characters, not blank; trimmed) → `201 Session` with
+  `nodes: []`. No model call; the client then calls `/turn`. Blank or too long → `422`.
+- `GET /sessions/{id}` → `Session` (`404 {"detail": "Idea session not found."}`). `running: true` while a
+  `/turn` or `/answer` stream of the session holds its turn lock (also when the page that started it was
+  reloaded or closed). The UI then shows "Preparing the next question…" and refetches every second until it is
+  `false`, instead of offering "Ask the next question" (which would get the 409 below). Every `Session` response
+  carries it; the `done` event's session always has `running: false` (D-102).
+- `DELETE /sessions/{id}` → `204`; removes the rows and `ideas/<id>/` (also while a turn runs; that turn's
+  result is dropped and its stream ends with `error` "This idea session was deleted.").
+- `POST /sessions/{id}/turn` (no body) → `text/event-stream`. Seeds the map when it is empty (3–4 tentative
+  branches and a title), then asks the next branch. When a question is already waiting it makes no model call
+  and just sends `done`, so it doubles as "Ask again" after an `error` and as resume after a reload.
+- `POST /sessions/{id}/answer` body `{"node_id": str, "action": "answer"|"accept"|"skip", "text"?: str}` →
+  `text/event-stream`. `text` (1–4,000, not blank) is required for `answer` and must be absent otherwise
+  (`422`). The answer is stored before the stream starts; the stream then runs the next turn, which also adds
+  the branches and risks this answer opened. `accept` stores the recommendation's text as the answer
+  (`answer_source: "accepted"`); `skip` resolves the branch with no answer (`answer_source: "skipped"`; the brief
+  lists it as an open question again).
+- `POST /sessions/{id}/nodes/{node_id}/dismiss` → `Session`. Only `tentative` branches with nothing asked under
+  them (`node.dismissible`); the branch and its descendants become `dismissed`.
+- `POST /sessions/{id}/finish` → `Session` ("Finish now", any time, also mid-turn). Sets `status: "finished"`
+  first (a running turn's result is then discarded), then (re)writes the brief and sets `brief_at`.
+- `POST /sessions/{id}/continue` → `Session` with `status: "active"`, `finished_at: null` (the brief and
+  `brief_at` stay until the next finish rewrites them).
+- `GET /sessions/{id}/brief` → `200 text/markdown; charset=utf-8`, `Content-Disposition: attachment;
+  filename="idea-brief-<title-slug>.md"`; `404 {"detail": "There is no brief yet. Press Finish now to write it."}`
+  before the first finish.
+
+Conflicts (`409 {"detail": str}`, show `detail` as is):
+
+| When | detail |
+|---|---|
+| turn/answer while chat is not set up | "Set up the chat model in Settings first." |
+| turn/answer/dismiss on a finished session | "This session is finished. Press Continue to add to it." |
+| turn/answer while a turn of the session runs | "The next question is still being prepared. Wait a moment." |
+| answer to a resolved branch | "This question was already answered." |
+| answer to a branch not asked yet | "This branch has not been asked yet." |
+| accept without recommendation sentences | "There is no recommended answer to accept. Type an answer or skip." |
+| dismiss a branch that is not tentative | "Only branches that have not been asked yet can be dismissed." |
+| dismiss a branch with asked questions under it | "This branch has answered questions under it, so it cannot be dismissed." |
+
+Unknown `node_id`: `404 {"detail": "Question not found."}`.
+
+Stream events (same framing as chat; every stream ends with `done` or `error`; no per-sentence streaming):
+
+| event | data |
+|---|---|
+| `status` | `{"stage": "retrieving"|"generating"|"checking"}` (seeding is `generating`; `checking` only when a cited sentence is verified) |
+| `done` | `{"session": Session}` (the stored state; a discarded turn sends the session as it is, e.g. finished) |
+| `error` | `{"message": str}`, e.g. "The chat model's reply could not be used. Press Ask again." or the endpoint's error. Nothing of the failed turn is stored; an answer sent before it is kept. |
+
+```
+SessionSummary = {"id": str, "title": str, "idea": str, "status": "active"|"finished",
+                  "progress": {"resolved": int, "open": int},   // "X resolved, Y open"; open = tentative + open
+                  "complete": bool,                             // has branches and none is open
+                  "created_at": str, "updated_at": str, "finished_at": str|null, "brief_at": str|null}
+Session = SessionSummary + {
+  "nodes": Node[],                    // tree pre-order (parents before children, siblings by ordinal)
+  "current_node_id": str|null,        // the branch whose question waits for an answer
+  "risks": [{"text": str, "node_id": str|null}],   // node_id: the branch whose answer raised it
+  "running": bool}                    // a turn of this session is in progress on the server
+Node = {"id": str, "parent_id": str|null, "ordinal": int, "depth": int,   // depth 0 = seed level; max 2
+        "title": str, "status": "tentative"|"open"|"resolved"|"dismissed",
+        "origin": "seed"|"answer",
+        "question": str|null, "recommendation": Recommendation|null,
+        "final_answer": str|null, "answer_source": "user"|"accepted"|"skipped"|null,
+        "asked_at": str|null, "answered_at": str|null,
+        "dismissible": bool}
+Recommendation = {
+  "grounding": "cited"|"partly_cited"|"suggestion",  // all / some / none of the shown sentences are cited
+  "badge": "verified"|"partially_verified"|"unverified"|null,  // as chat; null when no cited sentence is shown
+  "sentences": [{"text": str, "citations": Citation[], "kind": "cited"|"suggestion"}],
+  "removed": [str]}                   // cited sentences that failed verification
+Citation = {"n": int, "chunk_id": str, "source_id": str, "source_title": str, "locator": object}  // as chat
+```
+
+UI rules the API is built for:
+- Map: `tentative` dashed, `resolved` solid, `open` = the current question, `dismissed` hidden (or greyed).
+  × only where `dismissible`. Header "X resolved, Y open"; "Complete" when `complete`.
+- A `kind: "suggestion"` sentence carries the tag "Suggestion" and no citation numbers. Cited sentences use
+  the chat `CitedText` (citation numbers open the source viewer, numbers are per recommendation). `removed`
+  goes in the collapsed "Unverified, not from your sources" drawer; it is never shown as a suggestion.
+  `badge` uses the chat badge component (`unverified`: grounding checker off).
+- Questions, branch titles and risks are never shown as grounded (no badge, no citations).
+- Accept is enabled only when `recommendation.sentences` is not empty.
+- Answered branches with `question` give the interview history (sort by `answered_at`).
+
+### Grounding of recommendations (D-094, D-095)
+Per turn: retrieval over "idea + branch title" with the chat retrieval (`api/grounded.py`). Layer 2: no
+ready, ticked source or top score < `refuse_threshold` → the model gets no chunks and a note that every
+sentence must be a suggestion. Layer 3: a sentence citing an id not in the prompt is dropped (never made a
+suggestion); an empty `chunk_ids` list makes a suggestion. Layers 4 and 5: cited sentences are verified with
+the chat verifier (checker, code checks, code judge, judge confirmation) and their citations chosen with
+`choose_citations`. Failing ones are removed; if the refusal rule fires over the cited sentences (more than
+half fail, or the first), all cited sentences are removed. No regeneration. The seed call gets no chunks.
+
+### Briefs never become sources (D-099)
+- `ideas/<session>/brief.md` is never indexed: ideation has no path to ingestion or the index
+  (`tests/test_ideation_isolation.py`).
+- Linked folders skip any directory holding `space.json` + `space.db` (a space) or `global.db` +
+  `config/settings.json` + `spaces` (the data folder); linking one directly fails with "This is a Trustbook data
+  folder. Its files are never used as sources." Files starting with the marker are skipped
+  (`stats.skipped_briefs`, warning "N files skipped: Trustbook idea briefs are never used as sources.").
+- An uploaded file starting with the marker fails at once (`failure_reason` "This file is a Trustbook idea
+  brief. …"); a pasted one gets `422` with the same text.

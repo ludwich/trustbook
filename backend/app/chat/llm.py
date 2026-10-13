@@ -39,12 +39,18 @@ def _chat(
     max_tokens: int,
     schema: dict[str, Any],
     seed: int | None,
+    think: bool = True,
 ) -> ChatResult:
     started = time.perf_counter()
     result: ChatResult | None = None
     try:
         result = adapter.chat(
-            messages, temperature=temperature, max_tokens=max_tokens, json_schema=schema, seed=seed
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_schema=schema,
+            seed=seed,
+            think=think,
         )
         return result
     finally:
@@ -68,13 +74,15 @@ def generate_structured[T](
     temperature: float = TEMPERATURE,
     seed: int | None = None,
     calls: list[AnswerCall] | None = None,
+    think: bool = True,
 ) -> T:
     """Ask for JSON matching ``schema`` and parse it; retry once if the reply is unusable.
 
     ``temperature`` and ``seed`` default to the SPEC's 0.2 and none; the eval runner overrides
     them per request (F5). Raises :class:`InvalidOutputError` when both attempts fail, and lets
     adapter errors through. ``calls``: every request made (the retry included) is appended to it,
-    also when its reply is unusable or the adapter fails (D-080).
+    also when its reply is unusable or the adapter fails (D-080). ``think`` False asks a reasoning
+    model to answer without thinking first (ideation turns, D-103).
     """
     first = _chat(
         adapter,
@@ -84,6 +92,7 @@ def generate_structured[T](
         max_tokens=max_tokens,
         schema=schema,
         seed=seed,
+        think=think,
     )
     try:
         return parse(first.text)
@@ -102,5 +111,6 @@ def generate_structured[T](
         max_tokens=max_tokens,
         schema=schema,
         seed=seed,
+        think=think,
     )
     return parse(second.text)

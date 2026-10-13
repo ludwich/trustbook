@@ -137,6 +137,8 @@ class IdeationSession(SQLModel, table=True):
     created_at: str
     updated_at: str
     finished_at: str | None = None
+    risks: str = "[]"  # JSON [{"text", "node_id"}] (migration 006)
+    brief_at: str | None = None  # when ideas/<id>/brief.md was last written
 
 
 class IdeationNode(SQLModel, table=True):
@@ -155,6 +157,13 @@ class IdeationNode(SQLModel, table=True):
     citations: str = "[]"
     created_at: str
     updated_at: str
+    # Migration 006 (D-093 to D-101): seed or answer branch, the grounded recommendation (JSON),
+    # when the question was asked and answered, and diagnostics (JSON, never shown).
+    origin: str = "answer"
+    recommendation: str | None = None
+    asked_at: str | None = None
+    answered_at: str | None = None
+    diagnostics: str | None = None
 
 
 class Overview(SQLModel, table=True):

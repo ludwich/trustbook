@@ -225,7 +225,7 @@ def test_migration_005_applies_to_an_existing_space_db(tmp_path: Path) -> None:
     source = add_source(engine, "requests")
     old = adder(engine, source, parent_columns=False)(0)
     engine.dispose()
-    assert migrate(tmp_path / "space.db", "space") == 5
+    assert migrate(tmp_path / "space.db", "space") >= 5  # 005 and any later migration ran
     engine = get_engine(tmp_path / "space.db")
     with engine.connect() as conn:
         columns = {r[1] for r in conn.execute(text("PRAGMA table_info(chunks)"))}

@@ -4,6 +4,8 @@ import { api } from "./client";
 import type {
   GateDecision,
   GateLogEntry,
+  IdeationSession,
+  IdeationSessionSummary,
   Overview,
   PasteSourceCreate,
   SearchItem,
@@ -43,6 +45,10 @@ export const queryKeys = {
   gateLog: (sid: string) => ["spaces", sid, "gate-log"] as const,
   folderEstimate: (sid: string, path: string) =>
     ["spaces", sid, "estimate", "folder", path] as const,
+  ideationSessions: (sid: string) => ["spaces", sid, "ideation", "sessions"] as const,
+  ideationSession: (sid: string, id: string) =>
+    ["spaces", sid, "ideation", "sessions", id] as const,
+  ideationEstimate: (sid: string) => ["spaces", sid, "ideation", "estimate"] as const,
 };
 
 /** Jobs that still need work (shown in the header indicator). */
@@ -573,5 +579,115 @@ export function useCorrectGateDecision(sid: string) {
       if (ctx?.previous) qc.setQueryData(key, ctx.previous);
     },
     onSettled: () => void qc.invalidateQueries({ queryKey: key }),
+  });
+}
+
+// ---- Phase 4: ideation ------------------------------------------------------
+
+/** The list entry of a session, from its full state (keeps the session bar in step). */
+export function toSessionSummary(s: IdeationSession): IdeationSessionSummary {
+  return {
+    id: s.id,
+    title: s.title,
+    idea: s.idea,
+    status: s.status,
+    progress: s.progress,
+    complete: s.complete,
+    created_at: s.created_at,
+    updated_at: s.updated_at,
+    finished_at: s.finished_at,
+    brief_at: s.brief_at,
+  };
+}
+
+/** Stores a session the server returned and refreshes the list (order, progress, titles). */
+export function storeIdeationSession(
+  qc: ReturnType<typeof useQueryClient>,
+  sid: string,
+  session: IdeationSession,
+): void {
+  qc.setQueryData(queryKeys.ideationSession(sid, session.id), session);
+  qc.setQueryData<IdeationSessionSummary[]>(queryKeys.ideationSessions(sid), (old) =>
+    old?.map((x) => (x.id === session.id ? toSessionSummary(session) : x)),
+  );
+  void qc.invalidateQueries({ queryKey: queryKeys.ideationSessions(sid), exact: true });
+}
+
+export function useIdeationSessions(sid: string) {
+  return useQuery({
+    queryKey: queryKeys.ideationSessions(sid),
+    queryFn: () => api.listIdeationSessions(sid),
+  });
+}
+
+/** How often a session is refetched while the server runs a turn this page is not streaming. */
+export const IDEATION_RUNNING_POLL_MS = 1_000;
+
+/**
+ * One idea session. `pollWhileRunning`: refetch it while the server reports `running` (a turn
+ * started before a reload); off while this page streams the turn itself.
+ */
+export function useIdeationSession(sid: string, id: string | null, pollWhileRunning = false) {
+  return useQuery({
+    queryKey: queryKeys.ideationSession(sid, id ?? ""),
+    queryFn: () => api.getIdeationSession(sid, id as string),
+    enabled: id !== null,
+    refetchInterval: (query) =>
+      pollWhileRunning && query.state.data?.running ? IDEATION_RUNNING_POLL_MS : false,
+  });
+}
+
+export function useIdeationEstimate(sid: string) {
+  return useQuery({
+    queryKey: queryKeys.ideationEstimate(sid),
+    queryFn: () => api.getIdeationEstimate(sid),
+    staleTime: 60_000,
+  });
+}
+
+export function useCreateIdeationSession(sid: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (idea: string) => api.createIdeationSession(sid, idea),
+    onSuccess: (session) => {
+      qc.setQueryData(queryKeys.ideationSession(sid, session.id), session);
+      qc.setQueryData<IdeationSessionSummary[]>(queryKeys.ideationSessions(sid), (old) => [
+        toSessionSummary(session),
+        ...(old ?? []).filter((x) => x.id !== session.id),
+      ]);
+      void qc.invalidateQueries({ queryKey: queryKeys.ideationSessions(sid), exact: true });
+    },
+  });
+}
+
+export function useDeleteIdeationSession(sid: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.deleteIdeationSession(sid, id),
+    onSuccess: (_d, id) => {
+      qc.removeQueries({ queryKey: queryKeys.ideationSession(sid, id) });
+      qc.setQueryData<IdeationSessionSummary[]>(queryKeys.ideationSessions(sid), (old) =>
+        old?.filter((x) => x.id !== id),
+      );
+      void qc.invalidateQueries({ queryKey: queryKeys.ideationSessions(sid), exact: true });
+    },
+  });
+}
+
+type SessionAction = "finish" | "continue" | { dismiss: string };
+
+/** Finish now, Continue and dismissing a branch: each returns the stored session. */
+export function useIdeationAction(sid: string, id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (action: SessionAction) =>
+      action === "finish"
+        ? api.finishIdeationSession(sid, id)
+        : action === "continue"
+          ? api.continueIdeationSession(sid, id)
+          : api.dismissIdeationNode(sid, id, action.dismiss),
+    onSuccess: (session) => storeIdeationSession(qc, sid, session),
+    // A 409 means the session changed elsewhere (e.g. finished): show what is stored now.
+    onError: () => void qc.invalidateQueries({ queryKey: queryKeys.ideationSession(sid, id) }),
   });
 }

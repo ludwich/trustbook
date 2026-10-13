@@ -29,6 +29,7 @@ from typing import Literal
 
 from app.capabilities.cpu import usable_cpus
 from app.fsutil import atomic_write_json
+from app.ideation.marker import is_idea_brief_bytes
 from app.ingest import errors
 from app.ingest.errors import IngestError, fail
 from app.ingest.git import head_commit
@@ -87,10 +88,25 @@ MAX_CODE_LINE_CHARS = 10_000
 READ_WORKERS_MAX = 8
 
 
+# A space folder (space.json + space.db) or the data folder (global.db + config/): Trustbook's own
+# files, briefs and settings included, are never read as a source (D-099). The home folder is the
+# browse root and ~/Trustbook usually sits inside it.
+SPACE_MARKERS = ("space.json", "space.db")
+DATA_MARKERS = ("global.db", "config/settings.json", "spaces")
+
+
+def is_trustbook_folder(folder: Path) -> bool:
+    """Whether ``folder`` is a Trustbook space folder or the Trustbook data folder."""
+    return all((folder / name).exists() for name in SPACE_MARKERS) or all(
+        (folder / name).exists() for name in DATA_MARKERS
+    )
+
+
 @dataclass
 class WalkResult:
     files: list[str] = field(default_factory=list)  # relative paths, sorted
     skipped_large: int = 0
+    skipped_trustbook: int = 0  # Trustbook space or data folders left out
     sizes: dict[str, int] = field(default_factory=dict)  # bytes per file (for estimates)
 
 
@@ -101,6 +117,8 @@ def _extension(name: str) -> str:
 def walk_folder(root: Path, *, max_files: int = MAX_FILES) -> WalkResult:
     """Candidate files under ``root`` (relative, "/" separators), honouring ignore rules."""
     result = WalkResult()
+    if is_trustbook_folder(root):
+        raise fail(errors.TRUSTBOOK_FOLDER)
     rules_by_dir: dict[str, list[Rule]] = {}
     for current, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
         rel_dir = Path(current).relative_to(root).as_posix()
@@ -120,6 +138,9 @@ def walk_folder(root: Path, *, max_files: int = MAX_FILES) -> WalkResult:
         for name in sorted(dirnames):
             full = Path(current) / name
             if full.is_symlink() or name in IGNORED_DIRS or is_ignored(rules, rel(name), True):
+                continue
+            if is_trustbook_folder(full):
+                result.skipped_trustbook += 1
                 continue
             kept.append(name)
         dirnames[:] = kept
@@ -191,6 +212,7 @@ class _FileRead:
     text: str | None = None
     document: Snapshot | None = None
     generated: bool = False
+    brief: bool = False  # a Trustbook idea brief: never a source (D-099)
     sha256: str | None = None
     reused: bool = False  # same content as last time: copy it from the previous snapshot
 
@@ -209,6 +231,8 @@ def _read_one(path: Path, ext: str, previous_sha: str | None = None) -> _FileRea
         return _FileRead(sha256=sha, reused=True)
     if looks_binary(data) or data.lstrip()[:5].startswith(_GENERATED_MAGIC):
         return _FileRead()
+    if is_idea_brief_bytes(data):
+        return _FileRead(brief=True)
     text = normalise_text(decode_text(data))
     if not text.strip():
         return _FileRead()
@@ -357,7 +381,7 @@ def folder_snapshot(
     entries: list[FileEntry] = []
     hashes: dict[str, str] = {}
     reused: dict[str, int] = {}
-    code_files = doc_files = generated = 0
+    code_files = doc_files = generated = briefs = 0
     warnings: set[str] = set()
     files = [f for f in walk.files if f not in secret_files]
     old_files: Mapping[str, PreviousFile] = previous.files if previous is not None else {}
@@ -372,6 +396,7 @@ def folder_snapshot(
     for rel, read in zip(files, reads, strict=True):
         ext = _extension(rel)
         generated += read.generated
+        briefs += read.brief
         old = old_files.get(rel)
         if read.reused and old is not None and previous is not None:
             builder.separate()
@@ -439,6 +464,13 @@ def folder_snapshot(
     if generated:
         snapshot.stats["skipped_generated"] = generated
         logger.info("Skipped %d generated or minified file(s)", generated)
+    if briefs:
+        snapshot.stats["skipped_briefs"] = briefs
+        snapshot.warnings.append(errors.skipped_briefs_warning(briefs))
+        logger.info("Skipped %d Trustbook idea brief(s)", briefs)
+    if walk.skipped_trustbook:
+        snapshot.stats["skipped_trustbook_folders"] = walk.skipped_trustbook
+        logger.info("Skipped %d Trustbook data or space folder(s)", walk.skipped_trustbook)
     if secret_files:
         snapshot.stats["skipped_secrets"] = len(secret_files)
         snapshot.warnings.append(errors.skipped_secrets_warning(len(secret_files)))
