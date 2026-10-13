@@ -6,6 +6,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, StringConstraints
 
+from app.jobs.handlers import JobStage
+
 SourceType = Literal["upload", "folder", "url", "youtube", "search", "paste"]
 SourceGroup = Literal["documents", "transcripts", "web", "code"]
 SourceStatus = Literal["queued", "reading", "indexing", "ready", "failed"]
@@ -43,6 +45,8 @@ class SourceOut(BaseModel):
     created_at: str
     job_id: str | None
     ahead: AheadOut | None = None
+    # While reading or indexing: waiting for calibration or loading a model (D-113).
+    stage: JobStage | None = None
 
 
 class PasteCreate(BaseModel):

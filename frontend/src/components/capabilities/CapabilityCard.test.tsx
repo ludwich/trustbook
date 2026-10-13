@@ -102,11 +102,13 @@ describe("CapabilityCard", () => {
     expect(within(card).getByLabelText("Base URL")).toHaveValue(
       "http://host.docker.internal:11434/v1",
     );
-    expect(within(card).queryByLabelText("API key")).not.toBeInTheDocument();
+    // Local servers and "Other OpenAI-compatible" take an optional key (G3b-2).
+    expect(within(card).getByLabelText("API key (optional)")).toBeInTheDocument();
     expect(within(card).queryByLabelText("API version")).not.toBeInTheDocument();
 
     await user.selectOptions(within(card).getByLabelText("Provider"), "azure_openai");
     expect(within(card).getByLabelText("API key")).toBeInTheDocument();
+    expect(within(card).queryByLabelText("API key (optional)")).not.toBeInTheDocument();
     expect(within(card).getByLabelText("API version")).toBeInTheDocument();
   });
 

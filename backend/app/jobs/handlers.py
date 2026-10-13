@@ -5,7 +5,11 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+# Why a running job makes no progress yet (D-113). A real state the job is in, never a guess:
+# its thread waits for the model lock calibration holds, or a bundled model is loading.
+JobStage = Literal["waiting_for_calibration", "loading_models"]
 
 
 class JobCancelledError(Exception):
@@ -22,10 +26,15 @@ class JobContext:
     payload: dict[str, Any]
     _progress: Callable[[float], None] = field(repr=False)
     _cancelled: Callable[[], bool] = field(repr=False)
+    _stage: Callable[[JobStage | None], None] = field(default=lambda _stage: None, repr=False)
 
     def progress(self, value: float) -> None:
         """Report progress in 0..1."""
         self._progress(value)
+
+    def stage(self, value: JobStage | None) -> None:
+        """Say why the job is not making progress yet (``None``: it is working)."""
+        self._stage(value)
 
     def is_cancelled(self) -> bool:
         return self._cancelled()

@@ -30,6 +30,7 @@ import {
   canRefresh,
   isWebSnapshot,
   refreshStatsText,
+  STAGE_TEXT,
   STATUS_TEXT,
   statsLine,
   TYPE_LABELS,
@@ -103,7 +104,7 @@ export function SourceRow({
               <span className="text-xs text-muted-foreground">
                 {source.status === "queued"
                   ? "Waiting in the queue"
-                  : `${STATUS_TEXT[source.status]}…`}
+                  : `${source.stage ? STAGE_TEXT[source.stage] : STATUS_TEXT[source.status]}…`}
               </span>
               {source.status !== "queued" && (
                 <Progress

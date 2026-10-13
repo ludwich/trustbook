@@ -26,17 +26,17 @@ from trustbook_cli.output import (
     Output,
 )
 from trustbook_cli.paths import folder_api_path
-from trustbook_cli.wait import wait_for_sources
+from trustbook_cli.wait import stage_text, status_text, wait_for_sources
 
 SPACE_FIELDS = ("id", "slug", "name", "description", "source_count", "created_at")
 SOURCE_FIELDS = (
     "id", "type", "title", "origin", "group", "status", "progress", "failure_reason",
     "failure_next_step", "quality_warning", "enabled", "snapshot_at", "commit_hash", "stats",
-    "created_at", "job_id", "ahead",
+    "created_at", "job_id", "ahead", "stage",
 )  # fmt: skip
 JOB_FIELDS = (
     "id", "kind", "title", "space_id", "space_name", "status", "progress", "position", "error",
-    "created_at", "started_at", "finished_at", "eta_seconds",
+    "created_at", "started_at", "finished_at", "eta_seconds", "stage",
 )  # fmt: skip
 GATE_FIELDS = ("id", "created", "input", "decision", "confidence", "user_correction")
 
@@ -146,11 +146,7 @@ def _sources_text(sources: list[dict[str, Any]]) -> str:
         return "No sources."
     rows = []
     for s in sources:
-        status = str(s.get("status"))
-        progress = s.get("progress")
-        if status not in ("ready", "failed") and isinstance(progress, int | float):
-            status += f" {round(progress * 100)}%"
-        rows.append([status, str(s.get("type")), str(s.get("title")), str(s.get("id"))])
+        rows.append([status_text(s), str(s.get("type")), str(s.get("title")), str(s.get("id"))])
     text = _table(rows, ["STATUS", "TYPE", "TITLE", "ID"])
     for s in sources:
         for key in ("failure_reason", "failure_next_step", "quality_warning"):
@@ -326,6 +322,8 @@ def queue(ctx: Context, _args: argparse.Namespace) -> int:
     for j in jobs:
         progress = j["progress"]
         cell = f"{round(progress * 100)}%" if isinstance(progress, int | float) else ""
+        stage = stage_text(j) if j["status"] == "running" else None
+        cell = f"{cell} {stage}".strip() if stage else cell
         rows.append([str(j["status"]), cell, str(j["space_name"] or ""), str(j["title"])])
     text = _table(rows, ["STATUS", "PROGRESS", "SPACE", "TITLE"]) if jobs else "No jobs."
     ctx.out.result({"schema": SCHEMA_JOBS, "jobs": jobs, "summary": summary}, text)

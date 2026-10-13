@@ -104,6 +104,9 @@ jobs:
       - name: Console script
         run: uv run trustbook --version
 
+      - name: Module entry (fallback when trustbook.exe is blocked)
+        run: uv run python -m trustbook_cli --version
+
   frontend:
     name: Frontend (lint, typecheck, test, build)
     runs-on: ubuntu-24.04

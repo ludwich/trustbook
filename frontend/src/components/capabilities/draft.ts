@@ -106,9 +106,27 @@ export function isFieldVisible(cap: Capability, field: Field, values: DraftValue
   }
 
   const preset = selectedPreset(cap, values);
-  if (name === "api_key" && cap.presets.length > 0) return preset?.needs_api_key ?? false;
+  if (name === "api_key" && cap.presets.length > 0) {
+    // Speech-to-text has no provider field: its endpoint is always OpenAI-compatible.
+    if (!hasField(cap, "preset")) return true;
+    // Every real endpoint may take a key (optional unless the preset needs one, D-111).
+    return preset !== undefined && preset.adapter !== "mock";
+  }
   if (name === "api_version") return preset?.adapter === "azure_openai";
   return true;
+}
+
+/**
+ * True when the visible API key field must have a value: Brave/Tavily, and presets that need
+ * one (OpenAI, Azure, Anthropic). Other endpoints take an optional key (OpenRouter, LiteLLM,
+ * `llama-server --api-key`); empty means "no key".
+ */
+export function isKeyRequired(cap: Capability, values: DraftValues): boolean {
+  if (hasField(cap, "provider")) {
+    const provider = str(values, "provider") || "searxng";
+    return provider !== "searxng" && provider !== "mock";
+  }
+  return selectedPreset(cap, values)?.needs_api_key ?? false;
 }
 
 export function visibleFields(cap: Capability, values: DraftValues): Field[] {
@@ -124,7 +142,7 @@ export function missingFields(cap: Capability, draft: Draft): string[] {
     if (f.name === "api_key") {
       const typed = str(draft.values, "api_key").trim() !== "";
       const saved = cap.config.api_key_set && !draft.clearKey;
-      if (!typed && !saved) missing.push(f.name);
+      if (!typed && !saved && isKeyRequired(cap, draft.values)) missing.push(f.name);
       continue;
     }
     // Endpoints with presets need preset, URL and model to count as configured (status rule).

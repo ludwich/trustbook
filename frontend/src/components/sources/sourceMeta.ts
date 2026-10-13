@@ -1,4 +1,4 @@
-import type { Source, SourceGroup, SourceStatus } from "@/api/types";
+import type { JobStage, Source, SourceGroup, SourceStatus } from "@/api/types";
 import { formatClock, plural } from "@/lib/format";
 
 export const GROUP_ORDER: SourceGroup[] = ["documents", "transcripts", "web", "code"];
@@ -16,6 +16,12 @@ export const STATUS_TEXT: Record<SourceStatus, string> = {
   indexing: "Indexing",
   ready: "Ready",
   failed: "Failed",
+};
+
+/** Shown instead of "Reading…" while a job cannot make progress yet (D-113). */
+export const STAGE_TEXT: Record<JobStage, string> = {
+  waiting_for_calibration: "Waiting for calibration",
+  loading_models: "Loading models",
 };
 
 export const TYPE_LABELS: Record<Source["type"], string> = {

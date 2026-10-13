@@ -169,6 +169,38 @@ def test_broken_streams_are_errors(stream: str, message: str) -> None:
     assert message in err
 
 
+@pytest.mark.parametrize(
+    ("stream", "status"),
+    [
+        # The model endpoint rejected the key: the app's error event carries its status.
+        (sse(("error", {"message": "The API key was rejected (401).", "http_status": 401})), 401),
+        # No endpoint status (e.g. it could not be reached): the API's own response status.
+        (sse(("error", {"message": "Cannot reach llm.local."})), 200),
+        (sse(("status", {"stage": "retrieving"})), 200),
+        ("event: done\ndata: {broken\n\n", 200),
+    ],
+)
+def test_stream_errors_report_the_http_status(stream: str, status: int) -> None:
+    code, out, _err = run(FakeApi(stream), "ask", "q", "--space", "Acme", "--json")
+    doc = json.loads(out)
+    assert code == 1 and doc["schema"] == "trustbook.error/1"
+    assert doc["http_status"] == status
+
+
+def test_unusable_bodies_report_the_http_status() -> None:
+    def not_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>proxy</html>")
+
+    code, out, _err = run(not_json, "spaces", "list", "--json")
+    assert code == 1 and json.loads(out)["http_status"] == 200
+
+    def wrong_shape(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"spaces": []})
+
+    code, out, _err = run(wrong_shape, "spaces", "list", "--json")
+    assert code == 1 and json.loads(out)["http_status"] == 200
+
+
 def test_unreachable_api() -> None:
     def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
@@ -269,6 +301,66 @@ def test_wait_reports_progress_and_times_out() -> None:
             note=notes.append, sleep=sleep, clock=lambda: now[0], timeout_s=5, poll_s=2,
         )  # fmt: skip
     assert notes == ["[0s] Doc: queued", "[2s] Doc: reading 50%"]
+
+
+def test_wait_says_why_there_is_no_progress_yet() -> None:
+    doc = {"id": "a", "title": "Doc"}
+    states = iter(
+        [
+            {**doc, "status": "reading", "progress": 0.0, "stage": "waiting_for_calibration"},
+            {**doc, "status": "indexing", "progress": 0.4, "stage": "loading_models"},
+            {**doc, "status": "indexing", "progress": 0.7, "stage": None},
+            {**doc, "status": "ready", "progress": None, "stage": None},
+        ]
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=next(states))
+
+    client = TrustbookClient(
+        client=httpx.Client(base_url="http://tb.test", transport=httpx.MockTransport(handler))
+    )
+    notes: list[str] = []
+    now = [0.0]
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    wait_for_sources(
+        client, "s1", [{**doc, "status": "queued"}],
+        note=notes.append, sleep=sleep, clock=lambda: now[0], poll_s=2,
+    )  # fmt: skip
+    assert notes == [
+        "[0s] Doc: queued",
+        "[2s] Doc: waiting for calibration (reading 0%)",
+        "[4s] Doc: loading models (indexing 40%)",
+        "[6s] Doc: indexing 70%",
+        "[8s] Doc: ready",
+    ]
+
+
+def test_sources_list_and_queue_show_the_stage() -> None:
+    loading = {**SOURCE, "status": "indexing", "progress": 0.4, "stage": "loading_models"}
+    job = {
+        "id": "j1", "kind": "ingest", "title": "Pump", "space_id": "s1", "space_name": "Acme",
+        "status": "running", "progress": 0.0, "position": 1, "stage": "waiting_for_calibration",
+    }  # fmt: skip
+
+    def api(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/spaces":
+            return httpx.Response(200, json=[SPACE])
+        if request.url.path == "/api/jobs":
+            return httpx.Response(200, json={"jobs": [job], "summary": {}})
+        return httpx.Response(200, json=[loading])
+
+    code, out, _err = run(api, "sources", "list", "--space", "Acme")
+    assert code == 0 and "loading models (indexing 40%)" in out
+    code, out, _err = run(api, "sources", "list", "--space", "Acme", "--json")
+    assert json.loads(out)["sources"][0]["stage"] == "loading_models"
+    code, out, _err = run(api, "queue")
+    assert code == 0 and "0% waiting for calibration" in out
+    code, out, _err = run(api, "queue", "--json")
+    assert json.loads(out)["jobs"][0]["stage"] == "waiting_for_calibration"
 
 
 def test_eval_runner_lookup(tmp_path: Path) -> None:

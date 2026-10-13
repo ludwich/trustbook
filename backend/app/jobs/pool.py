@@ -192,6 +192,7 @@ class WorkerPool:
             payload=payload if isinstance(payload, dict) else {},
             _progress=lambda value: self._repo.set_progress(job.id, value),
             _cancelled=lambda: self.is_cancelled(job.id),
+            _stage=lambda stage: self._repo.set_stage(job.id, stage),
         )
         space_name = self._space_name(job.space_id) if job.space_id else None
         try:
@@ -205,5 +206,6 @@ class WorkerPool:
         else:
             self._repo.finish(job.id, "done")
         finally:
+            self._repo.set_stage(job.id, None)
             with self._cond:
                 self._cancelled.discard(job.id)

@@ -143,6 +143,24 @@ describe("setup wizard", () => {
     expect(within(screen.getByTestId("draft-locality")).getByText("Remote")).toBeInTheDocument();
   });
 
+  it("takes an optional key for an OpenAI-compatible endpoint and tests with it (G3b-2)", async () => {
+    const user = userEvent.setup();
+    renderApp("/setup");
+    await user.selectOptions(await screen.findByLabelText("Provider"), "custom");
+    await user.type(screen.getByLabelText("Base URL"), "https://openrouter.example/api/v1");
+    await user.type(screen.getByLabelText("Model"), "some/model");
+    // Not required: Test runs without it, and no key is sent.
+    await user.click(screen.getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(tests).toHaveLength(1));
+    expect(screen.queryByText("Required")).not.toBeInTheDocument();
+    expect(tests[0]).not.toHaveProperty("api_key");
+
+    await user.type(screen.getByLabelText("API key (optional)"), "or-key");
+    await user.click(screen.getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(tests).toHaveLength(2));
+    expect(tests[1]).toMatchObject({ preset: "custom", api_key: "or-key" });
+  });
+
   it("loads model suggestions from the endpoint", async () => {
     const user = userEvent.setup();
     const bodies: unknown[] = [];

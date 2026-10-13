@@ -14,11 +14,12 @@ half-indexed source; a failure removes the partial rows and vectors.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from app.capabilities.bundled import ProviderRegistry, ProviderUnavailableError
+from app.capabilities.bundled import Embedder, ProviderRegistry, ProviderUnavailableError
 from app.capabilities.streams import EmbeddedBatch, embed_in_streams
 from app.chunking.tokens import TokenCounter, load_token_counter
 from app.db.models import Source
@@ -33,7 +34,7 @@ from app.ingest.incremental import ChunkPlan, load_previous, plan_chunks
 from app.ingest.readers import IngestTools, read_source
 from app.jobs.calibration import Calibration
 from app.jobs.eta import ESTIMATE_KEY
-from app.jobs.handlers import JobCancelledError, JobContext
+from app.jobs.handlers import JobCancelledError, JobContext, JobStage
 from app.jobs.pool import WorkerPool
 from app.jobs.repository import JobNotFoundError, JobRepository
 from app.parse.snapshot import Snapshot, write_snapshot
@@ -104,6 +105,7 @@ class IngestService:
         status = source.status
         reason, step = source.failure_reason, source.failure_next_step
         progress: float | None = None
+        stage: JobStage | None = None
         if status not in FINAL_STATUSES:
             job = None
             if source.job_id:
@@ -120,6 +122,7 @@ class IngestService:
                     step = self._next_step(source, errors.REFRESH)
             elif job.status == "running":
                 progress = job.progress
+                stage = self.jobs.stage(job)
         warnings = errors.split_warnings(source.quality_warning)
         return SourceOut(
             id=source.id,
@@ -140,6 +143,7 @@ class IngestService:
             created_at=source.created_at,
             job_id=source.job_id,
             ahead=self._ahead(source) if status == "ready" else None,
+            stage=stage,
         )
 
     def _ahead(self, source: Source) -> AheadOut | None:
@@ -332,20 +336,26 @@ class IngestService:
 
         def on_batch(batch: EmbeddedBatch) -> None:
             nonlocal done
+            ctx.stage(None)  # a batch is done: the models are loaded and running
             pending.extend(zip(batch.indices, batch.vectors, strict=True))
             done += len(batch.indices)
             if len(pending) >= WRITE_BATCH:
                 flush()
             ctx.progress(0.4 + 0.55 * done / len(chunks))
 
+        def embedder_for(stream: int) -> Embedder:
+            if not self.providers.ingest_embedder_loaded(stream):
+                ctx.stage("loading_models")  # the first batch of a stream loads its embedder
+            return self.providers.ingest_embedder(stream)
+
         try:
             streams = self.providers.ingest_streams()
             used = embed_in_streams(
                 [c.text for c in chunks],
-                embedder_for=self.providers.ingest_embedder,
+                embedder_for=embedder_for,
                 streams=streams,
                 on_batch=on_batch,
-                guard=self.providers.use.shared,  # waits while calibration measures
+                guard=lambda: self._models(ctx),  # waits while calibration measures
                 check_cancelled=ctx.check_cancelled,
             )
         except ProviderUnavailableError as exc:
@@ -353,6 +363,21 @@ class IngestService:
         if pending:
             flush()
         logger.info("Embedded %d chunks with %d stream(s)", len(chunks), used)
+
+    @contextmanager
+    def _models(self, ctx: JobContext) -> Iterator[None]:
+        """The shared model lock; the job's stage says so while calibration holds it (D-113)."""
+        waited = False
+
+        def on_wait() -> None:
+            nonlocal waited
+            waited = True
+            ctx.stage("waiting_for_calibration")
+
+        with self.providers.use.shared(on_wait=on_wait):
+            if waited:
+                ctx.stage(None)
+            yield
 
     def _run(self, ctx: JobContext, repo: SourceRepository, source: Source) -> None:
         space_id = repo.record.id
@@ -364,7 +389,7 @@ class IngestService:
         old_ids = [c.id for c in repo.chunks(source.id)] if previous is not None else []
         # Trusted again only after this run succeeds (a crash mid-run means a full re-index).
         repo.replace_files(source.id, [])
-        with self.providers.use.shared():  # parsing (Docling, STT) also uses the CPU models
+        with self._models(ctx):  # parsing (Docling, STT) also uses the CPU models
             snapshot, snapshot_at = read_source(
                 self.tools,
                 source,

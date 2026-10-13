@@ -103,7 +103,9 @@ def test_unexpected_shapes_are_errors() -> None:
     api = TrustbookClient(
         client=_client(httpx.MockTransport(lambda _r: httpx.Response(200, json={})))
     )
-    with pytest.raises(ApiError, match="expected a list"):
+    with pytest.raises(ApiError, match="expected a list") as listed:
         api.spaces()
-    with pytest.raises(ApiError, match="unexpected response"):
+    assert listed.value.http_status == 200  # a response was received
+    with pytest.raises(ApiError, match="unexpected response") as shaped:
         api.gate_log("s1", 10)
+    assert shaped.value.http_status == 200

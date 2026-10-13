@@ -1976,3 +1976,48 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Reason:** simplicity and backward compatibility (§15): no migration, no change for API clients.
 - **Alternatives:** splitting the joined string into sentences in the UI (breaks on sentences with "e.g." or
   file names); a new column (a migration for a display detail).
+### D-111 Every endpoint can take an optional API key (G3b-2)
+- **Context:** only the OpenAI, Azure and Anthropic presets showed a key field. OpenRouter, LiteLLM and
+  `llama-server --api-key` need a key on an "Other OpenAI-compatible" chat endpoint or the speech-to-text
+  endpoint. The backend already stored and sent a key for any preset; the UI hid the field.
+- **Decision:**
+  - The UI shows the key field for every real endpoint preset (not the test-only mock) and for the speech-to-text
+    endpoint. It is labelled "API key (optional)" unless the preset needs a key; empty means no key, and an
+    optional key is never "Required".
+  - Same storage and rules as the preset keys: only `~/Trustbook/config/settings.json` (mode 600); responses carry
+    `api_key_set` and a four-character hint; a missing key in an update keeps the saved one, `""` clears it, and
+    a saved key is dropped when the address moves to another host. Adapters send `Authorization: Bearer <key>`
+    only when a key is set; the Test button uses the draft's key.
+- **Reason:** simplicity (one rule for every endpoint, no new setting) and data safety (one storage and redaction
+  path, already covered by the tests that keep keys out of responses, logs, the request log and CLI output).
+- **Alternatives:** a key field only on "Other OpenAI-compatible" (users of the llama.cpp or vLLM presets with
+  `--api-key` would have had to switch preset).
+
+### D-112 `trustbook.error/1` reports a status whenever a response was received
+- **Context:** a rejected key gave `"http_status": null`. The API answers `ask` with a 200 event stream; the
+  chat endpoint's 401 arrived as an `error` event with only a message, and the CLI raised its error without a
+  status. Errors about a 2xx body (not JSON, wrong shape) had no status either.
+- **Decision:** the stream's `error` event carries `http_status` when the model endpoint answered with an error
+  (e.g. 401, 404, 429, 500), and the CLI reports it. Every other error raised after a response arrived reports
+  that response's status (for `ask`, the stream's 200). `null` means no response was received (Trustbook not
+  reachable, bad arguments).
+- **Reason:** simplicity for agents: one field says whether and how the far side answered; the 401 is what a
+  user needs to see to fix the key. The event's message is unchanged and still carries no secret.
+
+### D-113 A running job reports "waiting for calibration" or "loading models"
+- **Context:** `sources add --wait` sat at "reading 0%" for 30 s locally and 160–300 s on a cold CI runner. The
+  ingest job was not reading: it waited for the model lock that startup calibration holds, then the first batch
+  of each indexing stream loaded its embedder.
+- **Decision:**
+  - Jobs and sources get a `stage`: `waiting_for_calibration` or `loading_models`, `null` otherwise, shown only
+    while the job runs. It is a state the job is really in, never a guess from elapsed time: the shared model
+    lock reports when a reader has to wait for calibration, and an indexing stream reports that its embedder is
+    not loaded just before it loads it. The first finished batch clears it.
+  - Kept in memory in the job repository (no schema change): it describes this process's threads right now, and
+    a restarted app runs the job again from the start.
+  - Shown in `GET /api/jobs`, the source API, the CLI (`--wait`: "waiting for calibration (reading 0%)",
+    "loading models (indexing 40%)"; `sources list`; `queue`) and the UI ("Waiting for calibration…",
+    "Loading models…" in the source row and the queue).
+- **Reason:** honesty and simplicity: the user sees why nothing moves, and the backend already knows both states.
+- **Alternatives:** a time-based "still starting" hint (a heuristic, wrong on fast and slow machines alike);
+  a stored column (a migration for a value that is stale after a restart).

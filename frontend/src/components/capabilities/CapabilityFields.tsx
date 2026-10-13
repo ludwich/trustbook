@@ -11,6 +11,7 @@ import {
   fieldHelp,
   fieldOptions,
   isFieldDisabled,
+  isKeyRequired,
   visibleFields,
   type CapabilityDraftApi,
 } from "./draft";
@@ -201,9 +202,13 @@ function FieldRow({
 
   if (field.type === "password") {
     const keySaved = capability.config.api_key_set && !form.draft.clearKey;
+    const optional = !isKeyRequired(capability, form.draft.values);
     return (
       <div className="grid gap-1.5">
-        <Label htmlFor={id}>{field.label}</Label>
+        <Label htmlFor={id}>
+          {field.label}
+          {optional && <span className="font-normal text-muted-foreground"> (optional)</span>}
+        </Label>
         <Input
           id={id}
           type="password"
@@ -214,7 +219,9 @@ function FieldRow({
           placeholder={
             keySaved
               ? `Saved key${capability.config.api_key_hint ? ` ${capability.config.api_key_hint}` : ""}. Leave empty to keep it.`
-              : (field.placeholder ?? "Paste your API key")
+              : optional
+                ? "Only if the endpoint asks for one"
+                : (field.placeholder ?? "Paste your API key")
           }
           aria-invalid={invalid || undefined}
           aria-describedby={describedBy}
