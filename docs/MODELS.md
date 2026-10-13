@@ -5,6 +5,14 @@ yours**. It writes the answers, and it also acts as the code judge, which double
 (Settings → Grounding checker). This page shows how each chat model measured on the Gate 3 evaluation and which
 model we recommend as a minimum.
 
+## Tested chat models
+
+| Model | Family | Type | Gate results | Status |
+|---|---|---|---|---|
+| **Qwen3.6-35B-A3B** UD-Q4_K_XL | Qwen | MoE, 3B active | **Passes Gate 3.** Builder (attempt 8): precision 100%, 0 false refusals, p95 47.8–50.6 s over 3 runs. Ludwig, Gate 3: precision 100% (35/35), code false refusals 1/13, p95 48.6 s. Ludwig, Gate 3b #10: 100% (37/37), 0/22, p95 47.8 s | **Recommended** |
+| Qwen3.8-27B UD-Q4_K_XL | Qwen | dense | Gate 3 reference: precision 77.4% (48/62; about 78% across attempts 3–8), 0 false refusals, p95 85.3 s (79–89 s across attempts). 8 of its 14 citations outside the answer key were accepted by Ludwig as correct; the key is unchanged | Works; slower, cites more widely |
+| Second family (non-Qwen) | to be chosen by Ludwig (Phase 5, G3-3) | — | Not run yet. It will be reported next to Qwen3.6, not as pass/fail | — |
+
 ## How it was measured
 
 - **Evaluation:** the Gate 3 command (`eval/runner.py`, see `docs/GATES.md` Gate 3 #1). It asks 45 questions:
