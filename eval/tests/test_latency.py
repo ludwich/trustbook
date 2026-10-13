@@ -165,7 +165,7 @@ def diag(**extra: Any) -> dict[str, Any]:
     } | extra
 
 
-def test_the_sidecar_v5_keeps_numbers_and_ids(tmp_path: Path) -> None:
+def test_the_sidecar_keeps_numbers_and_ids(tmp_path: Path) -> None:
     api = good_api()
     message = {
         "id": "m",
@@ -194,7 +194,7 @@ def test_the_sidecar_v5_keeps_numbers_and_ids(tmp_path: Path) -> None:
     code, text, _, sidecar = run(api, tmp_path)
     assert code == 0, text
     data = json.loads(sidecar.read_text())
-    assert data["version"] == 5
+    assert data["version"] == runner.SIDECAR_VERSION == 6
     assert data["retrieval_settings"] is None  # the fake API does not report them
     row = {r["id"]: r for r in data["questions"]}["code-1"]
     assert row["judge_calls"] == 2 and row["judge_calls_per_pass"] == [2]
