@@ -309,7 +309,10 @@ export interface Source {
   progress: number | null;
   failure_reason: string | null;
   failure_next_step: string | null;
+  /** Every warning in one string (older backends send only this). */
   quality_warning: string | null;
+  /** One plain-English line per problem (G4-4); absent on older backends. */
+  quality_warnings?: string[];
   enabled: boolean;
   snapshot_at: string | null;
   commit_hash: string | null;

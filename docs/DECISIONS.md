@@ -1964,3 +1964,15 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   tab with no stored state to go stale.
 - **Alternatives:** local storage (per browser, not per link; one more key to guard); a nested route per tab
   (more routing for two tabs).
+
+### D-110 Source warnings are a list, one line per problem (G4-4)
+- **Finding (Gate 4):** a folder's warnings were joined into one string with spaces, so "1 file skipped: Trustbook
+  idea briefs are never used as sources." and "Very little text was found…" read as one message.
+- **Decision:** `sources.quality_warning` stores one warning per line, and `Source` gains `quality_warnings`
+  (a list, one item per problem). `quality_warning` keeps its old meaning (all warnings joined with spaces), so
+  the CLI's `trustbook.sources/1` contract is unchanged. Sources indexed before this show their old warning as
+  one line until they are read again. The source list shows each warning on its own line, and the row's text
+  (names, paths, warnings, errors) wraps anywhere instead of being cut off.
+- **Reason:** simplicity and backward compatibility (§15): no migration, no change for API clients.
+- **Alternatives:** splitting the joined string into sentences in the UI (breaks on sentences with "e.g." or
+  file names); a new column (a migration for a display detail).

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from app.ideation.marker import IDEA_BRIEF_NEXT_STEP, IDEA_BRIEF_REASON
 
 
@@ -160,6 +162,18 @@ WARN_BASIC_PDF = (
     "layout may be lost."
 )
 SHORT_TEXT_CHARS = 300
+
+
+def join_warnings(warnings: Iterable[str]) -> str | None:
+    """Store a source's quality warnings one per line (``sources.quality_warning``)."""
+    lines = [" ".join(w.split()) for w in warnings]
+    return "\n".join(dict.fromkeys(w for w in lines if w)) or None
+
+
+def split_warnings(stored: str | None) -> list[str]:
+    """The stored warnings, one per problem. Rows stored before one-per-line (G4-4) come back as a
+    single warning."""
+    return [line.strip() for line in (stored or "").splitlines() if line.strip()]
 
 
 def fail(pair: tuple[str, str]) -> IngestError:

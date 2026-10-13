@@ -79,19 +79,18 @@ export function groupChecked(sources: Source[]): boolean | "mixed" {
 const SECRETS_SENTENCE = /\b\d+\s+files?\s+skipped:\s*possible secrets\.?/gi;
 
 /**
- * The quality warning to show under a source. When the source has skipped secrets, the backend's
- * "N files skipped: possible secrets." sentence is dropped here because the row shows it once,
- * as a button that opens the report (G4).
+ * The quality warnings to show under a source, one per problem (G4-4; an older backend sends one
+ * string, shown as one line). When the source has skipped secrets, the backend's "N files skipped:
+ * possible secrets." sentence is dropped here because the row shows it once, as a button that
+ * opens the report (G4).
  */
-export function visibleQualityWarning(source: Source): string | null {
-  const warning = source.quality_warning;
-  if (!warning) return null;
-  if (!(source.stats.skipped_secrets && source.stats.skipped_secrets > 0)) return warning;
-  const rest = warning
-    .replace(SECRETS_SENTENCE, "")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-  return rest || null;
+export function visibleQualityWarnings(source: Source): string[] {
+  const warnings =
+    source.quality_warnings ?? (source.quality_warning ? [source.quality_warning] : []);
+  const secrets = (source.stats.skipped_secrets ?? 0) > 0;
+  return warnings
+    .map((w) => (secrets ? w.replace(SECRETS_SENTENCE, "") : w).replace(/\s{2,}/g, " ").trim())
+    .filter(Boolean);
 }
 
 /** First 7 characters of a commit hash, the way git shows it. */

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it } from "vitest";
 import { SOURCES_POLL_BUSY_MS, SOURCES_POLL_IDLE_MS, sourcesPollInterval } from "@/api/queries";
-import { groupChecked, visibleQualityWarning } from "./sourceMeta";
+import { groupChecked, visibleQualityWarnings } from "./sourceMeta";
 import { source } from "@/test/fixtures";
 import { renderApp } from "@/test/render";
 import { server } from "@/test/server";
@@ -247,21 +247,70 @@ describe("skipped secrets (G4)", () => {
 
   it("drops only the secrets sentence from the quality warning", () => {
     const s = codeSource();
-    expect(visibleQualityWarning(s)).toBe(
+    expect(visibleQualityWarnings(s)).toEqual([
       "Some text was read from images (OCR) and may contain errors.",
-    );
+    ]);
     expect(
-      visibleQualityWarning({ ...s, quality_warning: "1 file skipped: possible secrets." }),
-    ).toBeNull();
+      visibleQualityWarnings({ ...s, quality_warning: "1 file skipped: possible secrets." }),
+    ).toEqual([]);
+    expect(
+      visibleQualityWarnings({
+        ...s,
+        quality_warnings: ["2 files skipped: possible secrets.", "Very little text was found."],
+      }),
+    ).toEqual(["Very little text was found."]);
     // Without a count in stats there is no button, so the warning stays as sent.
     expect(
-      visibleQualityWarning({
+      visibleQualityWarnings({
         ...s,
         stats: {},
         quality_warning: "3 files skipped: possible secrets.",
       }),
-    ).toBe("3 files skipped: possible secrets.");
-    expect(visibleQualityWarning({ ...s, quality_warning: null })).toBeNull();
+    ).toEqual(["3 files skipped: possible secrets."]);
+    expect(visibleQualityWarnings({ ...s, quality_warning: null })).toEqual([]);
+  });
+});
+
+describe("source-list messages (G4-4)", () => {
+  const LONG_NAME = "quarterly-supplier-audit-report-final-version-2026-10-revised-again.docx";
+
+  it("shows one line per warning, and long names and messages wrap", async () => {
+    spaceBackend({
+      sources: [
+        source({
+          id: "f1",
+          type: "folder",
+          title: LONG_NAME,
+          quality_warning:
+            "1 file skipped: Trustbook idea briefs are never used as sources. Very little text was found (under 300 characters).",
+          quality_warnings: [
+            "1 file skipped: Trustbook idea briefs are never used as sources.",
+            "Very little text was found (under 300 characters).",
+          ],
+        }),
+      ],
+    });
+    renderApp(SPACE);
+    const row = await screen.findByTestId("source-f1");
+    const lines = within(row).getAllByTestId("source-warning");
+    expect(lines.map((l) => l.textContent)).toEqual([
+      "1 file skipped: Trustbook idea briefs are never used as sources.",
+      "Very little text was found (under 300 characters).",
+    ]);
+    // The text column wraps anywhere (long paths have no spaces); the name is not cut off.
+    const name = within(row).getByText(LONG_NAME);
+    expect(name.closest(".wrap-anywhere")).not.toBeNull();
+    expect(name.closest("p")).not.toHaveClass("truncate");
+  });
+
+  it("wraps a long failure reason", async () => {
+    const reason = `Could not read /home/user/${"very-long-folder-name/".repeat(6)}notes.md.`;
+    spaceBackend({
+      sources: [source({ id: "x1", status: "failed", enabled: false, failure_reason: reason })],
+    });
+    renderApp(SPACE);
+    const row = await screen.findByTestId("source-x1");
+    expect(within(row).getByText(reason).closest(".wrap-anywhere")).not.toBeNull();
   });
 });
 

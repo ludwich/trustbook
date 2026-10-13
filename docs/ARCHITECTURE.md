@@ -275,10 +275,14 @@ Source = {"id","type":"upload"|"folder"|"url"|"youtube"|"search"|"paste","title"
           "group":"documents"|"transcripts"|"web"|"code",
           "status":"queued"|"reading"|"indexing"|"ready"|"failed","progress":float|null,
           "failure_reason":str|null,"failure_next_step":str|null,"quality_warning":str|null,
+          "quality_warnings":[str],
           "enabled":bool,"snapshot_at":str|null,"commit_hash":str|null,
           "stats":{"pages"?,"files"?,"duration_s"?,"chunks"?,"chars"?,"skipped_secrets"?},
           "created_at":str,"job_id":str|null}
 ```
+
+`quality_warnings` has one plain-English line per problem (D-110); `quality_warning` is the same lines joined
+with spaces, kept for older clients such as the CLI.
 
 Groups: uploads of audio, and YouTube → `transcripts`; url/search → `web`; folder code files → `code`;
 everything else → `documents`. A folder with both documents and code becomes one source in the `code`

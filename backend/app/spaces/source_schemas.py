@@ -34,7 +34,8 @@ class SourceOut(BaseModel):
     progress: float | None
     failure_reason: str | None
     failure_next_step: str | None
-    quality_warning: str | None
+    quality_warning: str | None  # every warning in one string (kept for older clients)
+    quality_warnings: list[str] = []  # one item per problem (G4-4)
     enabled: bool
     snapshot_at: str | None
     commit_hash: str | None

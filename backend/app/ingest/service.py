@@ -120,6 +120,7 @@ class IngestService:
                     step = self._next_step(source, errors.REFRESH)
             elif job.status == "running":
                 progress = job.progress
+        warnings = errors.split_warnings(source.quality_warning)
         return SourceOut(
             id=source.id,
             type=source.type,
@@ -130,7 +131,8 @@ class IngestService:
             progress=progress,
             failure_reason=reason if status == "failed" else None,
             failure_next_step=step if status == "failed" else None,
-            quality_warning=source.quality_warning,
+            quality_warning=" ".join(warnings) or None,
+            quality_warnings=warnings,
             enabled=source.enabled and status != "failed",  # G7: failed is never ticked
             snapshot_at=source.snapshot_at,
             commit_hash=source.commit_hash,
@@ -451,7 +453,7 @@ class IngestService:
         values: dict[str, Any] = {
             "status": "ready",
             "stats": stats,
-            "quality_warning": " ".join(warnings) or None,
+            "quality_warning": errors.join_warnings(warnings),
             "snapshot_at": snapshot_at,
             "commit_hash": snapshot.commit_hash,
             "title": title,
