@@ -9,9 +9,9 @@ model we recommend as a minimum.
 
 | Model | Family | Type | Gate results | Status |
 |---|---|---|---|---|
-| **Qwen3.6-35B-A3B** UD-Q4_K_XL | Qwen | MoE, 3B active | **Passes Gate 3.** Builder (attempt 8): precision 100%, 0 false refusals, p95 47.8–50.6 s over 3 runs. Ludwig, Gate 3: precision 100% (35/35), code false refusals 1/13, p95 48.6 s. Ludwig, Gate 3b #10: 100% (37/37), 0/22, p95 47.8 s | **Recommended** |
+| **Qwen3.6-35B-A3B** UD-Q4_K_XL | Qwen | MoE, 3B active | **Passes Gate 3.** Builder (attempt 8): precision 100%, 0 false refusals, p95 47.8–50.6 s over 3 runs. Builder, Gate 5 (code `2696786`): 100% (37/37), 0/22, p95 49.2 s. Ludwig, Gate 3: precision 100% (35/35), code false refusals 1/13, p95 48.6 s. Ludwig, Gate 3b #10: 100% (37/37), 0/22, p95 47.8 s | **Recommended** |
 | Qwen3.8-27B UD-Q4_K_XL | Qwen | dense | Gate 3 reference: precision 77.4% (48/62; about 78% across attempts 3–8), 0 false refusals, p95 85.3 s (79–89 s across attempts). 8 of its 14 citations outside the answer key were accepted by Ludwig as correct; the key is unchanged | Works; slower, cites more widely |
-| Second family (non-Qwen) | to be chosen by Ludwig (Phase 5, G3-3) | — | Not run yet. It will be reported next to Qwen3.6, not as pass/fail | — |
+| gemma-4-26B-A4B-it UD-Q4_K_XL | Gemma (Google) | MoE, 4B active | Reported next to Qwen3.6, not pass/fail (Gate 5, same command and run): precision 97.2% (35/36), refusals 23/23, code false refusals 2/13 (ref-near-01, ref-near-10), p95 56.5 s. Against the Gate 3 criteria it would miss only "code false refusals ≤ 1" | Works; second family, more code refusals |
 
 ## How it was measured
 
@@ -56,6 +56,29 @@ The reference run has 44 timed answers: one question got a 500 error from the mo
 - **Latency:** as a dense 27B model it is slower on the same server. 11 of 44 answers took over 60 s, and the code
   judge takes 22% of the answer time (against about 10% with Qwen3.6).
 - **Refusals:** it refused every unanswerable question and made no false refusals.
+
+## Results (Gate 5, code `2696786`, one command with both models)
+
+The Gate 3 command with `--also-model gemma-4-26B-A4B-it-UD-Q4_K_XL` (D-115): the same 45 questions in the same
+`Smoke` space, first with Qwen3.6, then with Gemma, temperature 0 / seed 42, both on the same llama-server (one
+model loaded at a time; the runner waits for a switch, D-122). Only the main model decides the exit code.
+
+| Model | Role | Precision | Refusals | Code false refusals (≤ 1) | All false refusals | p50 / p95 latency | must_contain | Result |
+|---|---|---|---|---|---|---|---|---|
+| Qwen3.6-35B-A3B UD-Q4_K_XL | main | 100% (37/37) | 23/23 | 0/13 | 0/22 | 17.6 s / 49.2 s | 95.5% (21/22) | **pass** |
+| gemma-4-26B-A4B-it UD-Q4_K_XL | comparison | 97.2% (35/36) | 23/23 | 2/13 | 2/22 | 15.1 s / 56.5 s | 81.8% (18/22) | reported, not a criterion |
+
+**Gemma 4 26B-A4B**
+- **Refusals:** it refused every unanswerable question. Its 2 false refusals are verification refusals
+  (`unsupported`), not retrieval:
+  - ref-near-01: it cited the wrong chunk for `ITER_CHUNK_SIZE` (the judge found the evidence in a chunk the
+    sentence did not cite).
+  - ref-near-10: it named `requests.codes` and cited only the table chunk, the G3-2 pattern; layer 5 refused it.
+- **Citations:** its one citation outside the key is ref-near-02's `HISTORY.md` 61–68, next to the expected
+  70–82.
+- **Speed:** faster at p50 than Qwen3.6, slower at p95. ref-near-10 took 194.8 s, docs-05 88.9 s.
+- **Keywords:** answers are shorter and hit fewer expected keywords (81.8% against 95.5%).
+- **Verdict:** it works with Trustbook and stays safe, but answers fewer code questions than Qwen3.6.
 
 ## Recommended minimum chat model
 

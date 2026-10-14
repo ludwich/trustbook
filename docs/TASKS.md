@@ -14,12 +14,12 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
       citations support their sentence), 0 false refusals, p95 42.7 s
 - [x] Follow-ups from that run (D-116, D-117): a duplicated sentence after a JSON fragment (ref-near-05); a risk still attached
       to the answered branch by fallback (1 of 15) and a map label ("n5") in a risk text
-- [~] G3-2 ref-near-10: diagnosis done (docs/reports/G3-2-ref-near-10.md): verification refusals, not retrieval;
-      **waiting for Ludwig** to choose fixes. **Diagnose first** and report to Ludwig what retrieval misses, before any change. Never
-      weaken a grounding layer; never widen the answer key without his approval
-- [ ] G3-3 second model family (non-Qwen): propose 2–3 GGUF candidates for llama-server on Strix Halo (Vulkan)
-      with size and speed; **Ludwig chooses before anything runs**. Results reported next to Qwen3.6, not
-      pass/fail. The gate command runs both models in one command: `--also-model` built (D-115); model not chosen yet
+- [x] G3-2 ref-near-10: diagnosis (docs/reports/G3-2-ref-near-10.md); Ludwig approved F6, F1, F4, F2 (D-118..D-121,
+      review follow-ups) and line 106 in the answer key (GATES.md, Gate 5). Before/after, 20 runs each: refusals
+      2 → 2 (`unsupported`), verified 16 → 10, partial 2 → 8 (upper-case names removed by layer 5); report updated
+- [~] G3-3 second family: Ludwig chose gemma-4-26B-A4B-it-UD-Q4_K_XL. First two-model gate run: Qwen3.6 pass
+      (100%, 38/38; p95 42.1 s), Gemma failed to start (model load > test timeout) → runner waits for a model to
+      load (D-122). Re-run on HEAD in progress; then MODELS.md row
 - [x] Untested gate items made one-step: Gate 3b #8 skill behaviour (docs/cli.md one-liners, `claude -p`), Gate 4 #9 request log (test extended to a
       full session: seed, 4 turns, judge), Gate 4 seed dismiss
 

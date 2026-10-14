@@ -3,11 +3,11 @@
 Each phase ends at a gate (SPEC §14). Ludwig verifies it on his laptop with the published `-rc` image and
 reports **pass** or **fail**.
 
-## Status: all SPEC phases passed (2026-10-13)
+## Status: Gate 5 (hardening) waits for Ludwig (2026-10-14)
 
 Gates 0–4 have passed. Each phase is squash-merged into `main` and tagged (`phase-0` … `phase-4`, plus
-`phase-3b`). Not tested and waived items are recorded in each gate's "Result". No gate is waiting. What is left is
-in `docs/BACKLOG.md`, grouped by priority at the top.
+`phase-3b`). Not tested and waived items are recorded in each gate's "Result". **Gate 5** (`phase-5-rc`, PR
+`phase-5 → main`) is next: see "Gate 5 — Hardening" at the end. What is left after it is in `docs/BACKLOG.md`.
 
 ---
 
@@ -670,7 +670,101 @@ Other checks:
 
 ## Gate 5 — Hardening
 
-Checklist: to be written at the end of Phase 5.
+**Image:** `ghcr.io/ludwich/trustbook:phase-5-rc` · **PR:** `phase-5 → main`
+
+**Criteria (Ludwig, 2026-10-13):** every Gate 3/3b/4 backlog finding in P1 and P2 is fixed and can be checked with
+one command or one click. The Gate 3 command still passes on the new chunker, run once with both model families
+(the second family is reported, not judged).
+
+**What it adds (D-104..D-121):**
+- **Chunks split at headings (G4-1).** Every heading in a document, web page, paste or upload starts a new chunk,
+  so the section a citation names is true for all of its lines. Web, paste and upload chunks start with a
+  `Section: Outer › Inner` line that search and the grounding checker see (D-104, D-105).
+- **Re-index, never silent.** A space indexed by an older chunker shows a banner with a **Re-index** button, and
+  Settings lists every outdated space. A re-index reuses the stored snapshot (no network), keeps unchanged chunks
+  and lets chat use the old index until it is done (D-106, D-114). The speed test runs again on its own, and
+  Settings says why (calibration version 7, D-107).
+- **Ideation fixes.** A risk names the branch it is about; a risk with no known branch is a general risk; map
+  labels like "n5" never reach the text (G4-3, D-108, D-116). A reload keeps the Ideation tab (`?tab=ideation`,
+  G4-2, D-109).
+- **Answers.** JSON fragments such as `}]}]}```json{` are dropped and repeated sentences merged before checking
+  (D-117).
+- **UI.** The citation viewer shows the code symbol (G3-1) and a document's section. Source warnings are one line
+  per problem and long names wrap (G4-4, D-110). Every endpoint, including speech-to-text, takes an optional API
+  key (G3b-2, D-111). A job says "Waiting for calibration…" or "Loading models…" instead of sitting at 0% (D-113).
+- **CLI.** `python -m trustbook_cli` and a Git Bash shim for locked-down Windows (G3b-1). `http_status` is set on
+  a rejected key (D-112). The skill check is two `claude -p` lines (`docs/cli.md`).
+- **G3-2 (ref-near-10, D-118..D-121).** A refusal because the answer failed verification now says **"Couldn't
+  verify an answer"** (own card and icon) instead of "Not in your sources", and the reason is stored with the
+  message, so the CLI and a reload tell them apart. The context also brings the same-file chunk that uses a data
+  table (`_init` for `_codes`), keeps a guard-kept chunk at its fused rank, and the model is told to cite every
+  chunk a sentence combines. Before/after: `docs/reports/G3-2-ref-near-10.md`.
+- **Gate command.** `--also-model` runs a comparison model in the same command; it is reported, never judged, and
+  the exit code depends only on the main model (G3-3, D-115). Tested models: `docs/MODELS.md`.
+
+### Setup
+1. **Back up first.** Copy your `Trustbook` data folder. Opening a space with this image migrates its `space.db`
+   to version 7 (the stored refusal reason, D-118), and older images (`phase-4` and before) cannot open a
+   migrated space. A re-index also rewrites a space's document chunks.
+2. In `.env` set `TRUSTBOOK_IMAGE_TAG=phase-5-rc`, then `docker compose pull` and `docker compose up -d`. Chat
+   model: your Qwen3.6 llama-server as before. **Do not re-index yet**: #1–#3 check what an upgrade shows.
+3. In the PowerShell window you use for the checks, run once:
+   `$B = 'http://localhost:8484/api'; $S = ((irm "$B/spaces") | ? name -eq Smoke).id`
+4. Order: #1–#16 take about 30 minutes. Run #17 last (about an hour, two models); don't use the app meanwhile.
+
+### Checklist (Windows PowerShell)
+
+| # | Check | How to verify | Expected |
+|---|---|---|---|
+| 1 | Speed test runs again (D-107) | Right after `up -d`: `docker compose exec -T app trustbook queue`. Then Settings → **Speed test** | The queue has "Measure this computer's speed again (indexing has changed)". Until it ends, Settings shows "Indexing has changed since this was measured. The speed test runs again on its own; until then, estimates use these numbers." (with an **Out of date** badge when not running). Both go away when it is done |
+| 2 | Outdated spaces are listed (D-114) | Settings → **Re-index** ("Re-index outdated spaces"). Same data in one line: `irm "$B/spaces" \| % { $r = irm "$B/spaces/$($_.id)/reindex"; '{0}: needed={1}, {2} sources, {3}' -f $_.name, $r.needed, $r.sources.Count, $r.estimate_summary }` | One row per space with documents, web pages, pastes or uploads: the name (a link), "N sources need it." and the estimate, with a **Re-index** button. `Smoke`: "5 sources need it." A space with only code or only YouTube/audio transcripts is not listed (those chunks did not change) |
+| 3 | Banner and Re-index in the space (D-106, D-113) | Open `Smoke`. Press **Re-index** in the banner (confirm with **Re-index** if asked: above 2 min). Ask any chat question while it runs. Open the queue link | Banner before: "This space was indexed with an older version." / "Re-index to get accurate section labels. 5 sources need it. …" While running: "Re-indexing this space…" / "Chat keeps using the current index until it is done." Chat answers meanwhile. The queue shows `Re-index “…”` jobs (first "Waiting for calibration…" or "Loading models…" if the speed test is still running). When all are done the banner is gone and #2 says "All spaces are up to date." for `Smoke` |
+| 4 | Section labels (G4-1) | In `Smoke` Chat ask: "How do I make requests retry failed connections automatically?" and open a citation | The viewer header names the section that holds the cited text, e.g. `docs/user/advanced.rst, lines 1032–1056 · Section: Example: Automatic Retries` (or "Section: Example: Automatic Retries" for the web page). Never "Example: Specific SSL Version" |
+| 5 | Code symbol in the viewer (G3-1) | Ask: "What does `should_strip_auth` check?" and open a citation | Header: `src/requests/sessions.py, lines 154–184 · SessionRedirectMixin.should_strip_auth` and the commit |
+| 6 | Reload keeps Ideation (G4-2) | Click **Ideation**, then press F5 | Still on Ideation; the address ends with `?tab=ideation`. Chat has no `?tab` |
+| 7 | Dismiss a seed (Gate 4 #3, untested) | First Settings → Request log → **Clear log** (for #9). In `Smoke` → Ideation, type the Gate 4 #1 idea under "I have an idea". When the first question shows, click × on a dashed branch that is not the current question (tooltip "Dismiss this branch") | The branch disappears; the map header's open count drops by one |
+| 8 | Risks on the right branch (G4-3, D-116) | Continue the same session: accept, answer or skip 3–4 questions, then **Finish now** and **Export Markdown**. One line lists each risk with its branch: `$x = irm "$B/spaces/$S/ideation/sessions/$((irm "$B/spaces/$S/ideation/sessions")[0].id)"; $t = @{}; $x.nodes \| % { $t[$_.id] = $_.title }; $x.risks \| % { '{0}  <-  {1}' -f $_.text, $(if ($_.node_id) { $t[$_.node_id] } else { '(general)' }) }; 'labels: ' + ($x.risks.text -match '\bn\d+\b').Count` | Each risk is about the branch it names; a risk about the whole idea shows `(general)` and has no "(from …)" in the brief's **Open risks**. `labels: 0` (no "n3"/"n5" in any risk). In **Cited anchors**, document anchors name their section, e.g. `section “Example: Automatic Retries”` (G4-1) |
+| 9 | Request log (Gate 4 #9, untested) | After #8: `irm "$B/request-log?limit=100" \| ? space_name -eq Smoke \| % { $k = switch -Regex ($_.excerpt) { 'main topics' {'seed'; break} 'You interview a user' {'turn'; break} 'You check statements' {'judge'; break} default {'other'} }; '{0}  {1}  {2}' -f $_.timestamp, $_.capability, $k }` (or Settings → **Request log**) | Newest first, all `chat` for `Smoke`: one `seed`, one `turn` per question asked, and `judge` rows only when a code claim needed the judge (0 is fine). Finish now adds no row. No row shows an API key |
+| 10 | One line per source problem (G4-4, D-110) | In the space with the folder from Gate 4 #8 (exported brief + short `notes.md`), press the folder's refresh button ("Read it again from the original"). Narrow the window | Two separate warning lines: "1 file skipped: Trustbook idea briefs are never used as sources." and "Very little text was found (under 300 characters)." Long names and messages wrap instead of being cut off |
+| 11 | No JSON fragments or repeats (D-117; a note, not pass/fail) | `$r = docker compose exec -T app trustbook ask "With verify=False, does requests still reject a server certificate whose hostname does not match the URL?" --space Smoke --json \| ConvertFrom-Json; $r.sentences.text; ((irm "$B/spaces/$S/conversations/$($r.conversation_id)/messages") \| ? id -eq $r.message_id).diagnostics \| Select-Object syntax_fragments, duplicate_sentences` | Each sentence once; none is only `}]}]}` or ```` ```json ````. The fragment appeared in 1 builder run, so a clean answer usually shows `syntax_fragments` empty and `duplicate_sentences` 0. If the model does it again, the fragment is listed there and the answer still shows each sentence once. The fix itself is tested with the mock hook `TB-GARBLED` (tests only; a real model cannot trigger it) |
+| 12 | Optional API key, never echoed (G3b-2, D-111) | Settings → Models and services → **Chat model**: switch **Provider** through the list (don't save), then back. **Speech-to-text** → Runs on "Endpoint (OpenAI-compatible)" (don't save). Then on your chat card type `tb-gate5-dummy-key-1234` in "API key (optional)" and **Save**. Check: `(irm "$B/capabilities/chat").config \| Select-Object api_key_set, api_key_hint; (irm "$B/capabilities" \| ConvertTo-Json -Depth 8) -match 'dummy-key'; (docker compose logs app) -match 'dummy-key'` | "API key (optional)" with "Only if the endpoint asks for one" for llama.cpp server, Ollama, LM Studio, vLLM, Other OpenAI-compatible and speech-to-text; "API key" (required) for OpenAI, Azure OpenAI, Anthropic. After Save: "Saved key …1234. Leave empty to keep it."; `True`, `…1234`, then `False` and nothing for the logs. Chat still works (a llama-server without `--api-key` ignores it). Undo: **Remove saved key**, **Save** |
+| 13 | `http_status` on a rejected key (D-112) | Needs internet. `$o = (irm "$B/capabilities/chat").config; irm -Method Put "$B/capabilities/chat" -ContentType application/json -Body (@{preset='openai'; api_key='sk-gate5-fake-000000000000'; model='gpt-4o-mini'} \| ConvertTo-Json) \| Out-Null; docker compose exec -T app trustbook ask "test" --space Smoke --json; "exit $LASTEXITCODE"; irm -Method Put "$B/capabilities/chat" -ContentType application/json -Body (@{preset=$o.preset; base_url=$o.base_url; model=$o.model} \| ConvertTo-Json) \| Out-Null` | `{"schema":"trustbook.error/1",…,"http_status":401}`, `exit 1`, no key text. The last part restores your chat settings (the fake key is dropped with the OpenAI address); Settings shows your llama-server again. If your llama-server uses `--api-key`, enter that key again afterwards |
+| 14 | "Loading models" instead of 0% (D-113) | `docker compose restart app; do { Start-Sleep 2 } until (try { irm "$B/health" -TimeoutSec 2 \| Out-Null; $true } catch { $false }); docker compose exec -T app trustbook sources add paste "Gate 5 stage check. The quick brown fox jumps over the lazy dog." --title "Stage check" --space CLI --wait; docker compose exec -T app trustbook sources remove "Stage check" --space CLI --yes` | (`CLI` is the space from Gate 3b.) Progress on stderr shows `loading models (…)` before the source is ready (not a long `reading 0%`); then removed. (Right after an upgrade it can show `waiting for calibration (reading 0%)` instead) |
+| 15 | `python -m trustbook_cli` (G3b-1) | `pip install --force-reinstall "git+https://github.com/ludwich/trustbook@phase-5#subdirectory=cli"; python -m trustbook_cli ask "What does should_strip_auth check?" --space Smoke --json \| ConvertFrom-Json \| Select-Object verdict; "exit $LASTEXITCODE"; python -m trustbook_cli ask "What is the capital of Mongolia?" --space Smoke --json \| Out-Null; "exit $LASTEXITCODE"` | `verified` (or `partially_verified`), `exit 0`; then `exit 2`. No `trustbook.exe` involved |
+| 16 | Git Bash shim and the skill (G3b-1, Gate 3b #8, untested) | In **Git Bash**: `mkdir -p ~/bin && printf '#!/bin/sh\nexec python -m trustbook_cli "$@"\n' > ~/bin/trustbook && chmod +x ~/bin/trustbook && command -v trustbook`. In PowerShell: `iwr https://raw.githubusercontent.com/ludwich/trustbook/phase-5/skills/trustbook/SKILL.md -OutFile "$env:USERPROFILE\.claude\skills\trustbook\SKILL.md"`, then the two `claude -p` lines and the count line in `docs/cli.md` ("Checking the Claude Code skill") | `command -v` prints `/c/Users/<you>/bin/trustbook`. Basic auth: an answer with Trustbook's citations (file and lines). Mongolia: Claude says it is not in the sources of `Smoke`; no "Ulaanbaatar", no retry, no other space. Count line: `Questions asked: 1` |
+| 17 | Gate 3 with both models (G3-3, D-115) | `docker compose exec app python /app/eval/runner.py --base-url http://127.0.0.1:8484 --space Smoke --setup /app/eval/smoke/corpus.yaml --questions /app/eval/smoke/questions.yaml --questions /app/eval/smoke/refusal.yaml --code-root /host/trustbook-eval/requests --report /data/gate5-report.md --min-precision 0.9 --min-refusal 0.95 --max-false-refusals-code 1 --min-ranges-valid 1.0 --max-p95 60 --also-model gemma-4-26B-A4B-it-UD-Q4_K_XL; "exit $LASTEXITCODE"` (add `--questions /data/eval-private` for your set; add `--also-endpoint http://<host>:<port>/v1` if Gemma is not served by the same llama-server). Run it after #3 (the re-index must be done) | Exit code 0, from Qwen3.6 alone: in `Trustbook/gate5-report.md` the Gate 3 criteria hold (precision ≥ 90%, refusals ≥ 95%, code false refusals ≤ 1, cited ranges 100%, p95 ≤ 60 s). Section "Comparison models (reported, not a criterion)": a Gemma row marked "reported, not a criterion", then its metrics and questions. Gemma's numbers never change the exit code. If Gemma cannot load, its row says `failed` and the main result stands. Your chat settings are restored afterwards |
+| 18 | G3-2: ref-near-10 and the refusal card (D-118..D-121) | `1..5 \| % { $r = docker compose exec -T app trustbook ask "Which attribute names can I use on requests.codes to compare a status code with HTTP 429?" --space Smoke --json \| ConvertFrom-Json; '{0} {1}' -f $r.verdict, $r.refusal.reason }`. Then ask the same question once in the `Smoke` Chat tab | Mostly `verified` or `partially_verified` (builder after the fixes: 10 verified, 8 partial, 2 refused of 20; see the report). A refusal prints `refused unsupported`, never `not_in_sources`. In the UI a refusal of this kind shows **"Couldn't verify an answer"** (shield icon) with "Try rephrasing the question, or name the file or function you mean.", and the same card after F5. An answered run cites `status_codes.py` 77–85 and often `_init` 109–125 |
+
+### Builder results (dev workbench, before handing over)
+
+| Check | Result |
+|---|---|
+| Quality bar (backend ruff, format, `mypy --strict`, pytest; frontend lint, typecheck, test; cli and eval suites) | pass on `d7a662f`; eval suite again on `2696786` |
+| Playwright and CLI end-to-end (Release workflow, image `phase-5-rc`) | pass |
+| **Gate 3 command, both models, one run** (image from `2696786`, `Smoke`, Qwen3.6 main, `--also-model gemma-4-26B-A4B-it-UD-Q4_K_XL`) | **exit 0.** Qwen3.6: precision **100% (37/37)**, refusals **23/23**, code false refusals **0/13**, cited ranges 22/22, p50 / p95 **17.6 / 49.2 s** → pass. Gemma (reported, not a criterion): 97.2% (35/36), 23/23, code false refusals 2/13, p95 56.5 s. Peak memory 6.1 GiB. Details: `docs/MODELS.md` |
+| First two-model run (image from `0d36b32`) | Qwen3.6 pass (100%, 38/38; p95 42.1 s). Gemma did not start: llama-server was still loading it when the endpoint test timed out, reported as "API unreachable". Fixed: the runner waits for a model to load (D-122) |
+| G3-2 ref-near-10, 20 runs before and after the fixes | refusals 2 → 2 (all `unsupported`, now shown as "Couldn't verify an answer"), verified 16 → 10, partial 2 → 8, citations in the key 28/28 → 32/32; `docs/reports/G3-2-ref-near-10.md`. In the gate run above ref-near-10 was answered (2/2 citations) in 103.9 s |
+
+### Known limits
+- **Re-index costs.** While a re-index embeds, the new vectors take part of the vector top 40, so chat gets fewer
+  candidates until it is done. In old conversations, a citation of a chunk that changed no longer opens its
+  passage (as after a refresh of a changed file).
+- **No "Re-index all".** Each space has its own estimate and confirmation (D-114).
+- **Smaller chunks.** Document chunks roughly halve in size (HISTORY.md: every release is its own chunk). Answer
+  quality was measured only on the Gate 3 set.
+- **Old warnings.** A source read before Phase 5 shows its warnings as one line until it is read again. Pastes
+  and uploads cannot be refreshed, so theirs stay one line.
+- **Old ideation sessions.** Risks stored before D-116 keep their old branch. Check #8 with a new session.
+- **Exact matches only.** Repeated answer sentences are merged only when the text is identical (case and
+  punctuation count). Repeated risks are dropped only on the same normalised text; near-duplicates such as two
+  "infinite retries" risks both stay.
+- **Fragment diagnostics are API-only.** D-117's `syntax_fragments` and `duplicate_sentences` are in the message
+  diagnostics, not in the UI, the CLI JSON or the eval report.
+- **Comparison model.** Reported only. On one GPU, llama-server switching to Gemma and back takes minutes. Its
+  results go into `docs/MODELS.md` after this gate.
+- **Job stage.** "Loading models" and "Waiting for calibration" are kept in memory; after a restart a job starts
+  again from the beginning.
+- **Nondeterminism.** llama-server answers differ between runs even at temperature 0 with seed 42.
 
 ### Answer key change (Ludwig's decision, 2026-10-14)
 - **ref-near-10:** `src/requests/status_codes.py` line 106 (`codes: LookupDict[int] = LookupDict(name="status_codes")`)
