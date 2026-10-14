@@ -316,3 +316,138 @@ def test_compare_reads_new_and_older_sidecars(tmp_path: Path) -> None:
     code = runner.main(["--compare", str(old), str(new)], out=out, log=log)
     assert code == runner.EXIT_OK, log.getvalue()
     assert "No outcome differences." in out.getvalue()
+
+
+# --- Waiting for a comparison model to load (D-122) --------------------------------------------
+
+TEST_PATH = "/api/capabilities/chat/test"
+
+
+def chat_tests(api: FakeApi, model: str, replies: list[object]) -> list[str]:
+    """The endpoint test for ``model`` answers with ``replies`` in turn (then ok): a message is an
+    ok:false reply, an exception class is raised as the request's transport error. Returns the
+    model of every test request."""
+    tested: list[str] = []
+    original = api.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == TEST_PATH and api.chat_config["model"] == model:
+            tested.append(model)
+            n = sum(1 for m in tested if m == model)
+            if n <= len(replies):
+                reply = replies[n - 1]
+                if isinstance(reply, type) and issubclass(reply, httpx.TransportError):
+                    raise reply("timed out", request=request)
+                return httpx.Response(200, json={"ok": False, "message": reply, "latency_ms": 5})
+        return original(request)
+
+    api.handler = handler  # type: ignore[method-assign]
+    return tested
+
+
+def row(model: str, status: str) -> str:
+    return f"| `{model}` | comparison | - | - | - | - | - | {status} |"
+
+
+@pytest.mark.parametrize(
+    "replies",
+    [
+        ["No reply within 30 s.", "No reply within 30 s."],
+        ["Cannot reach host.docker.internal. Check the address and that the server is running."],
+        ["The endpoint had an internal error (503): Loading model"],
+    ],
+)
+def test_a_slow_model_load_is_waited_for(tmp_path: Path, replies: list[object]) -> None:
+    api = good_api()
+    seen = per_model(api, {})
+    tested = chat_tests(api, "gemma-26B", replies)
+    code, text, log, sidecar = run(api, tmp_path, "--also-model", "gemma-26B")
+    assert code == runner.EXIT_OK, text
+    assert len(tested) == len(replies) + 1  # retried until the test passed
+    assert log.count("waiting for gemma-26B to load on the chat server (") == len(replies)
+    assert seen == ["small-model"] * 3 + ["gemma-26B"] * 3
+    assert json.loads(sidecar.read_text())["comparison"][0]["status"] == "done"
+    assert "| `gemma-26B` at `host.docker.internal:8080` | comparison |" in text
+
+
+def test_a_test_request_that_times_out_is_retried_not_unreachable(tmp_path: Path) -> None:
+    api = good_api()
+    seen = per_model(api, {})
+    tested = chat_tests(api, "gemma-26B", [httpx.ReadTimeout, httpx.ReadTimeout])
+    code, text, log, sidecar = run(api, tmp_path, "--also-model", "gemma-26B")
+    assert code == runner.EXIT_OK, text
+    assert len(tested) == 3
+    assert "unreachable" not in log and "unreachable" not in text
+    assert log.count("waiting for gemma-26B to load on the chat server (") == 2
+    assert seen[-3:] == ["gemma-26B"] * 3
+    assert json.loads(sidecar.read_text())["comparison"][0]["status"] == "done"
+
+
+def test_a_rejected_key_fails_at_once(tmp_path: Path) -> None:
+    api = good_api()
+    tested = chat_tests(api, "gemma-26B", ["The API key was rejected (401)."] * 5)
+    code, text, log, _ = run(api, tmp_path, "--also-model", "gemma-26B", "--also-model", "phi-y")
+    assert code == runner.EXIT_OK, text
+    assert tested == ["gemma-26B"]  # not retried
+    assert "waiting for" not in log
+    assert (
+        row(
+            "gemma-26B",
+            "failed: the chat endpoint from --also-model gemma-26B failed: "
+            "The API key was rejected (401).",
+        )
+        in text
+    )
+    assert "#### Comparison model: `phi-y`" in text  # the next one runs
+
+
+def test_a_model_that_never_loads_fails_its_row_only(tmp_path: Path) -> None:
+    api = good_api()
+    per_model(api, {})
+    tested = chat_tests(api, "gemma-26B", ["No reply within 30 s."] * 1000)
+    code, text, log, sidecar = run(
+        api, tmp_path, "--also-model", "gemma-26B", "--model-load-timeout", "30"
+    )
+    assert code == runner.EXIT_OK, text  # the main result is unchanged
+    assert 1 < len(tested) < 30
+    assert row("gemma-26B", "failed: the chat server did not load gemma-26B within 30 s") in text
+    assert "| Citation precision (answerable) | 100.0% (2/2) | >= 90% | pass |" in text
+    assert api.chat_puts[-1] == SAVED and "chat settings restored" in log
+    [failed] = json.loads(sidecar.read_text())["comparison"]
+    assert failed["status"] == "failed" and failed["questions"] == []
+
+
+def test_the_main_runs_chat_model_is_waited_for_too(tmp_path: Path) -> None:
+    api = good_api()
+    chat_tests(api, "Main-35B", [httpx.ReadTimeout])
+    code, text, log, _ = run(api, tmp_path, "--chat-model", "Main-35B")
+    assert code == runner.EXIT_OK, text
+    assert "waiting for Main-35B to load on the chat server (" in log
+
+    api = good_api()
+    chat_tests(api, "Main-35B", ["No reply within 30 s."] * 1000)
+    code, _, log, _ = run(api, tmp_path, "--chat-model", "Main-35B", "--model-load-timeout", "20")
+    assert code == runner.EXIT_UNAVAILABLE
+    assert "error: the chat server did not load Main-35B within 20 s" in log
+    assert api.chat_puts[-1] == SAVED
+
+
+@pytest.mark.parametrize("health_down", [False, True])
+def test_a_real_connection_failure_is_still_unreachable(tmp_path: Path, health_down: bool) -> None:
+    api = good_api()
+    # The test request cannot connect, or it times out and the API's health check cannot connect.
+    error = httpx.ReadTimeout if health_down else httpx.ConnectError
+    tested = chat_tests(api, "gemma-26B", [error])
+    original = api.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if health_down and request.url.path == "/api/health" and tested:
+            raise httpx.ConnectError("refused", request=request)
+        return original(request)
+
+    api.handler = handler  # type: ignore[method-assign]
+    code, text, log, _ = run(api, tmp_path, "--also-model", "gemma-26B", "--also-model", "phi-y")
+    assert code == runner.EXIT_OK, text
+    assert row("gemma-26B", "failed: Trustbook API unreachable after 0 of 3 questions") in text
+    assert row("phi-y", "skipped: the Trustbook API became unreachable") in text
+    assert "waiting for" not in log

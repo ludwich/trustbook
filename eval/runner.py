@@ -31,8 +31,9 @@ the app's own settings). ``--chat-endpoint`` / ``--chat-model`` switch the chat 
 run and restore it afterwards, also on an error or Ctrl-C. ``--also-model NAME`` (repeatable, with
 an optional ``--also-endpoint URL``) asks the same questions again with a comparison model after the
 main run and reports it next to the main model: reported, not a criterion (the exit code depends on
-the main model only). ``--compare A.json B.json`` lists the per-question differences between two
-sidecars and exits.
+the main model only). After every model switch the runner waits for the chat server to load the
+model (``--model-load-timeout``, D-122). ``--compare A.json B.json`` lists the per-question
+differences between two sidecars and exits.
 
 Only ``httpx``, ``PyYAML`` and the CLI's API client (``cli/``, package ``trustbook-cli``, installed
 with the backend and in the image; D-087) are used. The runner talks to the API contract in
@@ -1383,9 +1384,13 @@ class Api:
             raise EvalError(f"save {cap_id} settings: unexpected response")
         return data
 
-    def test_capability(self, cap_id: str) -> dict[str, Any]:
+    def test_capability(self, cap_id: str, *, timeout_s: float | None = None) -> dict[str, Any]:
+        """``timeout_s``: this request's read timeout (None: the client's)."""
+        kwargs: dict[str, Any] = {}
+        if timeout_s is not None:
+            kwargs["timeout"] = httpx.Timeout(timeout_s, connect=10.0)
         data = self._request(
-            "POST", f"/api/capabilities/{cap_id}/test", f"test {cap_id} endpoint", json={}
+            "POST", f"/api/capabilities/{cap_id}/test", f"test {cap_id} endpoint", json={}, **kwargs
         )
         if not isinstance(data, dict):
             raise EvalError(f"test {cap_id} endpoint: unexpected response")
@@ -2197,15 +2202,90 @@ def read_chat_info(api: Api, *, overridden: bool = False) -> ChatInfo | None:
     )
 
 
+# A model switch on a single-GPU llama-server (router mode, llama-swap) unloads one model and loads
+# the next, which can take minutes. The endpoint test is repeated until it passes or the load
+# timeout runs out (D-122).
+MODEL_LOAD_TIMEOUT_S = 900.0
+LOAD_TEST_TIMEOUT_S = 120.0  # one test request at most (and at most --timeout)
+LOAD_RETRY_S = 10.0  # pause between two endpoint tests
+# Test messages from the backend (app/capabilities/adapters/base.py) that mean "not loaded yet":
+# no reply in time, no connection to the model server, or llama-server's 503 while it loads. Any
+# other failure (a rejected key, an unknown model, a certificate problem) fails at once.
+_LOADING_PREFIXES = ("no reply", "cannot reach ", "connection to ")
+_LOADING_PARTS = ("(503)", "loading model")
+
+
+@dataclass(frozen=True)
+class ModelLoad:
+    """How long, and how, to wait for the chat server to load a model after a switch."""
+
+    timeout_s: float = MODEL_LOAD_TIMEOUT_S
+    test_timeout_s: float = LOAD_TEST_TIMEOUT_S
+    retry_s: float = LOAD_RETRY_S
+    sleep: Callable[[float], None] = time.sleep
+    clock: Callable[[], float] = time.monotonic
+
+
+def model_loading(message: str) -> bool:
+    """Whether a failed endpoint test's message means the model may still be loading."""
+    text = message.strip().lower()
+    return text.startswith(_LOADING_PREFIXES) or any(part in text for part in _LOADING_PARTS)
+
+
+def _check_api(api: Api) -> None:
+    """:class:`ApiUnreachableError` unless ``GET /api/health`` answers."""
+    try:
+        api.health()
+    except ApiUnreachableError:
+        raise
+    except EvalError as exc:
+        raise ApiUnreachableError(str(exc)) from exc
+
+
+def wait_for_chat_model(api: Api, model: str, log: TextIO, *, what: str, load: ModelLoad) -> None:
+    """Test the chat endpoint until it passes or ``load.timeout_s`` has passed.
+
+    A test that times out (its reply, or the request itself while the API still answers its health
+    check) or cannot reach the model server is retried; any other failed test raises
+    :class:`EvalError` at once. Only the Trustbook API itself failing raises
+    :class:`ApiUnreachableError`.
+    """
+    start = load.clock()
+    deadline = start + load.timeout_s
+    while True:
+        request_timeout = max(1.0, min(load.test_timeout_s, deadline - load.clock()))
+        try:
+            result = api.test_capability("chat", timeout_s=request_timeout)
+        except ApiUnreachableError as exc:
+            if not isinstance(exc.__cause__, httpx.ReadTimeout):
+                raise  # no connection to the Trustbook API
+            _check_api(api)  # the API answers: the model server is busy loading
+        else:
+            if result.get("ok") is True:
+                return
+            message = str(result.get("message") or "no reason given")
+            if not model_loading(message):
+                raise EvalError(f"the chat endpoint from {what} failed: {message}")
+        now = load.clock()
+        if now >= deadline:
+            raise EvalError(f"the chat server did not load {model} within {load.timeout_s:.0f} s")
+        print(f"waiting for {model} to load on the chat server ({now - start:.0f}s)", file=log)
+        load.sleep(min(load.retry_s, deadline - now))
+
+
 def apply_chat_override(
-    api: Api, body: dict[str, Any], log: TextIO, *, what: str = "--chat-endpoint/--chat-model"
+    api: Api,
+    body: dict[str, Any],
+    log: TextIO,
+    *,
+    what: str = "--chat-endpoint/--chat-model",
+    load: ModelLoad | None = None,
 ) -> None:
-    """Save the override, then test the endpoint once so a typo fails before the run."""
+    """Save the override, then test the endpoint so a typo fails before the run, waiting for the
+    chat server to load the model (D-122)."""
     api.update_capability("chat", body)
-    result = api.test_capability("chat")
-    if result.get("ok") is not True:
-        message = str(result.get("message") or "no reason given")
-        raise EvalError(f"the chat endpoint from {what} failed: {message}")
+    model = str(body.get("model") or "the chat model")
+    wait_for_chat_model(api, model, log, what=what, load=load or ModelLoad())
     print("chat override saved and tested", file=log)
 
 
@@ -2295,6 +2375,7 @@ def run_comparisons(
     code_root: str | None,
     log: TextIO,
     clock: Callable[[], float] = time.perf_counter,
+    load: ModelLoad | None = None,
 ) -> None:
     """Ask every question again with each comparison model, one after the other.
 
@@ -2305,7 +2386,7 @@ def run_comparisons(
     """
     for i, run in enumerate(runs):
         try:
-            apply_chat_override(api, run.body, log, what=f"--also-model {run.model}")
+            apply_chat_override(api, run.body, log, what=f"--also-model {run.model}", load=load)
             run.chat = read_chat_info(api, overridden=True)
             print(
                 f"comparison model {run.label()}: asking {len(questions)} questions again "
@@ -3252,6 +3333,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--setup-timeout", type=float, default=3600.0, help="seconds (default 3600)")
     p.add_argument("--poll-interval", type=float, default=5.0, help=argparse.SUPPRESS)
     p.add_argument("--timeout", type=float, default=300.0, help="seconds per answer (default 300)")
+    p.add_argument(
+        "--model-load-timeout",
+        type=_seconds,
+        default=MODEL_LOAD_TIMEOUT_S,
+        metavar="SECONDS",
+        help="after a chat model switch (--chat-model, --also-model), wait this long for the chat "
+        f"server to load the model (default {MODEL_LOAD_TIMEOUT_S:.0f})",
+    )
     p.add_argument("--min-precision", type=_fraction, help="exit 1 if citation precision is lower")
     p.add_argument("--min-refusal", type=_fraction, help="exit 1 if correct-refusal rate is lower")
     p.add_argument(
@@ -3394,6 +3483,12 @@ def main(
         return EXIT_UNAVAILABLE
 
     timeout = httpx.Timeout(args.timeout, connect=10.0)
+    load = ModelLoad(
+        timeout_s=args.model_load_timeout,
+        test_timeout_s=min(args.timeout, LOAD_TEST_TIMEOUT_S),
+        sleep=sleep,
+        clock=clock,
+    )
     overriding = args.chat_endpoint is not None or args.chat_model is not None
     also_models: list[str] = args.also_model or []
     comparisons: list[ComparisonRun] = []
@@ -3411,7 +3506,7 @@ def main(
                 )
                 original_chat = saved
                 if overriding:
-                    apply_chat_override(api, body, log)
+                    apply_chat_override(api, body, log, load=load)
             chat = read_chat_info(api, overridden=overriding)
             if chat is not None:
                 print(
@@ -3473,6 +3568,7 @@ def main(
                 code_root=args.code_root,
                 log=log,
                 clock=clock,
+                load=load,
             )
         except ApiUnreachableError as exc:
             print(f"error: Trustbook API unreachable at {args.base_url}: {exc}", file=log)

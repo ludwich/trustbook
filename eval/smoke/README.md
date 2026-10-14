@@ -232,3 +232,10 @@ model (for example a llama-server router or llama-swap that loads models by name
 be repeated. A comparison model whose endpoint test fails, or a Ctrl-C during the comparison, still
 writes the main report with the comparison marked `failed` or `interrupted` (see `eval/format.md`,
 "Comparison models in the same run").
+
+On a single-GPU llama-server a model switch unloads one model and loads the next, which can take
+minutes. The runner waits for it after every switch (`--chat-model`, each `--also-model`), retrying
+the endpoint test and logging `waiting for NAME to load on the chat server (Ns)`, for up to
+`--model-load-timeout` seconds (default 900). A model that has not loaded by then is reported as
+`failed: the chat server did not load NAME within N s`; the main result is unchanged. A rejected key or
+an unknown model fails at once (see `eval/format.md`, "Waiting for a model to load").

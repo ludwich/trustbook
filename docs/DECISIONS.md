@@ -2359,3 +2359,27 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Alternatives:** placing the whole context by fused rank (overrides the reranker everywhere, and the top
   chunk); rescoring the table chunk with a docstring prefix (F3, not approved: the refusal threshold reads those
   scores); putting guard chunks first (above the reranker's best).
+
+### D-122 The runner waits for a switched chat model to load; a test timeout is not an unreachable API (Gate 5)
+- **Finding (Gate 5 run, `--also-model gemma-4-26B-A4B-it-UD-Q4_K_XL`):** after the main run the runner switched
+  the chat model and tested the endpoint once. llama-server had to load Gemma from cold, so
+  `POST /api/capabilities/chat/test` did not return within `--timeout` (300 s); the httpx `ReadTimeout` was
+  reported as "Trustbook API unreachable after 0 of 45 questions". The API was fine; the model server was
+  loading. Gate check #17 (`--chat-model`) would hit the same.
+- **Decision (`eval/runner.py`, `wait_for_chat_model`):** after every chat switch (`--chat-endpoint`/`--chat-model`,
+  each `--also-model`) the endpoint test is repeated (about every 10 s, each request with its own timeout of
+  min(`--timeout`, 120) s) until it passes or `--model-load-timeout` (default 900 s) has passed, logging
+  "waiting for NAME to load on the chat server (Ns)". Retried: a test reply `ok: false` whose message is a
+  timeout ("No reply …"), a connection failure to the model server ("Cannot reach …", "Connection to … failed")
+  or llama-server's loading answer (503 / "Loading model"); and a `ReadTimeout` of the test request while
+  `GET /api/health` still answers. Any other `ok: false` (401, 404 unknown model, certificate) fails at once as
+  before. Only a connection failure to the Trustbook API, or a failing health check, is `ApiUnreachableError`.
+  On the deadline a comparison model's row reads "failed: the chat server did not load NAME within N s"; the main
+  result, exit code and the restore of the saved chat settings are unchanged (the restore only saves, no test).
+  For `--chat-endpoint`/`--chat-model` the same message stops the run (exit 2).
+- **Reason:** a model switch on a single-GPU llama-server takes minutes; the run should wait for it and say
+  what happened, not blame the API.
+- **Alternatives:** a longer `--timeout` alone (also lengthens every answer's timeout and still misreports a
+  slow load as unreachable); a fixed sleep after the switch (too short for a cold load, wasted for a warm one);
+  retrying every failed test (a typo or a rejected key would then wait 15 minutes); waiting in the backend's
+  test endpoint (the Settings Test button should answer quickly, PING_TIMEOUT_S 30 s).

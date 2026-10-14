@@ -207,6 +207,7 @@ run with exit 2 and a hint to use `--app-default`.
 1. `GET /api/capabilities/chat` saves the current preset, base URL, model and API version.
 2. `PUT /api/capabilities/chat` with `{"preset": "custom", "base_url": URL}` (endpoint) and/or
    `{"model": NAME}`, then `POST /api/capabilities/chat/test`; a failing test stops the run (exit 2).
+   The test waits for the model to load (see "Waiting for a model to load" below).
 3. The questions are asked. The header names the model and endpoint host read back from
    `GET /api/capabilities/chat` ("Chat model: `NAME` at `host:port` (preset custom; set for this
    run …)"); without an override it names the saved ones.
@@ -227,7 +228,8 @@ a change tuned to one model family shows up early (G3-3). The main model (the sa
 each `--also-model` in order:
 
 1. `PUT /api/capabilities/chat` with `{"model": NAME}`, plus `{"preset": "custom", "base_url": URL}`
-   when an endpoint applies, then `POST /api/capabilities/chat/test`.
+   when an endpoint applies, then `POST /api/capabilities/chat/test`, repeated until the model has
+   loaded (see "Waiting for a model to load" below).
 2. The same questions are asked again, in the same space, with the same generation settings. Nothing
    is set up, refreshed or re-indexed again.
 
@@ -247,11 +249,37 @@ a comparison model never stop the report:
 | What happens | Comparison model | Report and exit code |
 |---|---|---|
 | Its endpoint test fails | `failed` (with the reason); the next one runs | main report as usual |
+| It does not load within `--model-load-timeout` | `failed: the chat server did not load NAME within N s`; the next one runs | main report as usual |
 | Trustbook becomes unreachable | `failed`; the rest `skipped` | main report as usual |
 | Ctrl-C or `kill` (SIGTERM) | `interrupted after k of n questions`; the rest `skipped` | main report as usual, main exit code |
 
 The saved chat settings (preset, base URL, model, API version) are put back afterwards in every case,
 as for `--chat-endpoint`; the runner then reads them back and warns if they differ.
+
+### Waiting for a model to load (`--model-load-timeout`; D-122)
+
+A model switch on a single-GPU llama-server (router mode, llama-swap) unloads one model and loads the
+next from disk, which can take minutes. After every switch (`--chat-model`, `--chat-endpoint`, each
+`--also-model`) the runner repeats `POST /api/capabilities/chat/test` until it passes or
+`--model-load-timeout` seconds (default 900) have passed, about every 10 s, and logs
+`waiting for NAME to load on the chat server (Ns)` before each new attempt.
+
+- **Retried:** a test reply `ok: false` whose message says the model server did not answer in time
+  ("No reply …"), could not be reached ("Cannot reach …", "Connection to … failed") or is loading
+  (HTTP 503, "Loading model"); and a test request that itself gets no reply within
+  min(`--timeout`, 120) s while `GET /api/health` still answers (the API is up, the model server is
+  busy).
+- **Fails at once:** any other `ok: false` (a rejected key 401, an unknown model 404, a certificate
+  problem): the comparison model is `failed` with the test's message, or the run stops (exit 2) for
+  `--chat-endpoint`/`--chat-model`.
+- **Unreachable:** only no connection to the Trustbook API itself (`--base-url`), or
+  `GET /api/health` failing after a test request timed out.
+- **Deadline passed:** the comparison model is `failed: the chat server did not load NAME within N s`
+  (the main result and exit code are unchanged); for `--chat-endpoint`/`--chat-model` the run stops
+  (exit 2) with the same message.
+
+Restoring the saved chat settings afterwards only saves them (no test, no wait): the server loads the
+saved model again on its next request.
 
 The report header adds "Comparison models: `NAME`, asked the same questions after this run (…;
 reported, not a criterion)", and a section follows the main report:
