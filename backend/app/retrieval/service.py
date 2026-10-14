@@ -5,12 +5,14 @@ and the full-text lists stays in the context even if the reranker dropped it. Th
 trained on prose and sometimes ranks the one code chunk that answers a question below the
 context cut, although both searches put it first. The kept chunk replaces the lowest-ranked kept
 chunk and the token budget still holds. The refusal threshold still uses the rerank scores.
+Since D-121 a chunk the guard put back sits in the context by its fused rank (next to the chunks
+the searches ranked near it), not last.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, replace
 
 from sqlalchemy import Engine
@@ -296,6 +298,28 @@ def candidates(
     return search(engine, index, embedder, query, source_ids).rows
 
 
+def by_fused_rank(
+    chunks: Sequence[RetrievedChunk], moved: Collection[str], fused: Sequence[str]
+) -> list[RetrievedChunk]:
+    """``chunks`` (rerank order) with each chunk in ``moved`` placed by its fused rank (D-121).
+
+    The others keep their order. Each moved chunk, best fused rank first, goes right before the
+    first chunk after the top one that the fused list ranks below it (at the end when there is
+    none); the top chunk, the reranker's best, always stays first. A chunk missing from
+    ``fused`` ranks last.
+    """
+    position = {cid: i for i, cid in enumerate(fused)}
+
+    def rank(chunk: RetrievedChunk) -> int:
+        return position.get(chunk.chunk_id, len(position))
+
+    placed = [c for c in chunks if c.chunk_id not in moved]
+    for chunk in sorted((c for c in chunks if c.chunk_id in moved), key=rank):
+        at = next((i for i in range(1, len(placed)) if rank(placed[i]) > rank(chunk)), None)
+        placed.insert(len(placed) if at is None else at, chunk)
+    return placed
+
+
 def keep_agreed(
     selected: Sequence[RetrievedChunk],
     ranked: Sequence[RetrievedChunk],
@@ -303,12 +327,16 @@ def keep_agreed(
     *,
     max_chunks: int = CONTEXT_CHUNKS,
     max_tokens: int = CONTEXT_TOKENS,
+    fused: Sequence[str] = (),
 ) -> list[RetrievedChunk]:
     """``selected`` with every agreed chunk the reranker left out put back (D-046).
 
     Each one replaces the lowest-ranked kept chunk, more than one if that is what the token
     budget needs. The top chunk and other agreed chunks are never replaced; an agreed chunk that
-    still does not fit is left out. The result keeps the rerank order.
+    still does not fit is left out. Without ``fused`` the result keeps the rerank order; with
+    the fused order of the candidates, each chunk the guard put back is placed by its fused rank
+    instead of last (:func:`by_fused_rank`, D-121). Only the order changes: ``ranked`` and its
+    scores (the layer 2 refusal threshold) do not.
     """
     position = {c.chunk_id: i for i, c in enumerate(ranked)}
     by_id = {c.chunk_id: c for c in ranked}
@@ -339,7 +367,10 @@ def keep_agreed(
             "Agreement guard: kept chunk %s (reranked #%d)", chunk_id, position[chunk_id] + 1
         )
         result = trial
-    return result
+    if not fused:
+        return result
+    chosen = {c.chunk_id for c in selected}
+    return by_fused_rank(result, {c.chunk_id for c in result} - chosen, fused)
 
 
 def with_parents(
@@ -421,7 +452,9 @@ def retrieve(
         return Retrieval(chunks=[], ranked=[], source_ids=[])
     found = search(engine, index, embedder, query, allowed)
     ranked = rerank(query, found.rows, reranker)
-    chosen = keep_agreed(select_context(ranked), ranked, found.agreed)
+    # Chunks the guard puts back sit by their fused rank, not last (D-121).
+    fused = [row.chunk_id for row in found.rows]
+    chosen = keep_agreed(select_context(ranked), ranked, found.agreed, fused=fused)
     # One per-file row cache for the lookups and the expansion (D-077).
     file_rows = FileRows(engine, allowed)
     chunks = with_callees(

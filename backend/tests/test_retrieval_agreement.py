@@ -15,6 +15,7 @@ from app.index.memory import InMemorySpaceIndex
 from app.retrieval.service import (
     RetrievedChunk,
     agreed_ids,
+    by_fused_rank,
     keep_agreed,
     retrieve,
     select_context,
@@ -90,7 +91,12 @@ def test_ref_near_08_shape_kept_although_the_reranker_drops_it(engine: Engine) -
     ids = [c.chunk_id for c in result.chunks]
     assert digest in ids and len(ids) == 8
     assert ids[0] == prose[0]  # the top chunk is never replaced
-    assert ids.index(digest) == len(ids) - 1  # guarded chunks join last; rerank order kept
+    # D-121: the guarded chunk sits by its fused rank (#1 in both searches): right after the top
+    # chunk, not last; the other chunks keep their rerank order.
+    assert ids.index(digest) == 1
+    order = [c.chunk_id for c in result.ranked]
+    reranked_in = [i for i in ids if i in order[:8]]
+    assert reranked_in == sorted(reranked_in, key=order.index)
     assert result.ranked[-1].chunk_id == digest  # ranking and refusal scores are unchanged
     assert result.top_score == pytest.approx(0.9)
 
@@ -156,3 +162,40 @@ def test_keep_agreed_never_replaces_another_agreed_chunk_or_duplicates() -> None
     assert ids == sorted(ids, key=lambda cid: int(cid[1:]))  # rerank order
     assert keep_agreed(selected, ranked, ["k1"]) == selected  # already kept
     assert keep_agreed(selected, ranked, ["missing"]) == selected
+
+
+def test_chunks_the_guard_puts_back_sit_by_their_fused_rank() -> None:
+    """D-121: only the chunks the guard put back move; the top chunk stays first."""
+    ranked = [chunk(f"k{i}", 1.0 - i * 0.1) for i in range(10)]
+    selected = select_context(ranked)  # k0..k7 in rerank order
+    fused = ["k9", "k2", "k0", "k8", "k5", "k1", "k3", "k4", "k6", "k7"]
+    kept = keep_agreed(selected, ranked, ["k9", "k8"], fused=fused)
+    # k9 (fused #1) goes right after the top chunk; k8 (fused #4) before the first chunk after
+    # the top that fused ranks below it (k1, fused #6). k6 and k7 made room (lowest reranked).
+    assert [c.chunk_id for c in kept] == ["k0", "k9", "k8", "k1", "k2", "k3", "k4", "k5"]
+    # Without the fused order: rerank order, as before D-121.
+    assert [c.chunk_id for c in keep_agreed(selected, ranked, ["k9", "k8"])] == [
+        "k0",
+        "k1",
+        "k2",
+        "k3",
+        "k4",
+        "k5",
+        "k8",
+        "k9",
+    ]
+    # A chunk the reranker kept itself never moves, even when it is agreed.
+    assert keep_agreed(selected, ranked, ["k7"], fused=fused) == selected
+
+
+def test_by_fused_rank_keeps_the_top_first_and_puts_unknown_chunks_last() -> None:
+    chunks = [chunk("a", 0.9), chunk("b", 0.5), chunk("c", 0.4), chunk("g", 0.1)]
+    fused = ["g", "c", "a", "b"]
+    assert [c.chunk_id for c in by_fused_rank(chunks, {"g"}, fused)] == ["a", "g", "b", "c"]
+    assert [c.chunk_id for c in by_fused_rank(chunks, {"g"}, ["a", "b", "c"])] == [
+        "a",
+        "b",
+        "c",
+        "g",
+    ]
+    assert by_fused_rank(chunks, set(), fused) == chunks

@@ -31,10 +31,18 @@ from app.retrieval.parents import (
     expand,
     uses_name,
 )
-from app.retrieval.service import RetrievedChunk
+from app.retrieval.service import (
+    RetrievedChunk,
+    keep_agreed,
+    rerank,
+    retrieve,
+    search,
+    select_context,
+)
 from app.retrieval.store import FileRows, chunks_at_ordinals
-from tests.chat_helpers import add_source
-from tests.parent_helpers import DOC, INIT, STATUS, TABLE_HEAD, add_rows, status_specs
+from tests.chat_helpers import KeywordEmbedder, add_source
+from tests.parent_helpers import DOC, INIT, STATUS, TABLE_HEAD, add_rows, doc, status_specs
+from tests.test_retrieval_agreement import ByText, Pinned
 
 
 @pytest.fixture
@@ -184,3 +192,70 @@ def test_the_answer_caps_are_shared_with_the_parent_promotions(
     (left,) = data_user_promotions(context, spent(EXPANSION_TOKENS - 100), {}, file_rows=files)
     assert left.row.locator["symbol"] == "doc"
     assert data_user_promotions(context, spent(EXPANSION_TOKENS - 50), {}, file_rows=files) == []
+
+
+# --- the ref-near-10 shape end to end: D-046 guard, D-119 promotion, D-121 order ----------------
+
+
+def test_ref_near_10_shape_brings_init_and_puts_the_table_next_to_the_docstring(
+    engine: Engine,
+) -> None:
+    """G3-2, as measured: the 429 table part is vector #1 / full-text #2 (fused #1) but reranked
+    near zero, so only the guard keeps it; ``_init`` is reranked below the 8-chunk cap (the token
+    budget has room). F1 promotes ``_init`` for the table part, F2 puts the table right after the
+    docstring (fused #2, reranked #1) instead of last. Rerank scores, and so the layer 2 refusal
+    threshold, are unchanged."""
+    index = Pinned()
+    source = add_source(engine, "requests", source_type="folder")
+    notes = [
+        doc(10 + n, 1, 9, f"Release note {n} about retries.", section=None, head=False, tokens=200)
+        for n in range(12)
+    ]
+    specs = [*status_specs()[:5], *notes]
+    ids = add_rows(engine, index, source, specs)
+    docstring, head, table, codes_line, init = (ids[n] for n in range(5))
+    filler = [ids[10 + n] for n in range(12)]
+    index.vector = [
+        table,
+        *filler[:4],
+        docstring,
+        *filler[4:6],
+        codes_line,
+        *filler[6:],
+        head,
+        init,
+    ]
+    index.text = [docstring, table, *filler[:4], codes_line, init, *filler[4:], head]
+    scores = {spec.text: 0.0 for spec in specs}
+    scores[specs[0].text] = 0.5085  # docstring
+    scores[specs[2].text] = 0.0174  # the 429 table part
+    scores[specs[3].text] = 0.0402  # codes = LookupDict(...)
+    scores[specs[4].text] = 0.0336  # _init
+    for n in range(12):
+        scores[notes[n].text] = 0.45 - n * 0.03
+    reranker = ByText(scores)
+    question = "Which names does requests.codes have for HTTP 429?"
+
+    # Before D-119 / D-121: the guard keeps the table last; _init is cut by the 8-chunk cap.
+    found = search(engine, index, KeywordEmbedder(), question, [source])
+    ranked = rerank(question, found.rows, reranker)
+    selected = select_context(ranked)
+    assert init not in [c.chunk_id for c in selected]
+    assert sum(c.token_count for c in selected) < 6_000 // 2  # not the token budget
+    assert keep_agreed(selected, ranked, found.agreed)[-1].chunk_id == table
+
+    result = retrieve(engine, index, KeywordEmbedder(), reranker, question)
+    context = [c.chunk_id for c in result.chunks]
+    assert context[:2] == [docstring, table]  # the table sits next to the docstring (F2)
+    assert context[2:8] == filler[:6]
+    promoted = result.promoted
+    assert [(c.chunk_id, c.expansion, c.referrer) for c in promoted] == [(init, "data_user", table)]
+    assert promoted[0].text == specs[4].text  # verbatim, a numbered chunk like any other
+    assert context[8] == init
+    # Ranking and the refusal threshold's scores are untouched.
+    assert [c.chunk_id for c in result.ranked] == [c.chunk_id for c in ranked]
+    assert result.top_score == pytest.approx(0.5085)
+    assert next(c.score for c in result.chunks if c.chunk_id == table) == pytest.approx(0.0174)
+    # Deterministic.
+    again = retrieve(engine, index, KeywordEmbedder(), reranker, question)
+    assert [c.chunk_id for c in again.chunks] == context
