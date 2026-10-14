@@ -60,8 +60,8 @@ class RetrievedChunk:
     structure: Structure | None = None
     # The chunk's position in its source (-1: unknown), for the parent lookups (D-077).
     ordinal: int = -1
-    # Set only on a chunk promoted as parent context for ``referrer`` (D-077):
-    # ``section_previous`` or ``class_head``. Never read by a grounding layer.
+    # Set only on a chunk promoted as parent context for ``referrer`` (D-077): ``section_previous``,
+    # ``class_head`` or ``data_user`` (D-119). Never read by a grounding layer.
     expansion: str | None = None
 
     @classmethod

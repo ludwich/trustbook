@@ -111,8 +111,8 @@ class Timings(BaseModel):
 
 
 class ExpansionOut(BaseModel):
-    """A chunk promoted as parent context (D-077): its id, ``section_previous`` or
-    ``class_head``, and the id of the context chunk it was promoted for (``referrer``)."""
+    """A chunk promoted as parent context (D-077): its id, ``section_previous``, ``class_head`` or
+    ``data_user`` (D-119), and the id of the context chunk it was promoted for (``referrer``)."""
 
     chunk_id: str
     kind: str

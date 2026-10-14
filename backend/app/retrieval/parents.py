@@ -7,7 +7,10 @@ of parent context:
 - **Citable promotion**, at most one chunk per child. A document or web child that does not start
   its section gets the chunk before it (``section_previous``); a method or class-run child gets its
   class's head chunk (``class_head``), always when it is at most :data:`HEAD_UNGATED_TOKENS`,
-  otherwise only when the reranker scored it. A promoted chunk is an ordinary numbered chunk: the
+  otherwise only when the reranker scored it. Then, for ANY context chunk that is part of a
+  module-level data table (``_codes = {...}``, also one kept only by the D-046 guard), one chunk of
+  the same file that uses the table's name (``data_user``, D-119), when no context chunk does.
+  A promoted chunk is an ordinary numbered chunk: the
   model cites it by its own exact lines and every grounding layer checks it like any other chunk.
   Promotions use only the free part of the context budget; they never displace a chunk and never
   enter ``ranked`` (layer 2 reads only ranked children).
@@ -59,9 +62,10 @@ WINDOW_ANSWER_TOKENS = 2_400  # prompt tokens all transcript windows of an answe
 WINDOW_REACH = 2  # neighbours on each side of a transcript child
 WINDOW_PLACEHOLDER = "(numbered chunk above)"
 
-ExpansionKind = Literal["section_previous", "class_head"]
+ExpansionKind = Literal["section_previous", "class_head", "data_user"]
 SECTION_PREVIOUS: ExpansionKind = "section_previous"
 CLASS_HEAD: ExpansionKind = "class_head"
+DATA_USER: ExpansionKind = "data_user"
 
 _LINE_KEY = re.compile(r"#L(\d+)$")
 _IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]*")
@@ -324,6 +328,108 @@ def promotions(
         used += size
         spent += size
     return promoted
+
+
+# --- the users of a module-level data table (D-119) ----------------------------------------
+
+
+def data_symbol(chunk: Child | ChunkRow) -> str | None:
+    """The module-level name a data-literal chunk is assigned to (``_codes`` for every part of
+    ``_codes = {...}``), else None.
+
+    A data chunk is one the code chunker made of a big literal (locator ``kind`` ``data``, D-056),
+    whose parent is its file's module (a class-level table is not module-level).
+    """
+    locator = chunk.locator
+    file = code_file(locator)
+    symbol = locator.get("symbol")
+    if locator.get("kind") != "data" or file is None or not isinstance(symbol, str):
+        return None
+    if not _IDENTIFIER.fullmatch(symbol) or chunk.parent_key != module_key(file):
+        return None
+    return symbol
+
+
+def uses_name(name: str, text: str) -> bool:
+    """Whether code ``text`` (a stored chunk, ``File:`` header included) uses the module-level
+    ``name``: as a whole word, not as an attribute (``x._codes``), on a line that does not
+    assign it at column 0 (``_codes = …`` defines it, it does not use it)."""
+    body = text.partition("\n")[2] if text.startswith("File: ") else text
+    word = re.compile(rf"(?<![\w$.]){re.escape(name)}(?![\w$])")
+    assigns = re.compile(rf"^{re.escape(name)}\s*(?::[^=\n]*)?=(?!=)")
+    return any(word.search(line) and not assigns.match(line) for line in body.split("\n"))
+
+
+def data_user_promotions(
+    chunks: Sequence[Child],
+    promoted: Sequence[Promotion],
+    scores: dict[str, float],
+    *,
+    file_rows: FileRowsLookup,
+    max_tokens: int = CONTEXT_TOKENS,
+) -> list[Promotion]:
+    """For each module-level data chunk in the context (:func:`data_symbol`, in context order),
+    one chunk of the same file that uses its name, when no context chunk already does (D-119).
+
+    The reranker scores a table chunk near zero, and the chunk that reads the table (``_init``
+    looping over ``_codes``) is what ties its rows to the public name. Candidates are the file's
+    stored rows that use the name (:func:`uses_name`) and are not the table's own parts: the
+    reranked ones first (highest score), then by position in the file; the first that fits is
+    promoted. Every cap of the parent promotions holds, counted together with ``promoted`` (the
+    parent promotions, which keep first claim): :data:`PROMOTE_MAX_TOKENS` per chunk,
+    :data:`MAX_PROMOTED` and :data:`EXPANSION_TOKENS` per answer, and only the free part of
+    ``max_tokens`` (:func:`fit_free`). Like every promotion it is outside the 8-chunk cap, which
+    only limits the ranked selection.
+    """
+    taken = {c.chunk_id for c in chunks} | {p.row.chunk_id for p in promoted}
+    used = sum(max(0, c.token_count) for c in chunks) + sum(
+        max(0, p.row.token_count) for p in promoted
+    )
+    spent = sum(max(0, p.row.token_count) for p in promoted)
+    count = len(promoted)
+    added: list[Promotion] = []
+    done: set[tuple[str, str, str]] = set()
+    for chunk in chunks:
+        if count >= MAX_PROMOTED:
+            break
+        name = data_symbol(chunk)
+        file = code_file(chunk.locator)
+        if name is None or file is None or (chunk.source_id, file, name) in done:
+            continue
+        done.add((chunk.source_id, file, name))
+        context: list[Child | ChunkRow] = [*chunks, *(p.row for p in added)]
+        if any(
+            c.source_id == chunk.source_id
+            and code_file(c.locator) == file
+            and c.locator.get("symbol") != name
+            and uses_name(name, c.text)
+            for c in context
+        ):
+            continue  # the context already shows a use of the table
+        users = [
+            row
+            for row in file_rows(chunk.source_id, file)
+            if row.chunk_id not in taken
+            and code_file(row.locator) == file
+            and row.locator.get("symbol") != name
+            and uses_name(name, row.text)
+        ]
+        users.sort(
+            key=lambda r: (r.chunk_id not in scores, -scores.get(r.chunk_id, 0.0), r.ordinal)
+        )
+        for row in users:
+            size = max(0, row.token_count)
+            if size > PROMOTE_MAX_TOKENS or spent + size > EXPANSION_TOKENS:
+                continue
+            if not fit_free(used, size, max_tokens=max_tokens):
+                continue
+            added.append(Promotion(row, scores.get(row.chunk_id, 0.0), DATA_USER, chunk.chunk_id))
+            taken.add(row.chunk_id)
+            used += size
+            spent += size
+            count += 1
+            break
+    return added
 
 
 # --- outline -------------------------------------------------------------------------------
@@ -875,8 +981,8 @@ def expand(
     expanded = children(chunks)
     promoted: list[Promotion] = []
     blocks: list[OutlineBlock] = []
+    scores = {c.chunk_id: c.score for c in ranked}
     if expanded:
-        scores = {c.chunk_id: c.score for c in ranked}
         promoted = promotions(
             engine,
             chunks,
@@ -886,9 +992,13 @@ def expand(
             allowed_source_ids=allowed_source_ids,
             max_tokens=max_tokens,
         )
-        if outline_on:
-            context: list[Child | ChunkRow] = [*chunks, *(p.row for p in promoted)]
-            blocks = outline(expanded, context, file_rows=file_rows)
+    # Any context chunk that is a module-level data table, not only the expanded ones (D-119).
+    promoted += data_user_promotions(
+        chunks, promoted, scores, file_rows=file_rows, max_tokens=max_tokens
+    )
+    if expanded and outline_on:
+        context: list[Child | ChunkRow] = [*chunks, *(p.row for p in promoted)]
+        blocks = outline(expanded, context, file_rows=file_rows)
     windows: list[TranscriptWindow] = []
     kids = transcript_children(chunks)
     if kids:
