@@ -28,8 +28,12 @@ space so that their jobs run on, and are checked against, the running image.
 Generation: every question is sent with ``"generation": {"temperature": 0, "seed": 42}`` so runs
 are comparable (``--temperature``, ``--seed``); ``--app-default`` sends nothing (a real-use run with
 the app's own settings). ``--chat-endpoint`` / ``--chat-model`` switch the chat capability for the
-run and restore it afterwards, also on an error or Ctrl-C. ``--compare A.json B.json`` lists the
-per-question differences between two sidecars and exits.
+run and restore it afterwards, also on an error or Ctrl-C. ``--also-model NAME`` (repeatable, with
+an optional ``--also-endpoint URL``) asks the same questions again with a comparison model after the
+main run and reports it next to the main model: reported, not a criterion (the exit code depends on
+the main model only). After every model switch the runner waits for the chat server to load the
+model (``--model-load-timeout``, D-122). ``--compare A.json B.json`` lists the per-question
+differences between two sidecars and exits.
 
 Only ``httpx``, ``PyYAML`` and the CLI's API client (``cli/``, package ``trustbook-cli``, installed
 with the backend and in the image; D-087) are used. The runner talks to the API contract in
@@ -466,8 +470,9 @@ def locator_matches(expected: Locator, loc: dict[str, Any]) -> bool:
         values = raw if isinstance(raw, list) else [raw]
         return any(isinstance(v, int) and v in expected.pages for v in values)
     if expected.heading is not None:
-        # A chunk names its main section in "heading" and, when it spans several, lists them all
-        # in "headings" (D-053); any of them matches.
+        # A chunk names its section in "heading" (since D-104 every heading starts a chunk, so
+        # there is one). Chunks indexed by an older chunker may also list every section they span
+        # in "headings" (D-053), which is still read: any of them matches.
         raw_all = loc.get("headings")
         candidates = [
             h for h in (raw_all if isinstance(raw_all, list) else []) if isinstance(h, str)
@@ -1089,8 +1094,96 @@ def _ratio_json(r: Ratio) -> dict[str, Any]:
 # 4: wf-2's version 3 plus the D-080 latency fields and the D-077 parent context fields.
 # 5: the D-091 transcript window fields (``windows``, ``window_tokens``, ``window_fingerprint``,
 # ``window_only``) per question and ``window_tokens`` / ``window_only`` in ``latency``.
-SIDECAR_VERSION = 5
+# 6: ``summary`` (the run's main numbers) and ``comparison`` (the --also-model runs, D-115).
+SIDECAR_VERSION = 6
 FAILED_TEXT_CHARS = 300  # the app caps failed sentences at this; the runner does too
+
+
+def question_json(r: QuestionResult) -> dict[str, Any]:
+    """One question's row in the sidecar: ids, settings and numbers (no question text)."""
+    return {
+        "id": r.question.id,
+        "type": r.question.type,
+        "category": r.question.category,
+        "outcome": r.outcome,
+        "refusal_reason": r.refusal_reason,
+        "badge": r.badge,
+        "top_rerank": r.top_rerank,
+        "sentence_scores": r.sentence_scores,
+        "sentence_methods": r.sentence_methods,
+        "regenerated": r.regenerated,
+        "removed_sentences": r.removed_sentences,
+        "citations": len(r.citations),
+        "citations_correct": r.n_correct if r.question.answerable else None,
+        "must_contain_found": len(r.must_found) if r.question.must_contain else None,
+        "must_contain_total": len(r.question.must_contain) or None,
+        "latency_s": r.latency_s,
+        "retrieval_fingerprint": r.retrieval_fingerprint,
+        "generation": r.generation,
+        "failed_sentences": r.failed_sentences,
+        "judge_calls": r.judge_calls,
+        "judge_calls_per_pass": r.judge_calls_per_pass,
+        "judge_seconds": r.judge_seconds,
+        "answer_calls": r.answer_calls,
+        "timings": r.timings,
+        "prompt_tokens": r.prompt_tokens,
+        "completion_tokens": r.completion_tokens,
+        "expansions": r.expansions,
+        "promoted_tokens": r.promoted_tokens,
+        "outline_tokens": r.outline_tokens,
+        "outline_fingerprint": r.outline_fingerprint,
+        "outline_only": r.outline_only,
+        "promoted_cited": r.promoted_cited,
+        "promoted_citations": promoted_citations(r),
+        "windows": r.windows,
+        "window_tokens": r.window_tokens,
+        "window_fingerprint": r.window_fingerprint,
+        "window_only": r.window_only,
+    }
+
+
+def _chat_json(chat: ChatInfo | None) -> dict[str, Any] | None:
+    if chat is None:
+        return None
+    return {
+        "model": chat.model,
+        "endpoint_host": chat.endpoint_host,
+        "preset": chat.preset,
+        "overridden": chat.overridden,
+    }
+
+
+def summary_json(m: Metrics, ranges: RangeReport | None) -> dict[str, Any]:
+    """A run's main numbers: its metrics table and its row in the side-by-side summary."""
+    return {
+        "precision": _ratio_json(m.precision),
+        "correct_refusal": _ratio_json(m.correct_refusal),
+        "must_contain": _ratio_json(m.must_contain),
+        "false_refusals": _ratio_json(m.false_refusal),
+        "false_refusals_by_group": {
+            group: _ratio_json(ratio) for group, ratio in m.false_refusal_by_group.items()
+        },
+        "false_refusals_code": _ratio_json(m.false_refusal_code),
+        "errors": m.errors,
+        "latency_p50": m.latency_p50,
+        "latency_p95": m.latency_p95,
+        "latency_count": m.latency_count,
+        "cited_ranges": None if ranges is None else _ratio_json(ranges.valid),
+    }
+
+
+def comparison_json(run: ComparisonRun) -> dict[str, Any]:
+    """One --also-model run in the sidecar. ``summary`` only when every question was asked;
+    ``questions`` holds whatever was asked (a failed or interrupted run may have some)."""
+    return {
+        "model_requested": run.model,
+        "chat": _chat_json(run.chat),
+        "status": run.status,
+        "reason": run.reason,
+        "criterion": False,  # reported only: never part of the result or the exit code
+        "summary": summary_json(compute_metrics(run.results), run.ranges) if run.complete else None,
+        "questions": [question_json(r) for r in run.results],
+    }
 
 
 def sidecar(
@@ -1098,8 +1191,12 @@ def sidecar(
     results: Sequence[QuestionResult],
     rows: Sequence[SweepRow],
     setup: SetupReport | None = None,
+    *,
+    ranges: RangeReport | None = None,
+    comparisons: Sequence[ComparisonRun] = (),
 ) -> dict[str, Any]:
-    """The JSON written next to the report: scores per question and the sweep.
+    """The JSON written next to the report: scores per question and the sweep, and the same
+    scores for every comparison model (``comparison``; reported, not a criterion).
 
     Ids, types, settings and numbers, and no question text. The only answer text is
     ``failed_sentences``: the sentences that failed verification and why (D-075), for diagnosing
@@ -1107,8 +1204,7 @@ def sidecar(
     """
     thresholds = info.thresholds
     metrics = compute_metrics(results)
-    chat = info.chat
-    return {
+    data: dict[str, Any] = {
         "version": SIDECAR_VERSION,
         "date": info.started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "api_version": info.api_version,
@@ -1118,14 +1214,7 @@ def sidecar(
         else {"refuse": thresholds.refuse, "verify": thresholds.verify},
         "generation_requested": info.generation,
         "retrieval_settings": info.retrieval,
-        "chat": None
-        if chat is None
-        else {
-            "model": chat.model,
-            "endpoint_host": chat.endpoint_host,
-            "preset": chat.preset,
-            "overridden": chat.overridden,
-        },
+        "chat": _chat_json(info.chat),
         "setup": None
         if setup is None
         else {
@@ -1144,48 +1233,7 @@ def sidecar(
                 for j in setup.jobs
             ],
         },
-        "questions": [
-            {
-                "id": r.question.id,
-                "type": r.question.type,
-                "category": r.question.category,
-                "outcome": r.outcome,
-                "refusal_reason": r.refusal_reason,
-                "badge": r.badge,
-                "top_rerank": r.top_rerank,
-                "sentence_scores": r.sentence_scores,
-                "sentence_methods": r.sentence_methods,
-                "regenerated": r.regenerated,
-                "removed_sentences": r.removed_sentences,
-                "citations": len(r.citations),
-                "citations_correct": r.n_correct if r.question.answerable else None,
-                "must_contain_found": len(r.must_found) if r.question.must_contain else None,
-                "must_contain_total": len(r.question.must_contain) or None,
-                "latency_s": r.latency_s,
-                "retrieval_fingerprint": r.retrieval_fingerprint,
-                "generation": r.generation,
-                "failed_sentences": r.failed_sentences,
-                "judge_calls": r.judge_calls,
-                "judge_calls_per_pass": r.judge_calls_per_pass,
-                "judge_seconds": r.judge_seconds,
-                "answer_calls": r.answer_calls,
-                "timings": r.timings,
-                "prompt_tokens": r.prompt_tokens,
-                "completion_tokens": r.completion_tokens,
-                "expansions": r.expansions,
-                "promoted_tokens": r.promoted_tokens,
-                "outline_tokens": r.outline_tokens,
-                "outline_fingerprint": r.outline_fingerprint,
-                "outline_only": r.outline_only,
-                "promoted_cited": r.promoted_cited,
-                "promoted_citations": promoted_citations(r),
-                "windows": r.windows,
-                "window_tokens": r.window_tokens,
-                "window_fingerprint": r.window_fingerprint,
-                "window_only": r.window_only,
-            }
-            for r in results
-        ],
+        "questions": [question_json(r) for r in results],
         "latency": latency_json(results),
         "false_refusals": {
             group: _ratio_json(ratio) for group, ratio in metrics.false_refusal_by_group.items()
@@ -1201,7 +1249,12 @@ def sidecar(
             }
             for row in rows
         ],
+        "summary": summary_json(metrics, ranges),
+        "comparison": [comparison_json(run) for run in comparisons],
     }
+    if ranges is not None:
+        data["cited_ranges"] = _ratio_json(ranges.valid)
+    return data
 
 
 def sidecar_path(report: str) -> Path:
@@ -1331,9 +1384,13 @@ class Api:
             raise EvalError(f"save {cap_id} settings: unexpected response")
         return data
 
-    def test_capability(self, cap_id: str) -> dict[str, Any]:
+    def test_capability(self, cap_id: str, *, timeout_s: float | None = None) -> dict[str, Any]:
+        """``timeout_s``: this request's read timeout (None: the client's)."""
+        kwargs: dict[str, Any] = {}
+        if timeout_s is not None:
+            kwargs["timeout"] = httpx.Timeout(timeout_s, connect=10.0)
         data = self._request(
-            "POST", f"/api/capabilities/{cap_id}/test", f"test {cap_id} endpoint", json={}
+            "POST", f"/api/capabilities/{cap_id}/test", f"test {cap_id} endpoint", json={}, **kwargs
         )
         if not isinstance(data, dict):
             raise EvalError(f"test {cap_id} endpoint: unexpected response")
@@ -1424,7 +1481,13 @@ def ask(
                     if isinstance(message, dict):
                         if message.get("badge") == "refused" and result.outcome != "refused":
                             result.outcome = "refused"
-                            result.refusal_reason = result.refusal_reason or "refused"
+                            # The stored reason (D-118); "refused" for messages without one.
+                            stored = message.get("refusal_reason")
+                            result.refusal_reason = (
+                                result.refusal_reason
+                                or (stored if isinstance(stored, str) and stored else None)
+                                or "refused"
+                            )
                         content = message.get("content")
                         if isinstance(content, dict) and isinstance(content.get("sentences"), list):
                             final = [
@@ -2084,31 +2147,41 @@ def url_origin(url: str | None) -> tuple[str, str, int | None] | None:
     return (parts.scheme.lower(), (parts.hostname or "").lower(), port)
 
 
+CHAT_FLAGS = ("--chat-endpoint", "--chat-model")
+ALSO_FLAGS = ("--also-endpoint", "--also-model")
+
+
 def chat_override_body(
-    original: ChatConfig, endpoint: str | None, model: str | None
+    original: ChatConfig,
+    endpoint: str | None,
+    model: str | None,
+    *,
+    flags: tuple[str, str] = CHAT_FLAGS,
 ) -> dict[str, Any]:
-    """The ``PUT /api/capabilities/chat`` body for the override.
+    """The ``PUT /api/capabilities/chat`` body for the override (``flags`` name the endpoint and
+    model options in error messages).
 
     An endpoint switches to the ``custom`` preset (any OpenAI-compatible server, such as
     llama-server). Trustbook drops a saved API key when the chat server changes, so that the key
     never reaches another host; the runner cannot put it back afterwards (it never sees keys).
     Such an override is refused instead.
     """
+    endpoint_flag, model_flag = flags
     body: dict[str, Any] = {}
     if endpoint is not None:
         if not is_url(endpoint):
-            raise EvalError(f"--chat-endpoint is not a URL: {endpoint}")
+            raise EvalError(f"{endpoint_flag} is not a URL: {endpoint}")
         if original.api_key_set and url_origin(endpoint) != url_origin(original.base_url):
             raise EvalError(
                 "the saved chat settings have an API key, and Trustbook deletes a saved key when "
-                "the chat server changes; --chat-endpoint would lose it. Use an endpoint on the "
+                f"the chat server changes; {endpoint_flag} would lose it. Use an endpoint on the "
                 "same server, or change the chat endpoint in Settings yourself."
             )
         body["preset"] = "custom"
         body["base_url"] = endpoint.strip()
     if model is not None:
         if not model.strip():
-            raise EvalError("--chat-model must not be empty")
+            raise EvalError(f"{model_flag} must not be empty")
         body["model"] = model.strip()
     return body
 
@@ -2129,13 +2202,90 @@ def read_chat_info(api: Api, *, overridden: bool = False) -> ChatInfo | None:
     )
 
 
-def apply_chat_override(api: Api, body: dict[str, Any], log: TextIO) -> None:
-    """Save the override, then test the endpoint once so a typo fails before the run."""
+# A model switch on a single-GPU llama-server (router mode, llama-swap) unloads one model and loads
+# the next, which can take minutes. The endpoint test is repeated until it passes or the load
+# timeout runs out (D-122).
+MODEL_LOAD_TIMEOUT_S = 900.0
+LOAD_TEST_TIMEOUT_S = 120.0  # one test request at most (and at most --timeout)
+LOAD_RETRY_S = 10.0  # pause between two endpoint tests
+# Test messages from the backend (app/capabilities/adapters/base.py) that mean "not loaded yet":
+# no reply in time, no connection to the model server, or llama-server's 503 while it loads. Any
+# other failure (a rejected key, an unknown model, a certificate problem) fails at once.
+_LOADING_PREFIXES = ("no reply", "cannot reach ", "connection to ")
+_LOADING_PARTS = ("(503)", "loading model")
+
+
+@dataclass(frozen=True)
+class ModelLoad:
+    """How long, and how, to wait for the chat server to load a model after a switch."""
+
+    timeout_s: float = MODEL_LOAD_TIMEOUT_S
+    test_timeout_s: float = LOAD_TEST_TIMEOUT_S
+    retry_s: float = LOAD_RETRY_S
+    sleep: Callable[[float], None] = time.sleep
+    clock: Callable[[], float] = time.monotonic
+
+
+def model_loading(message: str) -> bool:
+    """Whether a failed endpoint test's message means the model may still be loading."""
+    text = message.strip().lower()
+    return text.startswith(_LOADING_PREFIXES) or any(part in text for part in _LOADING_PARTS)
+
+
+def _check_api(api: Api) -> None:
+    """:class:`ApiUnreachableError` unless ``GET /api/health`` answers."""
+    try:
+        api.health()
+    except ApiUnreachableError:
+        raise
+    except EvalError as exc:
+        raise ApiUnreachableError(str(exc)) from exc
+
+
+def wait_for_chat_model(api: Api, model: str, log: TextIO, *, what: str, load: ModelLoad) -> None:
+    """Test the chat endpoint until it passes or ``load.timeout_s`` has passed.
+
+    A test that times out (its reply, or the request itself while the API still answers its health
+    check) or cannot reach the model server is retried; any other failed test raises
+    :class:`EvalError` at once. Only the Trustbook API itself failing raises
+    :class:`ApiUnreachableError`.
+    """
+    start = load.clock()
+    deadline = start + load.timeout_s
+    while True:
+        request_timeout = max(1.0, min(load.test_timeout_s, deadline - load.clock()))
+        try:
+            result = api.test_capability("chat", timeout_s=request_timeout)
+        except ApiUnreachableError as exc:
+            if not isinstance(exc.__cause__, httpx.ReadTimeout):
+                raise  # no connection to the Trustbook API
+            _check_api(api)  # the API answers: the model server is busy loading
+        else:
+            if result.get("ok") is True:
+                return
+            message = str(result.get("message") or "no reason given")
+            if not model_loading(message):
+                raise EvalError(f"the chat endpoint from {what} failed: {message}")
+        now = load.clock()
+        if now >= deadline:
+            raise EvalError(f"the chat server did not load {model} within {load.timeout_s:.0f} s")
+        print(f"waiting for {model} to load on the chat server ({now - start:.0f}s)", file=log)
+        load.sleep(min(load.retry_s, deadline - now))
+
+
+def apply_chat_override(
+    api: Api,
+    body: dict[str, Any],
+    log: TextIO,
+    *,
+    what: str = "--chat-endpoint/--chat-model",
+    load: ModelLoad | None = None,
+) -> None:
+    """Save the override, then test the endpoint so a typo fails before the run, waiting for the
+    chat server to load the model (D-122)."""
     api.update_capability("chat", body)
-    result = api.test_capability("chat")
-    if result.get("ok") is not True:
-        message = str(result.get("message") or "no reason given")
-        raise EvalError(f"the chat endpoint from --chat-endpoint/--chat-model failed: {message}")
+    model = str(body.get("model") or "the chat model")
+    wait_for_chat_model(api, model, log, what=what, load=load or ModelLoad())
     print("chat override saved and tested", file=log)
 
 
@@ -2164,6 +2314,121 @@ def restore_chat(api: Api, original: ChatConfig, log: TextIO) -> bool:
         return False
     print("chat settings restored", file=log)
     return True
+
+
+# ---------------------------------------------------------------------------------------------
+# Comparison models (--also-model / --also-endpoint; D-115)
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass
+class ComparisonRun:
+    """A comparison model: the main run's questions asked again, in the same space with the same
+    generation settings, after the main run. Reported next to the main model, never a criterion:
+    the result and the exit code depend on the main run only."""
+
+    model: str  # as given to --also-model
+    body: dict[str, Any]  # the PUT /api/capabilities/chat body that switches to it
+    status: str = "skipped"  # done | failed | interrupted | skipped
+    reason: str | None = None  # why it failed, was interrupted or was skipped
+    chat: ChatInfo | None = None  # the model and endpoint host read back while it ran
+    results: list[QuestionResult] = field(default_factory=list)
+    ranges: RangeReport | None = None
+
+    @property
+    def complete(self) -> bool:
+        return self.status == "done"
+
+    def label(self) -> str:
+        """```name` at `host:port``` as the API reported it (else the requested name)."""
+        chat = self.chat
+        if chat is None:
+            return f"`{self.model}`"
+        return f"`{chat.model or self.model}` at `{chat.endpoint_host or 'unknown'}`"
+
+
+def comparison_runs(
+    saved: ChatConfig, models: Sequence[str], endpoint: str | None
+) -> list[ComparisonRun]:
+    """One run per --also-model, its chat body checked before anything changes (a bad URL, an
+    empty name or an endpoint that would lose a saved API key stop the run with exit 2 before
+    the main run starts). ``endpoint`` None keeps the main run's endpoint."""
+    return [
+        ComparisonRun(model=m, body=chat_override_body(saved, endpoint, m, flags=ALSO_FLAGS))
+        for m in models
+    ]
+
+
+def _progress(done: int, total: int) -> str:
+    return f"after {done} of {total} questions"
+
+
+def run_comparisons(
+    api: Api,
+    client: httpx.Client,
+    space_id: str,
+    questions: Sequence[Question],
+    sources: dict[str, SourceInfo],
+    runs: Sequence[ComparisonRun],
+    *,
+    generation: dict[str, Any] | None,
+    code_root: str | None,
+    log: TextIO,
+    clock: Callable[[], float] = time.perf_counter,
+    load: ModelLoad | None = None,
+) -> None:
+    """Ask every question again with each comparison model, one after the other.
+
+    Never raises: the main run is complete by now, so a comparison model whose endpoint test
+    fails is marked ``failed`` and the next one runs; an unreachable API or Ctrl-C stops the
+    comparison (the rest are ``skipped``) and the main report is still written. The caller
+    restores the saved chat settings afterwards in any case.
+    """
+    for i, run in enumerate(runs):
+        try:
+            apply_chat_override(api, run.body, log, what=f"--also-model {run.model}", load=load)
+            run.chat = read_chat_info(api, overridden=True)
+            print(
+                f"comparison model {run.label()}: asking {len(questions)} questions again "
+                "(reported, not a criterion)",
+                file=log,
+            )
+            for j, q in enumerate(questions, 1):
+                r = ask(client, space_id, q, clock=clock, generation=generation)
+                score(r, sources)
+                run.results.append(r)
+                print(
+                    f"[{run.model} {j}/{len(questions)}] {q.id}: {r.outcome}, "
+                    f"{r.n_correct}/{len(r.citations)} citations correct, {_secs(r.latency_s)}",
+                    file=log,
+                )
+        except ApiUnreachableError as exc:
+            run.status = "failed"
+            run.reason = f"Trustbook API unreachable {_progress(len(run.results), len(questions))}"
+            print(f"comparison model {run.model}: {run.reason}: {exc}", file=log)
+            _skip(runs[i + 1 :], "the Trustbook API became unreachable")
+            return
+        except EvalError as exc:
+            run.status = "failed"
+            run.reason = str(exc)
+            if run.results:
+                run.reason += f" ({_progress(len(run.results), len(questions))})"
+            print(f"comparison model {run.model} failed: {run.reason}", file=log)
+            continue
+        except KeyboardInterrupt:
+            run.status = "interrupted"
+            run.reason = f"interrupted {_progress(len(run.results), len(questions))}"
+            print("interrupted: writing the report without the rest of the comparison", file=log)
+            _skip(runs[i + 1 :], "interrupted")
+            return
+        run.status = "done"
+        if code_root:
+            run.ranges = check_ranges(run.results, code_root)
+
+
+def _skip(runs: Sequence[ComparisonRun], reason: str) -> None:
+    for run in runs:
+        run.status, run.reason = "skipped", reason
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2351,91 +2616,77 @@ def chat_line(chat: ChatInfo | None) -> str:
     )
 
 
-def render_report(
-    info: RunInfo,
-    results: Sequence[QuestionResult],
-    sources: dict[str, SourceInfo],
-    setup: SetupReport | None = None,
-    ranges: RangeReport | None = None,
-) -> str:
-    m = compute_metrics(results)
-    n_ans = sum(r.question.answerable for r in results)
-    out: list[str] = []
-    out.append(f"### Evaluation: {info.space_name}")
-    out.append("")
-    out.append(f"- Date: {info.started_at.strftime('%Y-%m-%d %H:%M UTC')}")
-    version = f" (version {info.api_version})" if info.api_version else ""
-    out.append(f"- API: {info.base_url}{version}")
-    out.append(f"- Space: {info.space_name} (`{info.space_id}`), {len(sources)} sources")
-    files = ", ".join(f"`{f}`" for f in info.question_files)
-    out.append(
-        f"- Questions: {files}: {len(results)} "
-        f"({n_ans} answerable, {len(results) - n_ans} unanswerable)"
-    )
-    out.append(chat_line(info.chat))
-    out.extend(generation_lines(info, results))
-    out.append("")
+def metric_rows(
+    info: RunInfo, m: Metrics, ranges: RangeReport | None
+) -> list[tuple[str, str, str, str]]:
+    """The metrics table as (metric, value, target, result) rows; a target ``info`` does not set
+    gives ``-`` / ``-``."""
     p_target, p_res = _verdict(m.precision.value, info.min_precision)
     r_target, r_res = _verdict(m.correct_refusal.value, info.min_refusal)
     k_target, k_res = _verdict(m.must_contain.value, info.min_must_contain)
-    out.append("| Metric | Value | Target | Result |")
-    out.append("|---|---|---|---|")
-    out.append(f"| Citation precision (answerable) | {_pct(m.precision)} | {p_target} | {p_res} |")
-    out.append(
-        f"| Correct-refusal rate (unanswerable) | {_pct(m.correct_refusal)} "
-        f"| {r_target} | {r_res} |"
-    )
-    out.append(
-        f"| must_contain hit rate (answerable with keywords) | {_pct(m.must_contain)} "
-        f"| {k_target} | {k_res} |"
-    )
-    out.append(
-        f"| False refusals (answerable) | {m.false_refusal.num}/{m.false_refusal.den} | - | - |"
-    )
+    rows = [
+        ("Citation precision (answerable)", _pct(m.precision), p_target, p_res),
+        ("Correct-refusal rate (unanswerable)", _pct(m.correct_refusal), r_target, r_res),
+        (
+            "must_contain hit rate (answerable with keywords)",
+            _pct(m.must_contain),
+            k_target,
+            k_res,
+        ),
+        ("False refusals (answerable)", f"{m.false_refusal.num}/{m.false_refusal.den}", "-", "-"),
+    ]
     for group in FALSE_REFUSAL_GROUPS:
         g = m.false_refusal_by_group.get(group, Ratio(0, 0))
-        out.append(f"| False refusals: {group} | {g.num}/{g.den} | - | - |")
+        rows.append((f"False refusals: {group}", f"{g.num}/{g.den}", "-", "-"))
     code = m.false_refusal_code
     c_target, c_res = _at_most(
         None if code.den == 0 and info.max_false_refusals_code is not None else code.num,
         info.max_false_refusals_code,
     )
-    out.append(
-        "| False refusals on code questions (category code, or expecting a code file) "
-        f"| {code.num}/{code.den} | {c_target} | {c_res} |"
+    rows.append(
+        (
+            "False refusals on code questions (category code, or expecting a code file)",
+            f"{code.num}/{code.den}",
+            c_target,
+            c_res,
+        )
     )
-    out.append(f"| Errors | {m.errors} | - | - |")
+    rows.append(("Errors", str(m.errors), "-", "-"))
     l_target, l_res = _at_most(m.latency_p95, info.max_p95, " s")
     flag = (
         f" **above {P95_FLAG_S:g} s**"
         if m.latency_p95 is not None and m.latency_p95 > P95_FLAG_S
         else ""
     )
-    out.append(
-        f"| Answer latency p50 / p95 ({m.latency_count} answers) | "
-        f"{_secs(m.latency_p50)} / {_secs(m.latency_p95)}{flag} | {l_target} | {l_res} |"
+    rows.append(
+        (
+            f"Answer latency p50 / p95 ({m.latency_count} answers)",
+            f"{_secs(m.latency_p50)} / {_secs(m.latency_p95)}{flag}",
+            l_target,
+            l_res,
+        )
     )
     if ranges is not None or info.min_ranges_valid is not None:
         valid = ranges.valid if ranges is not None else Ratio(0, 0)
         v_target, v_res = _verdict(valid.value, info.min_ranges_valid)
-        out.append(
-            f"| Cited ranges valid (file and lines exist in the checkout) | {_pct(valid)} "
-            f"| {v_target} | {v_res} |"
+        rows.append(
+            (
+                "Cited ranges valid (file and lines exist in the checkout)",
+                _pct(valid),
+                v_target,
+                v_res,
+            )
         )
-    if setup is not None:
-        jobs = setup.jobs_ratio
-        j_res = "pass" if not setup.job_problems else "**FAIL**"
-        n_earlier = setup.earlier_jobs
-        j_val = f"{jobs.num}/{jobs.den}" + (
-            f" ({n_earlier} ended before this run, not re-checked)" if n_earlier else ""
-        )
-        out.append(f"| Ingest jobs ended as expected (setup) | {j_val} | all | {j_res} |")
-    out.append("")
-    out.append(
+    return rows
+
+
+def question_table(results: Sequence[QuestionResult]) -> list[str]:
+    """One row per question: outcome, citations, expected sources cited, must_contain, latency."""
+    out = [
         "| ID | Type | Category | Outcome | Citations correct/total "
-        "| Expected sources cited | must_contain | Latency |"
-    )
-    out.append("|---|---|---|---|---|---|---|---|")
+        "| Expected sources cited | must_contain | Latency |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
     for r in results:
         q = r.question
         outcome = r.outcome
@@ -2452,8 +2703,13 @@ def render_report(
             f"| {_cell(q.id)} | {q.type} | {q.category or '-'} | {_cell(outcome)} | {cits} "
             f"| {cited} | {must} | {_secs(r.latency_s)} |"
         )
-    out.append("")
+    return out
 
+
+def wrong_citation_lines(
+    results: Sequence[QuestionResult], sources: dict[str, SourceInfo]
+) -> list[str]:
+    """Each citation of an answerable question that did not match, or ``None.``."""
     wrong = [
         (r, c)
         for r in results
@@ -2461,10 +2717,9 @@ def render_report(
         for c, ok in zip(r.citations, r.correct, strict=True)
         if not ok
     ]
-    out.append("#### Wrong citations")
-    out.append("")
     if not wrong:
-        out.append("None.")
+        return ["None."]
+    out = []
     for r, c in wrong:
         title = sources[c.source_id].title if c.source_id in sources else c.source_title
         expected = ", ".join(r.question.expected_sources)
@@ -2473,6 +2728,80 @@ def render_report(
             f"- `{r.question.id}` [{c.n}] {title}: {describe_locator(c.locator)} "
             f"(expected: {expected}{'; ' + locs if locs else ''})"
         )
+    return out
+
+
+def range_lines(ranges: RangeReport) -> list[str]:
+    out = [
+        f"Checked against `{ranges.root}`: {ranges.valid.num}/{ranges.valid.den} citations "
+        "with a file locator point at a file and line range that exist.",
+        "",
+    ]
+    for b in ranges.bad:
+        span = f" lines {b.start}-{b.end}" if b.start is not None else ""
+        out.append(f"- `{b.question_id}` `{_cell(b.file)}`{span}: {b.reason}")
+    if ranges.bad:
+        out.append("")
+    return out
+
+
+def error_lines(results: Sequence[QuestionResult]) -> list[str]:
+    return [
+        f"- `{r.question.id}`: {_cell(r.error or 'unknown error')}"
+        for r in results
+        if r.outcome == "error"
+    ]
+
+
+def render_report(
+    info: RunInfo,
+    results: Sequence[QuestionResult],
+    sources: dict[str, SourceInfo],
+    setup: SetupReport | None = None,
+    ranges: RangeReport | None = None,
+    comparisons: Sequence[ComparisonRun] = (),
+) -> str:
+    m = compute_metrics(results)
+    n_ans = sum(r.question.answerable for r in results)
+    out: list[str] = []
+    out.append(f"### Evaluation: {info.space_name}")
+    out.append("")
+    out.append(f"- Date: {info.started_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    version = f" (version {info.api_version})" if info.api_version else ""
+    out.append(f"- API: {info.base_url}{version}")
+    out.append(f"- Space: {info.space_name} (`{info.space_id}`), {len(sources)} sources")
+    files = ", ".join(f"`{f}`" for f in info.question_files)
+    out.append(
+        f"- Questions: {files}: {len(results)} "
+        f"({n_ans} answerable, {len(results) - n_ans} unanswerable)"
+    )
+    out.append(chat_line(info.chat))
+    if comparisons:
+        names = ", ".join(f"`{run.model}`" for run in comparisons)
+        out.append(
+            f"- Comparison models: {names}, asked the same questions after this run "
+            '(see "Comparison models"; reported, not a criterion)'
+        )
+    out.extend(generation_lines(info, results))
+    out.append("")
+    out.append("| Metric | Value | Target | Result |")
+    out.append("|---|---|---|---|")
+    out.extend(f"| {a} | {b} | {c} | {d} |" for a, b, c, d in metric_rows(info, m, ranges))
+    if setup is not None:
+        jobs = setup.jobs_ratio
+        j_res = "pass" if not setup.job_problems else "**FAIL**"
+        n_earlier = setup.earlier_jobs
+        j_val = f"{jobs.num}/{jobs.den}" + (
+            f" ({n_earlier} ended before this run, not re-checked)" if n_earlier else ""
+        )
+        out.append(f"| Ingest jobs ended as expected (setup) | {j_val} | all | {j_res} |")
+    out.append("")
+    out.extend(question_table(results))
+    out.append("")
+
+    out.append("#### Wrong citations")
+    out.append("")
+    out.extend(wrong_citation_lines(results, sources))
     out.append("")
 
     out.extend(render_false_refusals(results))
@@ -2489,16 +2818,7 @@ def render_report(
     if ranges is not None:
         out.append("#### Cited ranges")
         out.append("")
-        out.append(
-            f"Checked against `{ranges.root}`: {ranges.valid.num}/{ranges.valid.den} citations "
-            "with a file locator point at a file and line range that exist."
-        )
-        out.append("")
-        for b in ranges.bad:
-            span = f" lines {b.start}-{b.end}" if b.start is not None else ""
-            out.append(f"- `{b.question_id}` `{_cell(b.file)}`{span}: {b.reason}")
-        if ranges.bad:
-            out.append("")
+        out.extend(range_lines(ranges))
 
     if setup is not None and setup.jobs:
         out.append("#### Ingest jobs")
@@ -2513,12 +2833,11 @@ def render_report(
             )
         out.append("")
 
-    errors = [r for r in results if r.outcome == "error"]
+    errors = error_lines(results)
     if errors:
         out.append("#### Errors")
         out.append("")
-        for r in errors:
-            out.append(f"- `{r.question.id}`: {_cell(r.error or 'unknown error')}")
+        out.extend(errors)
         out.append("")
 
     out.extend(render_sweep(info, results, sources))
@@ -2556,7 +2875,99 @@ def render_report(
         out.append("")
         out.extend(f"- {n}" for n in notes)
         out.append("")
+    out.extend(render_comparisons(info, results, sources, comparisons, ranges, setup))
     return "\n".join(out).rstrip() + "\n"
+
+
+def _summary_row(label: str, role: str, m: Metrics, ranges: RangeReport | None, result: str) -> str:
+    groups = " · ".join(
+        f"{g.num}/{g.den}"
+        for g in (m.false_refusal_by_group.get(k, Ratio(0, 0)) for k in ("docs", "code", "multi"))
+    )
+    refusals = m.correct_refusal
+    valid = "-" if ranges is None else f"{ranges.valid.num}/{ranges.valid.den}"
+    return (
+        f"| {label} | {role} | {_pct(m.precision)} | {refusals.num}/{refusals.den} | {groups} "
+        f"| {_secs(m.latency_p50)} / {_secs(m.latency_p95)} | {valid} | {result} |"
+    )
+
+
+def render_comparisons(
+    info: RunInfo,
+    results: Sequence[QuestionResult],
+    sources: dict[str, SourceInfo],
+    runs: Sequence[ComparisonRun],
+    ranges: RangeReport | None,
+    setup: SetupReport | None,
+) -> list[str]:
+    """The "Comparison models" section (--also-model, D-115): a side-by-side row per model, then
+    each comparison model's metrics, questions and wrong citations. Reported, not a criterion."""
+    if not runs:
+        return []
+    m = compute_metrics(results)
+    if has_targets(info, setup):
+        main_result = "pass" if run_met(info, m, ranges, setup) else "**FAIL**"
+    else:
+        main_result = "no targets set"
+    chat = info.chat
+    main_label = (
+        f"`{chat.model or 'unknown'}` at `{chat.endpoint_host or 'unknown'}`" if chat else "main"
+    )
+    out = [
+        "### Comparison models (reported, not a criterion)",
+        "",
+        "The same questions, in the same space with the same generation settings, asked again "
+        "after the main run with each comparison model. Only the main model decides the result "
+        "and the exit code; the comparison models are reported next to it.",
+        "",
+        "| Model | Role | Precision | Correct refusals | False refusals docs / code / multi "
+        "| p50 / p95 | Cited ranges valid | Result |",
+        "|---|---|---|---|---|---|---|---|",
+        _summary_row(main_label, "main", m, ranges, main_result),
+    ]
+    for run in runs:
+        if run.complete:
+            out.append(
+                _summary_row(
+                    run.label(),
+                    "comparison",
+                    compute_metrics(run.results),
+                    run.ranges,
+                    "reported, not a criterion",
+                )
+            )
+        else:
+            out.append(
+                f"| {run.label()} | comparison | - | - | - | - | - "
+                f"| {run.status}: {_cell(run.reason or 'no reason given')} |"
+            )
+    out.append("")
+    untargeted = replace(
+        info,
+        min_precision=None,
+        min_refusal=None,
+        min_must_contain=None,
+        max_false_refusals_code=None,
+        max_p95=None,
+        min_ranges_valid=None,
+    )
+    for run in runs:
+        if not run.complete:
+            continue
+        cm = compute_metrics(run.results)
+        out += [f"#### Comparison model: {run.label()} (reported, not a criterion)", ""]
+        out += ["| Metric | Value |", "|---|---|"]
+        out += [f"| {a} | {b} |" for a, b, _, _ in metric_rows(untargeted, cm, run.ranges)]
+        out.append("")
+        out += question_table(run.results)
+        out.append("")
+        out += ["##### Wrong citations", "", *wrong_citation_lines(run.results, sources), ""]
+        if run.ranges is not None and run.ranges.bad:
+            out += ["##### Cited ranges", "", *range_lines(run.ranges)]
+        errors = error_lines(run.results)
+        if errors:
+            out += ["##### Errors", "", *errors, ""]
+    return out
 
 
 def render_false_refusals(results: Sequence[QuestionResult]) -> list[str]:
@@ -2640,6 +3051,36 @@ def thresholds_met(
         max_false_refusals_code is None or (code.den > 0 and code.num <= max_false_refusals_code)
     ) and (max_p95 is None or (m.latency_p95 is not None and m.latency_p95 <= max_p95))
     return minimums and maximums
+
+
+def has_targets(info: RunInfo, setup: SetupReport | None) -> bool:
+    """Whether the run has anything to pass or fail (a target, or ingest jobs to check)."""
+    targets = (
+        info.min_precision,
+        info.min_refusal,
+        info.min_must_contain,
+        info.max_false_refusals_code,
+        info.max_p95,
+        info.min_ranges_valid,
+    )
+    return setup is not None or any(t is not None for t in targets)
+
+
+def run_met(
+    info: RunInfo, m: Metrics, ranges: RangeReport | None, setup: SetupReport | None
+) -> bool:
+    """The run's result (exit 0 or 1): every target met and every ingest job as expected."""
+    met = thresholds_met(
+        m,
+        info.min_precision,
+        info.min_refusal,
+        info.min_must_contain,
+        max_false_refusals_code=info.max_false_refusals_code,
+        max_p95=info.max_p95,
+        min_ranges_valid=info.min_ranges_valid,
+        ranges=ranges,
+    )
+    return met and not (setup is not None and setup.job_problems)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -2892,6 +3333,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--setup-timeout", type=float, default=3600.0, help="seconds (default 3600)")
     p.add_argument("--poll-interval", type=float, default=5.0, help=argparse.SUPPRESS)
     p.add_argument("--timeout", type=float, default=300.0, help="seconds per answer (default 300)")
+    p.add_argument(
+        "--model-load-timeout",
+        type=_seconds,
+        default=MODEL_LOAD_TIMEOUT_S,
+        metavar="SECONDS",
+        help="after a chat model switch (--chat-model, --also-model), wait this long for the chat "
+        f"server to load the model (default {MODEL_LOAD_TIMEOUT_S:.0f})",
+    )
     p.add_argument("--min-precision", type=_fraction, help="exit 1 if citation precision is lower")
     p.add_argument("--min-refusal", type=_fraction, help="exit 1 if correct-refusal rate is lower")
     p.add_argument(
@@ -2942,8 +3391,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat = p.add_argument_group(
         "chat model",
-        "Switch the chat capability for this run; the saved settings are restored afterwards, "
-        "also on an error or Ctrl-C. API keys are never read, sent or printed.",
+        "Switch the chat capability for this run, or add comparison models; the saved settings "
+        "are restored afterwards, also on an error or Ctrl-C. API keys are never read, sent or "
+        "printed.",
     )
     chat.add_argument(
         "--chat-endpoint",
@@ -2951,6 +3401,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="OpenAI-compatible base URL (saved as the 'custom' preset for the run)",
     )
     chat.add_argument("--chat-model", metavar="NAME", help="chat model name for the run")
+    chat.add_argument(
+        "--also-model",
+        metavar="NAME",
+        action="append",
+        help="after the main run, ask the same questions again with this chat model and report "
+        "its numbers next to the main model's; reported, not a criterion: the exit code depends "
+        "on the main model only (repeatable)",
+    )
+    chat.add_argument(
+        "--also-endpoint",
+        metavar="URL",
+        help="OpenAI-compatible base URL for the --also-model runs (default: the main run's "
+        "chat endpoint)",
+    )
     p.add_argument(
         "--compare",
         nargs=2,
@@ -3005,6 +3469,8 @@ def main(
         parser.error("--refresh needs --setup")
     if args.app_default and (args.temperature is not None or args.seed is not None):
         parser.error("--app-default sends no override; drop --temperature/--seed")
+    if args.also_endpoint is not None and not args.also_model:
+        parser.error("--also-endpoint needs --also-model")
     generation = generation_override(args)
     started = datetime.now(UTC)
     try:
@@ -3017,17 +3483,30 @@ def main(
         return EXIT_UNAVAILABLE
 
     timeout = httpx.Timeout(args.timeout, connect=10.0)
+    load = ModelLoad(
+        timeout_s=args.model_load_timeout,
+        test_timeout_s=min(args.timeout, LOAD_TEST_TIMEOUT_S),
+        sleep=sleep,
+        clock=clock,
+    )
     overriding = args.chat_endpoint is not None or args.chat_model is not None
+    also_models: list[str] = args.also_model or []
+    comparisons: list[ComparisonRun] = []
     with httpx.Client(base_url=args.base_url, timeout=timeout, transport=transport) as client:
         api = Api(client)
         original_chat: ChatConfig | None = None
         try:
             health = api.health()
-            if overriding:
+            if overriding or also_models:
                 saved = ChatConfig.from_capability(api.capability("chat"))
                 body = chat_override_body(saved, args.chat_endpoint, args.chat_model)
+                # Checked before anything changes; the endpoint defaults to the main run's.
+                comparisons = comparison_runs(
+                    saved, also_models, args.also_endpoint or args.chat_endpoint
+                )
                 original_chat = saved
-                apply_chat_override(api, body, log)
+                if overriding:
+                    apply_chat_override(api, body, log, load=load)
             chat = read_chat_info(api, overridden=overriding)
             if chat is not None:
                 print(
@@ -3037,6 +3516,12 @@ def main(
                         if generation is not None
                         else "generation: app default (real-use run)"
                     ),
+                    file=log,
+                )
+            if comparisons:
+                print(
+                    "comparison models after the main run (reported, not a criterion): "
+                    + ", ".join(run.model for run in comparisons),
                     file=log,
                 )
             setup: SetupReport | None = None
@@ -3071,6 +3556,20 @@ def main(
                     f"{r.n_correct}/{len(r.citations)} citations correct, {_secs(r.latency_s)}",
                     file=log,
                 )
+            # The main run is complete: from here on nothing changes its result (D-115).
+            run_comparisons(
+                api,
+                client,
+                sid,
+                questions,
+                sources,
+                comparisons,
+                generation=generation,
+                code_root=args.code_root,
+                log=log,
+                clock=clock,
+                load=load,
+            )
         except ApiUnreachableError as exc:
             print(f"error: Trustbook API unreachable at {args.base_url}: {exc}", file=log)
             return EXIT_UNAVAILABLE
@@ -3103,32 +3602,26 @@ def main(
         retrieval=run_retrieval,
     )
     ranges = check_ranges(results, args.code_root) if args.code_root else None
-    report = render_report(info, results, sources, setup, ranges)
+    report = render_report(info, results, sources, setup, ranges, comparisons)
     out.write(report)
     if args.report:
         Path(args.report).write_text(report, encoding="utf-8")
         print(f"report written to {args.report}", file=log)
         data = sidecar(
-            info, results, sweep(results, sources, run_thresholds or Thresholds()), setup
+            info,
+            results,
+            sweep(results, sources, run_thresholds or Thresholds()),
+            setup,
+            ranges=ranges,
+            comparisons=comparisons,
         )
-        if ranges is not None:
-            data["cited_ranges"] = _ratio_json(ranges.valid)
         json_path = sidecar_path(args.report)
         json_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         print(f"scores written to {json_path}", file=log)
-    met = thresholds_met(
-        compute_metrics(results),
-        args.min_precision,
-        args.min_refusal,
-        args.min_must_contain,
-        max_false_refusals_code=args.max_false_refusals_code,
-        max_p95=args.max_p95,
-        min_ranges_valid=args.min_ranges_valid,
-        ranges=ranges,
-    )
+    # The main model only: comparison models are reported, never a criterion (D-115).
+    met = run_met(info, compute_metrics(results), ranges, setup)
     if setup is not None and setup.job_problems:
         print(f"ingest jobs not as expected: {len(setup.job_problems)}", file=log)
-        met = False
     if not met:
         print("thresholds not met", file=log)
         return EXIT_THRESHOLD

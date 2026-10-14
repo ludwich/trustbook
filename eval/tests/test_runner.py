@@ -545,6 +545,11 @@ def test_ask_done_with_refused_badge_only() -> None:
     with api.client() as client:
         r = runner.ask(client, sid, q(question="x?"), clock=Clock())
     assert r.outcome == "refused"
+    assert r.refusal_reason == "refused"  # a message stored without a reason (before D-118)
+    api.answers["y?"] = sse(("done", {"message": {**msg, "refusal_reason": "unsupported"}}))
+    with api.client() as client:
+        r = runner.ask(client, sid, q(question="y?"), clock=Clock())
+    assert (r.outcome, r.refusal_reason) == ("refused", "unsupported")  # the stored reason
 
 
 @pytest.mark.parametrize(

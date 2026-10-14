@@ -12,6 +12,7 @@ import type {
   Message,
   Overview,
   Preset,
+  ReindexStatus,
   Settings,
   Source,
   Space,
@@ -201,7 +202,7 @@ export function sttCapability(over: Partial<Capability> = {}): Capability {
           { value: "endpoint", label: "Endpoint" },
         ],
       },
-      { name: "preset", label: "Provider", type: "select", required: false },
+      // Like the backend manifest: no provider field, the endpoint is OpenAI-compatible.
       { name: "base_url", label: "Base URL", type: "url", required: false },
       { name: "api_key", label: "API key", type: "password", required: false },
       { name: "model", label: "Model", type: "text", required: false },
@@ -470,4 +471,17 @@ export function ideationSession(over: Partial<IdeationSession> = {}): IdeationSe
     running: false,
     ...over,
   });
+}
+
+/** GET /api/spaces/{id}/reindex: up to date unless overridden. */
+export function reindexStatus(over: Partial<ReindexStatus> = {}): ReindexStatus {
+  return {
+    needed: false,
+    sources: [],
+    reindexing: false,
+    estimate_seconds: null,
+    estimate_summary: null,
+    confirm: false,
+    ...over,
+  };
 }

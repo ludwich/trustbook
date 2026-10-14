@@ -29,6 +29,29 @@ describe("RefusalCard (G5)", () => {
     expect(screen.queryByTestId("refusal-suggestion")).not.toBeInTheDocument();
   });
 
+  it("gives a verification refusal its own icon and fallback title (D-118)", () => {
+    const { container, rerender } = render(
+      <RefusalCard
+        message="Couldn't verify an answer"
+        suggestion="Try rephrasing the question, or name the file or function you mean."
+        reason="unsupported"
+      />,
+    );
+    const card = screen.getByTestId("refusal-card");
+    expect(card).toHaveAttribute("data-reason", "unsupported");
+    expect(screen.getByTestId("refusal-title")).toHaveTextContent("Couldn't verify an answer");
+    expect(container.querySelector(".tabler-icon-shield-x")).not.toBeNull();
+    expect(container.querySelector(".tabler-icon-file-search")).toBeNull();
+    rerender(<RefusalCard message={null} suggestion={null} reason="unsupported" />);
+    expect(screen.getByTestId("refusal-title")).toHaveTextContent("Couldn't verify an answer");
+    // not_in_sources keeps its card unchanged.
+    rerender(
+      <RefusalCard message="Not in your sources" suggestion="Add." reason="not_in_sources" />,
+    );
+    expect(screen.getByTestId("refusal-title")).toHaveTextContent("Not in your sources");
+    expect(container.querySelector(".tabler-icon-file-search")).not.toBeNull();
+  });
+
   it("falls back to “Not in your sources” without a message, and keeps other titles", () => {
     const { rerender } = render(<RefusalCard message={null} suggestion={null} />);
     expect(screen.getByTestId("refusal-title")).toHaveTextContent("Not in your sources");

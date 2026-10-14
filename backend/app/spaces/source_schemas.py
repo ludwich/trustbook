@@ -6,6 +6,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, StringConstraints
 
+from app.jobs.handlers import JobStage
+
 SourceType = Literal["upload", "folder", "url", "youtube", "search", "paste"]
 SourceGroup = Literal["documents", "transcripts", "web", "code"]
 SourceStatus = Literal["queued", "reading", "indexing", "ready", "failed"]
@@ -34,7 +36,8 @@ class SourceOut(BaseModel):
     progress: float | None
     failure_reason: str | None
     failure_next_step: str | None
-    quality_warning: str | None
+    quality_warning: str | None  # every warning in one string (kept for older clients)
+    quality_warnings: list[str] = []  # one item per problem (G4-4)
     enabled: bool
     snapshot_at: str | None
     commit_hash: str | None
@@ -42,6 +45,28 @@ class SourceOut(BaseModel):
     created_at: str
     job_id: str | None
     ahead: AheadOut | None = None
+    # While reading or indexing: waiting for calibration or loading a model (D-113).
+    stage: JobStage | None = None
+
+
+class ReindexSourceOut(BaseModel):
+    """A source whose chunks an older chunker made (D-106)."""
+
+    id: str
+    title: str
+    reindexing: bool  # its re-index job is queued or running
+
+
+class ReindexOut(BaseModel):
+    """Whether a space needs re-indexing, and how long it takes (D-106)."""
+
+    needed: bool  # a source holds chunks an older chunker made
+    sources: list[ReindexSourceOut]
+    reindexing: bool  # a re-index of one of them is queued or running
+    # For the sources not queued yet: seconds, "About 3 min on this PC", confirm above 2 min.
+    estimate_seconds: int | None
+    estimate_summary: str | None
+    confirm: bool
 
 
 class PasteCreate(BaseModel):

@@ -193,7 +193,12 @@ export interface Job {
    * "ingest jobs store their estimate"); absent or null → the queue view shows no per-job time.
    */
   eta_seconds?: number | null;
+  /** Why a running job shows no progress yet (D-113); absent on older backends. */
+  stage?: JobStage | null;
 }
+
+/** A running job waits for the calibration run, or a bundled model is loading (D-113). */
+export type JobStage = "waiting_for_calibration" | "loading_models";
 
 export interface QueueSummary {
   queued: number;
@@ -269,6 +274,8 @@ export interface CalibrationRuntime {
 export interface CalibrationState {
   status: CalibrationStatus;
   results: Calibration | null;
+  /** The results were measured for an older chunker or embedding model; a new run is queued. */
+  outdated?: boolean;
 }
 
 // ---- Phase 1: sources -------------------------------------------------------
@@ -309,7 +316,10 @@ export interface Source {
   progress: number | null;
   failure_reason: string | null;
   failure_next_step: string | null;
+  /** Every warning in one string (older backends send only this). */
   quality_warning: string | null;
+  /** One plain-English line per problem (G4-4); absent on older backends. */
+  quality_warnings?: string[];
   enabled: boolean;
   snapshot_at: string | null;
   commit_hash: string | null;
@@ -318,6 +328,8 @@ export interface Source {
   ahead?: SourceAhead | null;
   created_at: string;
   job_id: string | null;
+  /** While reading or indexing: why there is no progress yet (D-113). */
+  stage?: JobStage | null;
 }
 
 export interface PasteSourceCreate {
@@ -510,6 +522,11 @@ export interface Message {
   badge: MessageBadge | null;
   removed_sentences: string[];
   sources_used: { source_id: string; title: string }[];
+  /**
+   * Why a refused assistant message was refused (D-118). Null on other messages and on refusals
+   * stored before the reason was; optional so older fixtures and payloads still type-check.
+   */
+  refusal_reason?: RefusalReason | null;
 }
 
 export type ChatStage = "retrieving" | "generating" | "checking";
@@ -558,6 +575,27 @@ export interface SourceEstimate {
   files: number | null;
   /** "About 4,200 files, roughly 25 min on this PC" */
   summary: string;
+  confirm: boolean;
+}
+
+/** A source whose chunks an older chunker made (D-106). */
+export interface ReindexSource {
+  id: string;
+  title: string;
+  /** Its re-index is queued or running. */
+  reindexing: boolean;
+}
+
+/** Whether a space needs re-indexing (`GET /api/spaces/{id}/reindex`). */
+export interface ReindexStatus {
+  needed: boolean;
+  sources: ReindexSource[];
+  reindexing: boolean;
+  /** For the sources not queued yet. */
+  estimate_seconds: number | null;
+  /** "About 3 min on this PC" */
+  estimate_summary: string | null;
+  /** Above two minutes: ask before starting (SPEC §11). */
   confirm: boolean;
 }
 

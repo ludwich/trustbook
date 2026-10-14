@@ -10,9 +10,11 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app.capabilities.bundled import ProviderRegistry
+from app.chunking.dispatch import CHUNKER_VERSION
 from app.config import Paths
 from app.db.engine import get_engine
 from app.db.models import Chunk
+from app.ideation.marker import BRIEF_MARKER
 from app.ingest import errors
 from app.jobs.handlers import JobCancelledError, JobContext
 from app.parse.documents import DocumentParser
@@ -105,8 +107,8 @@ def test_paste_source_is_indexed_end_to_end(client: TestClient, space: dict[str,
     assert created["snapshot_at"]
     assert set(created) == {
         "id", "type", "title", "origin", "group", "status", "progress", "failure_reason",
-        "failure_next_step", "quality_warning", "enabled", "snapshot_at", "commit_hash",
-        "stats", "created_at", "job_id", "ahead",
+        "failure_next_step", "quality_warning", "quality_warnings", "enabled", "snapshot_at",
+        "commit_hash", "stats", "created_at", "job_id", "ahead", "stage",
     }  # fmt: skip
     assert created["ahead"] is None  # only folder sources whose HEAD moved
 
@@ -115,7 +117,8 @@ def test_paste_source_is_indexed_end_to_end(client: TestClient, space: dict[str,
     assert source["status"] == "ready", source
     assert source["stats"]["chunks"] >= 2
     assert source["stats"]["chars"] == len(LONG_TEXT)
-    assert source["quality_warning"] is None
+    assert source["stats"]["chunkers"] == {"document": CHUNKER_VERSION}  # D-106
+    assert source["quality_warning"] is None and source["quality_warnings"] == []
     assert ready == [(sid, created["id"])]
     assert client.get(f"/api/spaces/{sid}").json()["source_count"] == 1
 
@@ -127,7 +130,9 @@ def test_paste_source_is_indexed_end_to_end(client: TestClient, space: dict[str,
     with Session(get_engine(record.db_path)) as session:
         chunks = session.exec(select(Chunk).order_by(Chunk.ordinal)).all()
     assert len(chunks) == source["stats"]["chunks"]
-    assert chunks[0].text == LONG_TEXT[chunks[0].start_offset : chunks[0].end_offset]
+    # Its first line names the section (D-105); the body is the snapshot's text.
+    body = LONG_TEXT[chunks[0].start_offset : chunks[0].end_offset]
+    assert chunks[0].text == f"Section: Audit notes\n{body}"
     assert json.loads(chunks[0].locator) == {"heading": "Audit notes", "offset": 0}
 
     chunk = client.get(f"/api/spaces/{sid}/chunks/{chunks[1].id}").json()
@@ -490,6 +495,25 @@ def test_folder_source_end_to_end(client: TestClient, space: dict[str, Any], pat
         },
     ]
     assert code_chunks[0]["text"].startswith("File: src/api.py · get (lines 1-2)\n")
+
+
+def test_folder_warnings_are_one_per_problem(
+    client: TestClient, space: dict[str, Any], paths: Paths
+) -> None:
+    """G4-4: a skipped brief and very little text are two warnings, not one sentence."""
+    sid = space["id"]
+    root = paths.browse_root / "work" / "notes"
+    root.mkdir(parents=True)
+    (root / "notes.md").write_text("# Notes\n\nShort.")
+    (root / "brief.md").write_text(f"{BRIEF_MARKER}\n# Idea brief: Trips\n")
+    services_of(client).ingest.tools.scanner = fake_scanner()
+    created = client.post(f"/api/spaces/{sid}/sources/folder", json={"path": "work/notes"}).json()
+    run_jobs(services_of(client))
+    source = _one(client, sid, created["id"])
+    assert source["status"] == "ready", source
+    assert source["quality_warnings"] == [errors.skipped_briefs_warning(1), errors.WARN_SHORT]
+    # The single string stays as before for older clients (the CLI's `quality_warning`).
+    assert source["quality_warning"] == " ".join(source["quality_warnings"])
 
 
 def test_folder_validation(client: TestClient, space: dict[str, Any], paths: Paths) -> None:

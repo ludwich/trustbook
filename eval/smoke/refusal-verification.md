@@ -117,5 +117,7 @@ Authentication" section does not list algorithms.
 - `status_codes.py:1-19` — module docstring: names are "accessible either as attributes or as
   dictionary items"; "both upper- and lower-case versions of the names are allowed".
 - `status_codes.py:109-114` — `_init` sets each title and `title.upper()` as attributes.
+- `status_codes.py:106` — `codes: LookupDict[int] = LookupDict(name="status_codes")`, the definition of `requests.codes`
+  (added 2026-10-14 by Ludwig's decision, Gate 5 / G3-2).
 
 The four doc pages never mention 429 or `too_many_requests`.

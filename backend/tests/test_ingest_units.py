@@ -150,3 +150,16 @@ def test_http_status_errors_have_next_steps() -> None:
         error = http_status_error(status)
         assert error.reason and error.next_step
         assert str(status) in error.reason
+
+
+def test_warnings_are_stored_one_per_line() -> None:
+    stored = errors.join_warnings(["1 file skipped: a\nbrief.", "", errors.WARN_SHORT, "Short."])
+    assert stored == f"1 file skipped: a brief.\n{errors.WARN_SHORT}\nShort."
+    assert errors.split_warnings(stored) == [
+        "1 file skipped: a brief.",
+        errors.WARN_SHORT,
+        "Short.",
+    ]
+    assert errors.join_warnings([]) is None and errors.split_warnings(None) == []
+    # A row stored before one-per-line (G4-4) is one warning.
+    assert errors.split_warnings("A. B.") == ["A. B."]

@@ -1938,3 +1938,448 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
     said "by default, Requests does not retry failed connections… retries with backoff using urllib3.util.Retry",
     citing `advanced.rst` 1032–1056, followed by the model's own 502/503/504 suggestion, uncited. Turns took
     7–27 s, and the brief's "Cited anchors" lists both.
+
+## 2026-10-13 — Phase 5 (hardening)
+
+### D-104 Every heading starts a chunk, so a chunk's section label is true for all of its text (G4-1)
+- **Finding (Gate 4):** the source viewer header and the brief's anchors named "Example: Specific SSL Version" for a
+  retry claim whose text is under "Example: Automatic Retries" in requests' `docs/user/advanced.rst`. A chunk could
+  hold the text of several sections: a section under 100 tokens merged with the next one (or, D-068, the one
+  before), and a long section's next chunk began with up to 80 tokens of overlap, so a following heading arrived
+  while the chunk was still "small" and joined it. The header and parent then named the first section, the
+  locator the largest (D-053). Measured on the 30 document files of the Smoke corpus (`requests`, production
+  tokenizer; script `g41/stats.py` in the session scratchpad): **69 of 173 chunks** had a header or `heading` that
+  was not the section of every line of their text (`advanced.rst` lines 1–60 under no heading but holding
+  "Advanced Usage" and "Session Objects"; SOCKS 672–703 also holding "Compliance"). The corpus' own retry chunk
+  (1032–1056) was already correct; the Gate 4 label came from the same merging.
+- **Decision** (`app/chunking/document.py` `pack_units(split_headings=True)`, `dispatch.py`):
+  - With a document's headings (document files, web pages, pasted and uploaded text, parsed PDFs) **every heading
+    starts a new chunk**. Long sections are still cut at the 500-token target, and their overlap comes from the same
+    section only.
+  - **Tiny sections are never merged with another section.** The one exception: a heading with no text of its own
+    (the next line is another heading, as "Advanced Usage" right above "Session Objects", or an AsciiDoc document
+    title) stays with the next heading, and the chunk is named by the **nearest** heading, the last one: its path
+    already holds the outer heading (`Guide › Install`). Text before the first heading is a chunk of its own, with
+    no section.
+  - A chunk's section (`chunk_section`) is the section of its last character: the header path, the locator's
+    `heading` and the D-077 parent all come from it, so they always agree. `"headings"` is no longer written (no
+    chunk spans sections); the eval runner still reads it from older chunks.
+  - **Grounding is not loosened.** `section_of` (D-069/D-071): when the header names a heading inside the chunk (a
+    chunk starting with headings without text), the lines above that heading get no section; the heading and the
+    lines below it get the header's path. Chunks made before this read exactly as before.
+  - `CHUNKER_VERSION` = `p5-headings-7`.
+- **Measured** (same corpus and tokenizer): document chunks 173 → 345 (HISTORY.md 63 → 167: every release is its own
+  chunk), mean 328 → 181 tokens, max 560 unchanged, 25 chunks under 50 tokens (1 before); chunks whose label is not
+  the section of all their text 69 → **0**. The retry text is "File: docs/user/advanced.rst · Advanced Usage ›
+  Transport Adapters › Example: Automatic Retries (lines 1032-1056)", locator heading "Example: Automatic Retries";
+  a web page shaped like it (`### Example: Specific SSL Version` with one sentence, then the retry section) now
+  gives the retry text its own chunk (`test_a_retry_example_after_a_short_ssl_example_…`).
+- **Reason:** grounding correctness (§15): what the user reads must be true of every cited line. Ludwig chose
+  splitting over showing the heading nearest the cited text.
+- **Alternatives:** label a chunk with every heading it spans (`A + B`): the section would then vouch for lines in
+  the other section (D-069), a loosening; merge tiny sections only when they share a parent: still two sections
+  under one label; show the heading nearest the cited lines at display time: fixes the viewer, not the header the
+  model, the checker and the judge read. Not measured here: answer quality with smaller chunks (many changelog
+  entries are now 20–60 tokens); D-077's parent promotion and the 6,000-token budget absorb more, smaller chunks,
+  and the Gate 5 run measures it.
+
+### D-105 Web, paste and upload chunks start with `Section: <heading path>`
+- **Finding (backlog "Web section header"):** a web, pasted or uploaded chunk named its section only in the prompt's
+  `Source:` line, from the innermost heading of a flat list of `#` sections (no nesting, not fence-aware). The
+  embedding, full-text search and the grounding checker never saw it, unlike a document file's `File:` header
+  (D-068).
+- **Decision:** these sources use the same heading finder as Markdown files (`find_headings`, nested paths, ATX and
+  setext, fenced code holds none) and D-104's split. A chunk under a heading starts with `Section: Outer › Inner`
+  (`header.section_header`); text before the first heading has no first line. The locator keeps `heading`
+  (innermost) and `offset`; an uploaded PDF's page locator gains `heading`; the D-077 parent key stays
+  `#o<heading start>`. Consumers, like the `File:` header:
+  - embedded, searched (kept by `search_text`) and part of the grounding checker's premise;
+  - layer 5 reads it through `header_content`: names count, a heading's numbering never does (D-071);
+  - the judge's numbered lines and the focus window leave it out (numbering unchanged); the judge's excerpt title
+    names the path (`Docs (section “Guide › Install”), lines 1-2`);
+  - the prompt's `Source:` line no longer repeats the section when the chunk carries it (older chunks keep it);
+  - the mock never quotes it; the viewer's text fallback hides it (the label names the section).
+- **Reason:** the same section context for every document, whatever its source. **Alternatives:** keep the path in
+  the locator only (not embedded, not searchable, not seen by the checker); a `File:`-shaped line (would make every
+  `File:` consumer treat web chunks as files). Known limit (D-068): an uploaded single `.rst` file is still read
+  with Markdown headings only.
+
+### D-106 Per-kind chunker versions; a space says when it needs re-indexing and re-indexes in place
+- **Decision:**
+  - `CHUNKER_VERSIONS` gives the version that makes each kind of chunk: `code` and `transcript` stay
+    `p3-treesitter-6`, `document` is `p5-headings-7`. Folder file records store their kind's version, so a refresh
+    after this bump re-chunks document files and keeps code chunks (same ids and vectors).
+  - A ready source records `stats.chunkers` (version per kind it holds). Older sources are judged by their folder
+    file records, or by their first chunk (transcripts unchanged, everything else outdated).
+  - `GET /api/spaces/{sid}/reindex` lists the outdated sources and the estimate (embedding the outdated chunks,
+    an upper bound); `POST` queues one ordinary `ingest` job per source ("Re-index “Title”", estimate in the payload,
+    so the queue shows progress and ETA).
+  - **The space tells the user:** a banner on the space page, "This space was indexed with an older version.
+    Re-index to get accurate section labels." with the number of sources, the estimate and a **Re-index** button
+    (a confirmation above two minutes, as for adds). While it runs: "Re-indexing this space… Chat keeps using the
+    current index until it is done." with a link to the queue. The banner stays until every source is current.
+  - **The job chunks the stored snapshot again** (`snapshot.md` and `map.json`): nothing is read, fetched or parsed
+    again, so a re-index never changes what a source says, needs no network and works for pasted text and uploads
+    (which cannot be refreshed). Folder files whose records are current keep their chunks; any chunk whose offsets
+    and text are unchanged keeps its id and vector (old citations still open, nothing embedded twice).
+  - **Chat keeps working on the old index:** the source stays `ready`; the new chunks are embedded first as vectors
+    without rows (retrieval skips them); then the rows are swapped in one transaction, the old vectors deleted and
+    the full-text index refreshed. A failed or cancelled re-index removes only the new vectors; the source stays as
+    it was, the banner stays, and the queue shows the error. A refresh or delete meanwhile supersedes it.
+- **Known costs:** during the embedding the rowless vectors take part of the vector top 40 (fewer candidates; a log
+  warning per question); citations of chunks that changed no longer open their passage (as after a refresh of a
+  changed file). Re-indexing the `requests` folder embeds at most its 345 new document chunks (code is kept).
+- **Reason:** never silent (Ludwig): an index made by an older chunker shows wrong section labels until rebuilt.
+- **Alternatives:** re-index automatically at start (spends minutes of CPU unasked, and on all spaces); a
+  per-source Refresh (re-fetches web pages, impossible for pastes and uploads); one global version for all kinds
+  (re-embeds every code chunk for a document change); delete and rebuild (chat has no index meanwhile).
+
+### D-107 Calibration version 7, and an outdated speed test is shown, not silent
+- **Decision:** `CALIBRATION_VERSION` = 7 with the chunker bump (the pipeline key changes with `CHUNKER_VERSION`
+  anyway, D-057). On start an outdated result queues a run titled "Measure this computer's speed again (indexing
+  has changed)"; `GET /api/calibration` gains `outdated`, and Settings shows an **Out of date** badge with "Indexing
+  has changed since this was measured. The speed test runs again on its own; until then, estimates use these
+  numbers."
+- **Reason:** the rates are chunks per second, and documents now give about twice as many, smaller chunks.
+  **Alternatives:** re-run silently at start (the D-057 behaviour; the queue entry did not say why).
+
+### D-108 A risk names the branch it is about (G4-3)
+- **Finding (Gate 4):** every risk was attached to the branch answered just before the turn
+  (`engine.turn`: `Risk(node_id=last_id)`). The turn prompt also names the branch to ask next, and the model's
+  risks were often about that branch, so the brief showed "Retrying too aggressively (from “Progress bar
+  implementation”)".
+- **Decision:** each turn risk is `{"text", "branch"}`, where `branch` is a short map label (`n3`) for the
+  branch the risk is about. The server maps the label to a branch on the map (the same labels as `parent`). An
+  unknown or missing label, or a plain string, falls back to the answered branch if it is still on the map,
+  else to no branch (the brief then shows the risk without "from …"). The stored and API shape
+  (`{"text", "node_id"}`) is unchanged. *Changed by D-116*: an unknown or missing label gives no branch (a
+  general risk), never the answered branch.
+- **Reason:** grounding correctness of what the user reads (§15): the label is checked against the map, so a
+  risk can only name a real branch, and the attribution is testable. No extra call (D-093).
+- **Alternatives:** attaching risks to the branch being asked (also wrong when the risk is about the answer);
+  matching risk words to branch titles (fuzzy, untestable).
+
+### D-109 The space's open tab lives in the URL (G4-2)
+- **Decision:** the space page keeps its tab in the query string: `/spaces/{id}?tab=ideation`; Chat, the default,
+  has no parameter, and an unknown value opens Chat. Switching tabs replaces the history entry, so Back still
+  leaves the space. Which session the Ideation tab shows is unchanged (D-102).
+- **Reason:** simplicity (§15): the app already routes with React Router, so a reload or a copied link keeps the
+  tab with no stored state to go stale.
+- **Alternatives:** local storage (per browser, not per link; one more key to guard); a nested route per tab
+  (more routing for two tabs).
+
+### D-110 Source warnings are a list, one line per problem (G4-4)
+- **Finding (Gate 4):** a folder's warnings were joined into one string with spaces, so "1 file skipped: Trustbook
+  idea briefs are never used as sources." and "Very little text was found…" read as one message.
+- **Decision:** `sources.quality_warning` stores one warning per line, and `Source` gains `quality_warnings`
+  (a list, one item per problem). `quality_warning` keeps its old meaning (all warnings joined with spaces), so
+  the CLI's `trustbook.sources/1` contract is unchanged. Sources indexed before this show their old warning as
+  one line until they are read again. The source list shows each warning on its own line, and the row's text
+  (names, paths, warnings, errors) wraps anywhere instead of being cut off.
+- **Reason:** simplicity and backward compatibility (§15): no migration, no change for API clients.
+- **Alternatives:** splitting the joined string into sentences in the UI (breaks on sentences with "e.g." or
+  file names); a new column (a migration for a display detail).
+### D-111 Every endpoint can take an optional API key (G3b-2)
+- **Context:** only the OpenAI, Azure and Anthropic presets showed a key field. OpenRouter, LiteLLM and
+  `llama-server --api-key` need a key on an "Other OpenAI-compatible" chat endpoint or the speech-to-text
+  endpoint. The backend already stored and sent a key for any preset; the UI hid the field.
+- **Decision:**
+  - The UI shows the key field for every real endpoint preset (not the test-only mock) and for the speech-to-text
+    endpoint. It is labelled "API key (optional)" unless the preset needs a key; empty means no key, and an
+    optional key is never "Required".
+  - Same storage and rules as the preset keys: only `~/Trustbook/config/settings.json` (mode 600); responses carry
+    `api_key_set` and a four-character hint; a missing key in an update keeps the saved one, `""` clears it, and
+    a saved key is dropped when the address moves to another host. Adapters send `Authorization: Bearer <key>`
+    only when a key is set; the Test button uses the draft's key.
+- **Reason:** simplicity (one rule for every endpoint, no new setting) and data safety (one storage and redaction
+  path, already covered by the tests that keep keys out of responses, logs, the request log and CLI output).
+- **Alternatives:** a key field only on "Other OpenAI-compatible" (users of the llama.cpp or vLLM presets with
+  `--api-key` would have had to switch preset).
+
+### D-112 `trustbook.error/1` reports a status whenever a response was received
+- **Context:** a rejected key gave `"http_status": null`. The API answers `ask` with a 200 event stream; the
+  chat endpoint's 401 arrived as an `error` event with only a message, and the CLI raised its error without a
+  status. Errors about a 2xx body (not JSON, wrong shape) had no status either.
+- **Decision:** the stream's `error` event carries `http_status` when the model endpoint answered with an error
+  (e.g. 401, 404, 429, 500), and the CLI reports it. Every other error raised after a response arrived reports
+  that response's status (for `ask`, the stream's 200). `null` means no response was received (Trustbook not
+  reachable, bad arguments).
+- **Reason:** simplicity for agents: one field says whether and how the far side answered; the 401 is what a
+  user needs to see to fix the key. The event's message is unchanged and still carries no secret.
+
+### D-113 A running job reports "waiting for calibration" or "loading models"
+- **Context:** `sources add --wait` sat at "reading 0%" for 30 s locally and 160–300 s on a cold CI runner. The
+  ingest job was not reading: it waited for the model lock that startup calibration holds, then the first batch
+  of each indexing stream loaded its embedder.
+- **Decision:**
+  - Jobs and sources get a `stage`: `waiting_for_calibration` or `loading_models`, `null` otherwise, shown only
+    while the job runs. It is a state the job is really in, never a guess from elapsed time: the shared model
+    lock reports when a reader has to wait for calibration, and an indexing stream reports that its embedder is
+    not loaded just before it loads it. The first finished batch clears it.
+  - Kept in memory in the job repository (no schema change): it describes this process's threads right now, and
+    a restarted app runs the job again from the start.
+  - Shown in `GET /api/jobs`, the source API, the CLI (`--wait`: "waiting for calibration (reading 0%)",
+    "loading models (indexing 40%)"; `sources list`; `queue`) and the UI ("Waiting for calibration…",
+    "Loading models…" in the source row and the queue).
+- **Reason:** honesty and simplicity: the user sees why nothing moves, and the backend already knows both states.
+- **Alternatives:** a time-based "still starting" hint (a heuristic, wrong on fast and slow machines alike);
+  a stored column (a migration for a value that is stale after a restart).
+
+### D-114 Settings lists the spaces that need re-indexing, using the per-space endpoints
+- **Decision:** Settings gets a "Re-index outdated spaces" section (SPEC §12 item 5), after the speed test: one
+  row per space whose sources an older chunker made (name linking to the space, "2 sources need it.", the
+  estimate) with a **Re-index** button, and "All spaces are up to date." when none does. A running re-index
+  shows "Re-indexing… See progress in the queue." in its row. Above two minutes the same confirmation as the
+  banner (D-106) is asked first. A space whose status cannot be read shows "Could not check every space"
+  instead of "up to date".
+  - **No new endpoint:** the page lists the spaces (`GET /api/spaces`) and reads each one's
+    `GET /api/spaces/{sid}/reindex`, starting with `POST` on the same path. A personal library has a handful
+    of spaces; the backend does the same work per space either way (one list endpoint would loop over the
+    same `reindex_status`), and sharing each space's query key with its banner keeps the two in step (a start
+    in Settings shows in the space, polling stops when done).
+  - **No "Re-index all":** each space has its own estimate and confirmation; one button would need a summed
+    estimate and one confirmation for several queues of work, so it is left out until asked for.
+- **Reason:** simplicity (§15): reuse what the banner already uses; never silent about an outdated index.
+- **Alternatives:** `GET /api/reindex` listing all spaces (one request, but a second contract for the same
+  data); a "Re-index all" button (see above).
+
+### D-115 The gate command runs comparison models in the same command, reported and never judged (G3-3)
+- **Decision:** `eval/runner.py --also-model NAME` (repeatable), with an optional `--also-endpoint URL` (default:
+  the main run's endpoint, i.e. `--chat-endpoint` or the saved one).
+  - **Order:** the main run first, exactly as before; then each comparison model in turn: switch the chat
+    capability (`PUT …/capabilities/chat`, model and, with an endpoint, the `custom` preset), test it, ask the
+    same questions in the same space with the same generation settings. No setup, refresh or re-index again.
+  - **Never a criterion:** the verdicts and the exit code come from the main model only (`run_met`, shared by
+    the report and the exit code). The report adds a "Comparison models (reported, not a criterion)" section
+    after the main report: one side-by-side row per model (precision, correct refusals, false refusals
+    docs / code / multi, p50 / p95, cited ranges valid, result; the main row carries pass/**FAIL**, each
+    comparison row "reported, not a criterion"), then per comparison model the main table's metrics without
+    targets, the per-question table and its wrong citations, cited-range problems and errors. The sweep,
+    latency and failed-sentence sections stay main-only.
+  - **Failure handling:** every comparison model's chat body is checked before anything changes (bad URL, empty
+    name, an endpoint that would lose a saved API key: exit 2). After the main run, nothing about a comparison
+    model can stop the main report: a failed endpoint test marks it `failed` and the next one runs; an
+    unreachable API or Ctrl-C/SIGTERM marks it `failed`/`interrupted after k of n questions` and the rest
+    `skipped`, and the main report and exit code are written as usual. The saved chat settings are restored
+    in the existing `finally` in every case (restore is skipped only when nothing was changed yet).
+  - **No up-front test of the comparison endpoint:** testing it before the main run would make llama-server
+    load the comparison model and then the main model again (minutes each on one GPU) for every gate run.
+  - **Sidecar version 6:** `summary` (the main model's metrics) and `comparison` (per model: requested name, chat
+    as read back, status, reason, `criterion: false`, `summary` when done, per-question rows as asked).
+    Older sidecars are read as before; `--compare` compares the top-level (main) questions.
+- **Reason:** Ludwig wants the Gate 3 command run once with both model families (G3-3), with the second one
+  reported next to Qwen3.6 and not pass/fail. Reusing the `--chat-model` switch and restore keeps one
+  mechanism for changing and restoring the chat settings.
+- **Alternatives:** a second command with `--chat-model` and `--compare` (two reports, two runs to remember;
+  what Gate 3 did); judging the comparison model with its own targets (rejected: it is reported only);
+  running the comparison first (a slow comparison model would delay the gate result).
+
+### D-116 A risk without a known branch label is a general risk; the branch source is stored (D-108 follow-up)
+- **Finding (Phase 5 measurement, Qwen3.6):** 14 of 15 risks landed on the right branch. The one that did not,
+  "Retrying POST requests as well as GET requests may cause unintended side effects …", was attached to "Progress
+  Bar Implementation" in the turn that answered that branch: the G4-3 pattern. Nothing recorded whether the model
+  gave a wrong label or the server fell back to the answered branch. One risk text said "as requested in n5" (a
+  map label in user-visible text; labels are renumbered as the map grows, so it would later name another
+  branch), and near-duplicate "infinite retries" risks piled up across turns.
+- **Decision:**
+  - **No fallback:** a missing label (a plain string, no `branch`, an empty one) or a label not on the map gives
+    the risk no branch: a general risk, shown in the brief without "from …" and in the map's risk list as
+    before. Attaching it to the answered branch was exactly the G4-3 misattribution.
+  - **Branch source:** each risk records `branch_source`: `label` (the model's label named a branch on the
+    map), `missing` or `unknown`. It is stored with the session's risks (`ideation_sessions.risks`) and logged
+    per risk (source and label, never the text); the API does not return it, like the turn diagnostics, so the
+    public shape stays `{"text", "node_id"}`. Risks stored before D-116 have none.
+  - **Labels in the text:** a map label in a risk's text that names a branch on the map (`n5`, `[n5]`, `(n5)`;
+    bare labels only in the prompt's lower-case form, since "N2" may be a real term) is replaced by that
+    branch's title in quotes, `“Retry configuration logic”`, before the risk is stored. Other text, and labels
+    not on the map, are left as they are. The turn prompt adds: never write an id such as "n3" in the risk's
+    text; name a branch by its title.
+  - **Repeats:** a risk is not added when its normalised text (lower case, punctuation as spaces, whitespace
+    collapsed) equals an existing risk's on the same branch (general risks are one group). Exact match on that
+    key only, no fuzzy matching: "Infinite retries with no delay can cause high CPU usage" and "… will likely
+    cause CPU exhaustion" both stay. The earlier rule (the same text, case ignored, on any branch) stands.
+- **Reason:** grounding correctness of what the user reads (§15): a wrong "from …" is a false statement, a
+  missing one is not; the stored source makes the next measurement say whether a misattribution was the
+  model's label. Deterministic and testable; no extra call (D-093).
+- **Alternatives:** keeping the fallback and only logging it (keeps the known bug); removing labels from the
+  text instead of naming the branch (loses what the model referred to); fuzzy duplicate detection (untestable,
+  would merge distinct risks).
+
+### D-117 Answer replies: syntax fragments are dropped and repeated sentences merged at layer 3 (ref-near-05)
+- **Finding (Phase 5 measurement, Qwen3.6, temperature 0, seed 42):** the ref-near-05 answer was stored as six
+  sentences: A, B, C, `}]}]}```json{`, B, C. The checker removed the fragment (score 0.01), so the badge was
+  `partially_verified` and B and C were shown twice, each verified again. `answer_calls` 1, `regenerated` false:
+  the first reply parsed. **Mechanism:** the answer call uses strict `json_schema` output (llama-server turns
+  it into a grammar), so the reply is always valid JSON and nothing outside the object can reach the parser.
+  The model, at the end of its answer, tried to close the JSON and open a second fenced answer (`}]}]}` +
+  "```json{"); under the grammar those characters can only be string content, so they became the `text` of a
+  sentence (or a part between inline markers) carrying a valid chunk id, followed by the restarted answer's
+  sentences. Layer 3 checked only "non-empty text, valid ids", so the fragment went to the checker and the
+  repeats went through as new sentences. The raw reply was not kept (the request log stores what is sent), so
+  whether the fragment was its own item or a part of C's text split at inline markers is inferred; both give
+  the stored list and both are tested.
+- **Decision (layer 3, `chat/output.py`, also for overview replies and ideation recommendations):**
+  - A sentence part with no word character once code-fence markers (```` ```json ````) are removed is a syntax
+    fragment, not a statement: it is dropped like an uncited sentence (not shown, not verified). A reply of
+    fragments only has no sentences (`invalid_output`, as for uncited sentences).
+  - A sentence whose text (whitespace already normalised) equals an earlier sentence's text in the same reply
+    is merged into the earlier one, which then cites its own ids followed by the new ones. The merged sentence
+    is verified like any sentence; every id it cites is one the model gave for that exact text, so nothing is
+    checked more loosely than if the model had written the sentence once. Case or punctuation differences are
+    different sentences. In ideation a cited sentence and a suggestion are never merged.
+  - Trailing junk after the reply object (non-strict modes) stays as before: junk without braces is ignored,
+    junk holding another object makes the reply unusable (the one retry, layer 3). A fragment inside a string
+    is not treated as an unusable reply: the rest of the reply is valid and each sentence is still verified,
+    and a retry costs a full answer call.
+  - Diagnostics: `syntax_fragments` (the dropped fragments, 300 characters each) and `duplicate_sentences`
+    for the reply the outcome rests on. Mock hook `TB-GARBLED` reproduces the reply shape.
+- **Reason:** what the user reads (§15): a fragment is not a claim and a repeated sentence is one claim; the
+  ref-near-05 answer becomes A, B, C, each verified. No grounding layer is loosened: every shown sentence is
+  still checked against all the chunks it cites.
+- **Alternatives:** stripping the fragment out of a sentence that also has words (edits the model's text;
+  such a part still goes to the checker and fails there); treating a fragment as an unusable reply and
+  retrying (a second answer call for a reply whose sentences are fine); `raw_decode` of the first object
+  (does not apply: under strict output the fragment is inside the object).
+
+### D-118 A verification refusal has its own card, and the refusal reason is stored with the message (G3-2, F6)
+- **Finding (G3-2, `docs/reports/G3-2-ref-near-10.md`):** every ref-near-10 refusal was a verification refusal
+  (`unsupported`: layer 5 or the code judge failed the sentences), never `not_in_sources`, but the card showed
+  "Not in your sources" with "Add sources that cover …" for both, and the reason was not stored with the
+  message, so after a reload neither the UI nor the CLI could tell them apart. It looked like retrieval.
+- **Decision:**
+  - `refusal("unsupported")` has its own title, **"Couldn't verify an answer"**, and suggestion: "An answer was
+    drafted from your sources, but Trustbook could not verify it against the passages it cited, so it is not
+    shown. Try rephrasing the question, or name the file or function you mean." `not_in_sources`, `no_sources`
+    and `invalid_output` are unchanged.
+  - space.db migration 007 adds `messages.refusal_reason` (nullable, CHECK: the four reasons). `add_refusal`
+    stores it; `Message` gains `refusal_reason` (set only on refused assistant messages, else `null`). A refusal
+    stored before has `null` and shows its stored title and suggestion as before.
+  - UI: `RefusalCard` takes the reason (live from the `refused` event, after a reload from the message): for
+    `unsupported` a shield icon instead of the file-search one, `data-reason`, and "Couldn't verify an answer"
+    as the fallback title. CLI `trustbook ask` (`trustbook.ask/1`): `refusal.reason` from the event, else from
+    the stored `refusal_reason`, else `not_in_sources` as before; the eval runner reads it the same way. The
+    skill tells the agent to report an `unsupported` refusal as "could not verify", still final.
+- **Reason:** G3-2 (reporting root cause 3). Plain and honest (§15): the sources were not found lacking; an
+  answer drafted from them did not pass verification. No grounding layer changes: the same sentences are
+  refused, only the words and the stored reason differ.
+- **Alternatives:** keeping the reason only in the content JSON (no column: harder to query, and the message
+  API field would still be needed); showing the failed sentences on the card (they are unverified text, which
+  the refusal exists to withhold); one generic "No verified answer" title for all reasons (hides the
+  `not_in_sources` advice that is right in that case).
+
+### D-119 A module-level data table in the context brings the same-file chunk that uses it (G3-2, F1)
+- **Finding (G3-2):** for ref-near-10 the `_codes` table part with the 429 row was in the context only through
+  the D-046 guard (rerank 0.017), last of 8, and never expanded. No context chunk held both `codes` and the 429
+  row, so a correct sentence needed two citations. `_init` (`for code, titles in _codes.items(): setattr(codes,
+  title, code)`), the chunk that ties the table to `requests.codes`, was reranked 18th and **cut by the 8-chunk
+  cap**, not by tokens (about 1.9k of 6k used).
+- **Decision (`app/retrieval/parents.py`, `data_user_promotions`):**
+  - A **data chunk** is a part of a big literal the code chunker split out (locator `kind: "data"`, D-056) whose
+    parent key is its file's module (`data_symbol`; a class-level table is not module-level). Its name is the
+    locator `symbol` (`_codes`).
+  - For every such chunk in the context (any position, guard-kept included, not only the first 3 that D-077
+    expands), in context order, one chunk of the **same file** that **uses** the name is promoted, unless a
+    context chunk already uses it. A use (`uses_name`): the name as a whole word, not an attribute (`x._codes`),
+    on a line that does not assign it at column 0; the table's own parts never count. Candidates come from the
+    file's stored rows (`FileRows`, D-077 metadata; nothing new is stored): reranked ones first (highest score),
+    then by position in the file; the first that fits is taken. Several parts of one table bring one user.
+  - **Budgets:** the D-077 promotion caps, shared with the parent promotions, which keep first claim:
+    ≤ 600 tokens per promoted chunk, ≤ 3 promoted chunks and ≤ 900 promoted tokens per answer, and only the free
+    part of the 6,000-token budget (it never displaces a chunk). **The 8-chunk cap:** like every D-077 promotion
+    it is outside it; the cap limits only the ranked selection (top 8 by rerank). Raising the cap would add a
+    ninth ranked chunk to every answer; this adds one chunk only when a table is in the context.
+  - The promoted chunk is an ordinary numbered chunk: verbatim stored text, citable by its own lines, verified by
+    every layer like any other, never in `ranked` (layer 2 unchanged). `expansion: "data_user"`, `referrer` =
+    the table chunk; `diagnostics.expansions` records it like the other kinds. Deterministic (stored rows,
+    rerank scores, ordinals). Off with `retrieval.parent_context` (the D-077 switch).
+  - Query-time only: no chunker or calibration version bump (`CHUNKER_VERSION` and `CALIBRATION_VERSION`
+    unchanged; calibration measures indexing speed, which this does not touch).
+- **Reason:** G3-2 (retrieval root cause 2, contributing to the verification refusals): with `_init` in the
+  context, `codes` and the table row are linked by a chunk the model can cite, so a sentence naming
+  `requests.codes` and `too_many_requests` can pass layer 5 on its citations. No grounding layer is loosened.
+- **Alternatives:** raising the 8-chunk cap (every answer pays); promoting `codes = LookupDict(...)` (line 106,
+  not in the ref-near-10 answer key, and it does not use the table); a requests-specific rule (not generic);
+  promoting every user (one is enough to bridge, and the caps are shared).
+- **Review follow-up:** a use of the table shown by another promotion (a class head or previous section) also
+  counts as "the context already uses it", so no promotion slot is spent on a second user.
+
+### D-120 The answer rules and the regeneration feedback ask for every chunk a sentence combines (G3-2, F4)
+- **Finding (G3-2):** in 3 of the 5 ref-near-10 refusals the model cited only the `_codes` table chunk for a
+  sentence that also said `requests.codes`; layer 5 rejected it (the name is not in the cited chunk). The table
+  plus the docstring (or `_init`, or line 106) always passes. The regeneration was told "`requests.codes` is not
+  in c2; it is in c1" (D-074), and for `requests.codes.too_many` "is in none of the chunks", because no single
+  chunk holds every part of that name, though c1 and c2 together do (layer 5's D-042 test over the cited texts).
+- **Decision:**
+  - `ANSWER_SYSTEM` gains one rule: "A sentence that uses names or facts from more than one chunk must list each
+    of those chunks, for example ["c1", "c3"] when it combines a name from c1 with a value from c3."
+    `FEEDBACK_TASK` ends with "A sentence that uses names from several chunks cites all of them."
+  - The feedback says what to add: "it is in c1, so cite c1 as well" (several: "it is in c1, c2 and c4, so
+    cite one of them as well"). When no other chunk holds a missing name alone, `joint_cover` finds the fewest
+    other context chunks (one, else two; the first in label order) that hold it together with the cited ones by
+    layer 5's own test (`name_in` over all their texts), and the feedback says "`requests.codes.too_many` is not in
+    c2 alone; c2 and c1 together have every part of it, so cite c1 as well". `FailedSentence.combined` marks such
+    names. Nothing else changes: "in none of the chunks" when no cover exists.
+  - The feedback only reports. Citations are checked exactly as given: the pipeline never adds or completes one
+    (D-064), and a second reply that still cites c2 alone fails as before. `joint_cover` reads only chunk text
+    (added to the grounding-isolation AST ban with `failed_sentences`).
+  - Prompt goldens retaken; the only differences are these strings (checked by reverting them).
+- **Reason:** G3-2 (verification root cause 1): a correct sentence about `requests.codes` and the 429 row needs
+  two citations; the model is now told so up front and, after a failure, which chunk to add. No grounding layer is
+  loosened.
+- **Alternatives:** completing the model's citations automatically (D-064 forbids it: the model must state its
+  support); relaxing layer 5 to accept a name found in any context chunk (weakens grounding); listing every
+  possible cover (longer feedback, same effect).
+- **Review follow-up:** a name the cited chunks already hold (the code judge's `absent` names: its evidence lines
+  lacked it) is left out of the feedback, so it never suggests a citation that cannot help; with no other name
+  missing, the reason is "not supported by the cited chunks".
+
+### D-121 Chunks the agreement guard puts back sit by their fused rank, not last (G3-2, F2)
+- **Finding (G3-2):** the ref-near-10 table part is fused #1 (vector #1, full-text #2) and reranked 32nd of 40
+  (0.017). The D-046 guard kept it, but `keep_agreed` sorted the context by rerank position, so it came **last of
+  8**, far from the docstring it belongs with (fused #2, reranked #1), and outside the first 3 chunks D-077
+  expands.
+- **Decision (`app/retrieval/service.py`):** `keep_agreed(..., fused=…)` (retrieval passes the fused order of
+  the candidates) places each chunk **the guard put back** (in the context, not in the reranker's own top 8 by
+  `select_context`) by its fused rank (`by_fused_rank`): best fused rank first, each goes right before the first
+  chunk after the top one that the fused list ranks below it, else at the end. The reranker's top chunk stays
+  first (c1); every other chunk keeps its rerank order; a chunk the reranker kept itself never moves. For
+  ref-near-10: docstring, table, then the rest.
+  - **Unchanged:** which chunks are in the context, `ranked` and every rerank score, so the layer 2 refusal
+    threshold (top rerank score) and `diagnostics.top_rerank` are exactly as before. Without `fused` (direct
+    callers, tests) the old rerank order is kept.
+  - **Consequences:** the context order (and so `retrieval_fingerprint` and the labels `cN`) changes for
+    questions with a guard-kept chunk. Such a chunk can now be among the first 3 that D-077 expands (a method
+    child gets its class head, a code child its outline block) and is no longer the first chunk a D-032 / D-060
+    extra displaces when the budget is full (`fit_extras` drops from the end). D-119 data-user promotion does
+    not depend on the position (it looks at every context chunk).
+  - Query-time only: no chunker or calibration version bump.
+- **Reason:** G3-2 (retrieval root cause 2): the guard exists because both searches rank such a chunk at the
+  top; its place in the prompt should say so, next to the chunks it belongs with, so a two-citation sentence
+  finds both. No grounding layer reads the order.
+- **Alternatives:** placing the whole context by fused rank (overrides the reranker everywhere, and the top
+  chunk); rescoring the table chunk with a docstring prefix (F3, not approved: the refusal threshold reads those
+  scores); putting guard chunks first (above the reranker's best).
+
+### D-122 The runner waits for a switched chat model to load; a test timeout is not an unreachable API (Gate 5)
+- **Finding (Gate 5 run, `--also-model gemma-4-26B-A4B-it-UD-Q4_K_XL`):** after the main run the runner switched
+  the chat model and tested the endpoint once. llama-server had to load Gemma from cold, so
+  `POST /api/capabilities/chat/test` did not return within `--timeout` (300 s); the httpx `ReadTimeout` was
+  reported as "Trustbook API unreachable after 0 of 45 questions". The API was fine; the model server was
+  loading. Gate check #17 (`--chat-model`) would hit the same.
+- **Decision (`eval/runner.py`, `wait_for_chat_model`):** after every chat switch (`--chat-endpoint`/`--chat-model`,
+  each `--also-model`) the endpoint test is repeated (about every 10 s, each request with its own timeout of
+  min(`--timeout`, 120) s) until it passes or `--model-load-timeout` (default 900 s) has passed, logging
+  "waiting for NAME to load on the chat server (Ns)". Retried: a test reply `ok: false` whose message is a
+  timeout ("No reply …"), a connection failure to the model server ("Cannot reach …", "Connection to … failed")
+  or llama-server's loading answer (503 / "Loading model"); and a `ReadTimeout` of the test request while
+  `GET /api/health` still answers. Any other `ok: false` (401, 404 unknown model, certificate) fails at once as
+  before. Only a connection failure to the Trustbook API, or a failing health check, is `ApiUnreachableError`.
+  On the deadline a comparison model's row reads "failed: the chat server did not load NAME within N s"; the main
+  result, exit code and the restore of the saved chat settings are unchanged (the restore only saves, no test).
+  For `--chat-endpoint`/`--chat-model` the same message stops the run (exit 2).
+- **Reason:** a model switch on a single-GPU llama-server takes minutes; the run should wait for it and say
+  what happened, not blame the API.
+- **Alternatives:** a longer `--timeout` alone (also lengthens every answer's timeout and still misreports a
+  slow load as unreachable); a fixed sleep after the switch (too short for a cold load, wasted for a warm one);
+  retrying every failed test (a typo or a rejected key would then wait 15 minutes); waiting in the backend's
+  test endpoint (the Settings Test button should answer quickly, PING_TIMEOUT_S 30 s).

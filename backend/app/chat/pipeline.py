@@ -4,9 +4,10 @@
 2. Layer 2: top reranker score below ``refuse_threshold`` → refuse (``not_in_sources``) before
    any model call.
 3. Layer 3: numbered chunks, forced-citation JSON, one retry on unusable JSON, sentences without
-   valid chunk ids dropped. No sentences returned → ``not_in_sources``; sentences returned but
-   none valid, or unusable JSON twice → ``invalid_output``. The model's citations are checked as
-   given (never completed, D-064).
+   valid chunk ids and parts that are only JSON/Markdown syntax dropped, repeated sentences
+   merged into their first occurrence (D-117). No sentences returned → ``not_in_sources``;
+   sentences returned but none valid, or unusable JSON twice → ``invalid_output``. The model's
+   citations are checked as given (never completed, D-064).
 4. Layers 4 and 5 (:mod:`app.grounding.verify`): every sentence is checked against its cited
    chunks. When the refusal rule would fire (more than half failing, or the first sentence
    failing), one regeneration with the same chunks plus
@@ -39,6 +40,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import combinations
 
 from app.chat.citation_choice import choose, upgrade_candidates
 from app.chat.citations import number_citations
@@ -82,6 +84,7 @@ logger = logging.getLogger("trustbook.chat")
 
 NOT_IN_SOURCES = "Not in your sources"
 NO_CITED_ANSWER = "No answer with citations"
+NOT_VERIFIED = "Couldn't verify an answer"
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,13 @@ Outcome = Answered | Refused
 
 NO_SOURCES_SUGGESTION = "Add or tick at least one ready source, then ask again."
 GENERIC_SUGGESTION = "Add sources about this topic, then ask again."
+# ``unsupported`` (D-118, G3-2): an answer was drafted from the sources, but verification (layers
+# 4 and 5) did not confirm enough of it, so nothing is shown. Not "add sources": they may hold it.
+UNSUPPORTED_SUGGESTION = (
+    "An answer was drafted from your sources, but Trustbook could not verify it against the "
+    "passages it cited, so it is not shown. Try rephrasing the question, or name the file or "
+    "function you mean."
+)
 
 
 def suggestion_for(question: str) -> str:
@@ -122,10 +132,14 @@ def refusal(reason: RefusalReason, question: str) -> Refusal:
     """The plain-English refusal for ``reason``.
 
     ``message`` is only the title the UI shows ("Not in your sources"); ``suggestion`` is the
-    subtitle, so the two never repeat each other.
+    subtitle, so the two never repeat each other. A verification refusal (``unsupported``) has
+    its own title and suggestion (D-118): the sources were not found lacking, the answer drafted
+    from them could not be verified.
     """
     if reason == "no_sources":
         return Refusal(reason=reason, message=NOT_IN_SOURCES, suggestion=NO_SOURCES_SUGGESTION)
+    if reason == "unsupported":
+        return Refusal(reason=reason, message=NOT_VERIFIED, suggestion=UNSUPPORTED_SUGGESTION)
     if reason == "invalid_output":
         return Refusal(
             reason=reason,
@@ -281,8 +295,30 @@ def _upgrade(
     return upgraded
 
 
+def _plain(chunk: RetrievedChunk) -> str:
+    return unescape_markdown(without_location(chunk.text))
+
+
 def _holds(name: str, chunk: RetrievedChunk) -> bool:
-    return name_in(name, [unescape_markdown(without_location(chunk.text))])
+    return name_in(name, [_plain(chunk)])
+
+
+def joint_cover(
+    name: str, cited: Sequence[str], chunks: Mapping[str, RetrievedChunk]
+) -> tuple[str, ...]:
+    """The fewest other context chunks (one, else two; the first in label order) that, cited
+    together with ``cited``, hold ``name`` by layer 5's own test (:func:`name_in` over all their
+    texts: ``requests.codes.too_many`` passes on a docstring with ``requests.codes`` plus the
+    table with ``too_many``); ``()`` when none do (D-120). For the feedback only."""
+    base = [_plain(chunks[label]) for label in cited if label in chunks]
+    if name_in(name, base):
+        return ()  # the cited chunks already hold it: nothing to add
+    others = [label for label in chunks if label not in cited]
+    for size in (1, 2):
+        for group in combinations(others, size):
+            if name_in(name, [*base, *(_plain(chunks[label]) for label in group)]):
+                return group
+    return ()
 
 
 def failed_sentences(
@@ -291,23 +327,35 @@ def failed_sentences(
     chunks: Mapping[str, RetrievedChunk],
 ) -> list[FailedSentence]:
     """The failed sentences of a reply for the regeneration feedback (D-074): for each name or
-    literal no cited chunk holds, the other context chunks that hold it (layer 5's test)."""
+    literal no cited chunk holds, the other context chunks that hold it (layer 5's test), or,
+    when none holds it alone, the chunks that hold it together with the cited ones (D-120).
+    A name the cited chunks do hold (the code judge's ``absent`` names: its evidence lines lacked
+    it) is left out, so the feedback never asks for a citation that cannot help."""
     failed: list[FailedSentence] = []
     for sentence, check in zip(sentences, checked.checks, strict=True):
         if check.passed:
             continue
-        missing = tuple(
-            (
-                name,
-                tuple(
-                    label
-                    for label, chunk in chunks.items()
-                    if label not in sentence.chunk_ids and _holds(name, chunk)
-                ),
+        missing: list[tuple[str, tuple[str, ...]]] = []
+        combined: list[str] = []
+        cited = [_plain(chunks[label]) for label in sentence.chunk_ids if label in chunks]
+        for name in check.missing:
+            if name_in(name, cited):
+                continue
+            places = tuple(
+                label
+                for label, chunk in chunks.items()
+                if label not in sentence.chunk_ids and _holds(name, chunk)
             )
-            for name in check.missing
+            if not places:
+                places = joint_cover(name, sentence.chunk_ids, chunks)
+                if places:
+                    combined.append(name)
+            missing.append((name, places))
+        failed.append(
+            FailedSentence(
+                sentence.text, tuple(sentence.chunk_ids), tuple(missing), tuple(combined)
+            )
         )
-        failed.append(FailedSentence(sentence.text, tuple(sentence.chunk_ids), missing))
     return failed
 
 
@@ -328,6 +376,21 @@ def failed_sentences_out(
         for sentence, check in zip(sentences, checked.checks, strict=True)
         if not check.passed
     ]
+
+
+def cleanup_diagnostics(parsed: ParsedAnswer) -> dict[str, object]:
+    """Layer 3's clean-up of a reply (D-117): the syntax fragments it dropped and how many
+    repeated sentences it merged."""
+    if parsed.fragments or parsed.duplicates:
+        logger.info(
+            "Dropped %d syntax fragment(s), merged %d repeated sentence(s)",
+            len(parsed.fragments),
+            parsed.duplicates,
+        )
+    return {
+        "syntax_fragments": [_cap(f) for f in parsed.fragments],
+        "duplicate_sentences": parsed.duplicates,
+    }
 
 
 def retrieval_fingerprint(chunks: Sequence[RetrievedChunk]) -> str | None:
@@ -568,6 +631,7 @@ def _answer(
     except InvalidOutputError:
         logger.info("Refused: the chat reply was unusable twice")
         return Refused(refusal("invalid_output", question), diagnostics)
+    diagnostics = diagnostics.model_copy(update=cleanup_diagnostics(parsed))
 
     on_stage("checking")
     if not parsed.sentences:
@@ -604,6 +668,7 @@ def _answer(
                 _diagnostics(diagnostics, checked, verifier, True, _Changes(), chunks, sentences),
             )
         parsed = second
+        diagnostics = diagnostics.model_copy(update=cleanup_diagnostics(parsed))
         sentences = parsed.sentences
         checked = meter.check(verifier, sentences, chunks)
 

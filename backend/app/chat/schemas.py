@@ -111,8 +111,8 @@ class Timings(BaseModel):
 
 
 class ExpansionOut(BaseModel):
-    """A chunk promoted as parent context (D-077): its id, ``section_previous`` or
-    ``class_head``, and the id of the context chunk it was promoted for (``referrer``)."""
+    """A chunk promoted as parent context (D-077): its id, ``section_previous``, ``class_head`` or
+    ``data_user`` (D-119), and the id of the context chunk it was promoted for (``referrer``)."""
 
     chunk_id: str
     kind: str
@@ -164,6 +164,11 @@ class Diagnostics(BaseModel):
     prompt tokens), ``window_fingerprint`` (a hash of their text; None: no window) and
     ``window_only``: per verification pass, how many failed sentences miss a name, or use a word,
     that a window shows and no chunk holds.
+
+    Layer 3 clean-up (D-117), for the reply the outcome rests on: ``syntax_fragments``: parts
+    of a ``text`` that were only JSON or Markdown syntax (``}]}]}```json{``), dropped before
+    verification (each capped at 300 characters); ``duplicate_sentences``: sentences that
+    repeated an earlier sentence's text and were merged into it.
     """
 
     top_rerank: float | None = None
@@ -192,6 +197,8 @@ class Diagnostics(BaseModel):
     window_tokens: int = 0
     window_fingerprint: str | None = None
     window_only: list[int] = Field(default_factory=list)
+    syntax_fragments: list[str] = Field(default_factory=list)
+    duplicate_sentences: int = 0
 
 
 class MessageOut(BaseModel):
@@ -204,6 +211,9 @@ class MessageOut(BaseModel):
     sources_used: list[SourceUsed]
     diagnostics: Diagnostics | None = None  # assistant messages only
     gate_log_id: int | None = None  # the gate decision behind an assistant message
+    # Why a refused assistant message was refused (D-118); None for every other message and for
+    # refusals stored before the reason was (their stored title and suggestion still show).
+    refusal_reason: RefusalReason | None = None
 
 
 class ConversationOut(BaseModel):

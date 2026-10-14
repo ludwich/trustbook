@@ -392,6 +392,83 @@ def test_accept_needs_a_recommendation(env: Env, monkeypatch: pytest.MonkeyPatch
     assert response.status_code == 409 and "no recommended answer" in response.json()["detail"]
 
 
+def test_risk_is_attached_to_the_branch_it_concerns(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G4-3: the turn after answering "Progress bar" asks about "Retry logic"; its risk about
+    retrying belongs to "Retry logic" (n2), in the session and in the brief."""
+    sid = env.create("A download tool")["id"]
+    seed = json.dumps({"title": "T", "branches": ["Progress bar", "Retry logic", "File names"]})
+
+    def turn(risks: list[dict[str, str]]) -> str:
+        sentences = [{"text": "Keep it simple.", "chunk_ids": []}]
+        return json.dumps(
+            {
+                "question": "Q?",
+                "recommendation": {"sentences": sentences},
+                "new_branches": [],
+                "risks": risks,
+            }
+        )
+
+    chat = ScriptedChat(
+        seed, turn([]), turn([{"text": "Retrying too aggressively", "branch": "n2"}])
+    )
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
+    session = env.turn(sid)
+    ids = {n["title"]: n["id"] for n in session["nodes"]}
+    session = env.answer(sid, ids["Progress bar"], "answer", "A simple bar.")
+    assert session["risks"] == [
+        {"text": "Retrying too aggressively", "node_id": ids["Retry logic"]}
+    ]
+    env.client.post(env.url(f"/sessions/{sid}/finish"))
+    brief = env.client.get(env.url(f"/sessions/{sid}/brief")).text
+    assert "- Retrying too aggressively (from “Retry logic”)" in brief
+
+
+def test_risk_without_a_known_label_is_a_general_risk(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-116: the G4-3 pattern again. After answering "Progress bar", a risk with no label, or
+    with a label not on the map, is a general risk, never one of "Progress bar"; a label in its
+    text becomes the branch title. The brief lists general risks without "from"."""
+    sid = env.create("A download tool")["id"]
+    seed = json.dumps({"title": "T", "branches": ["Progress bar", "Retry logic", "File names"]})
+
+    def turn(risks: list[Any]) -> str:
+        sentences = [{"text": "Keep it simple.", "chunk_ids": []}]
+        return json.dumps(
+            {
+                "question": "Q?",
+                "recommendation": {"sentences": sentences},
+                "new_branches": [],
+                "risks": risks,
+            }
+        )
+
+    risks = [
+        "Retrying POST as well as GET has side effects, as asked in n2",
+        {"text": "Downloads may fill the disk", "branch": "n7"},
+    ]
+    chat = ScriptedChat(seed, turn([]), turn(risks))
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
+    session = env.turn(sid)
+    ids = {n["title"]: n["id"] for n in session["nodes"]}
+    session = env.answer(sid, ids["Progress bar"], "answer", "A simple bar.")
+    assert session["risks"] == [
+        {
+            "text": "Retrying POST as well as GET has side effects, as asked in “Retry logic”",
+            "node_id": None,
+        },
+        {"text": "Downloads may fill the disk", "node_id": None},
+    ]
+    env.client.post(env.url(f"/sessions/{sid}/finish"))
+    brief = env.client.get(env.url(f"/sessions/{sid}/brief")).text
+    risks_section = brief.split("## Open risks")[1].split("## Open questions")[0]
+    assert "- Downloads may fill the disk\n" in risks_section
+    assert "(from" not in risks_section
+
+
 def test_unusable_reply_is_an_error_and_ask_again_works(
     env: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -516,10 +593,30 @@ def test_every_ideation_call_is_in_the_request_log(env: Env, router: Router) -> 
         "/api/capabilities/chat",
         json={"preset": "custom", "base_url": "http://llm.example/v1", "model": "m"},
     )
-    session = env.turn(env.create()["id"])
+    sid = env.create()["id"]
+    session = env.turn(sid)
     assert current(session)["recommendation"]["grounding"] == "cited"
     log = env.client.get("/api/request-log").json()
     chat_calls = [e for e in log if e["capability"] == "chat"]
     assert len(chat_calls) == len(router.requests) == 3  # seed, turn and the judge
     assert all(e["space_id"] == env.space_id and e["space_name"] == "Trips" for e in chat_calls)
     assert all(e["endpoint_host"] == "llm.example" for e in chat_calls)
+
+    # Gate 4 #9: the turns that answers start (the /answer stream) are logged the same way, until
+    # the session is complete; finishing writes the brief without a model call.
+    while session["current_node_id"] is not None:
+        session = env.answer(sid, session["current_node_id"], "answer", "Keep it simple.")
+    assert session["complete"] is True
+    env.client.post(env.url(f"/sessions/{sid}/finish"))
+    log = env.client.get("/api/request-log").json()
+    chat_calls = [e for e in log if e["capability"] == "chat"]
+    kinds = [
+        next(iter(json.loads(r.content)["response_format"]["json_schema"]["schema"]["properties"]))
+        for r in router.requests
+    ]
+    # One seed; one turn per branch (three seeds, no follow-ups) plus the last answer's turn that
+    # only looks for new branches and risks; and the judge calls.
+    assert kinds.count("title") == 1 and kinds.count("question") == 4
+    assert kinds.count("verdicts") >= 1 and len(kinds) == 5 + kinds.count("verdicts")
+    assert len(chat_calls) == len(router.requests)
+    assert all(e["space_id"] == env.space_id and e["space_name"] == "Trips" for e in chat_calls)

@@ -9,17 +9,26 @@ streams (:mod:`app.capabilities.streams`) feed a bounded queue that this job's t
 appending vectors to the index every :data:`WRITE_BATCH` chunks; the full-text index is
 refreshed once at the end. The source only becomes ``ready`` after that, so chat never sees a
 half-indexed source; a failure removes the partial rows and vectors.
+
+Re-indexing (D-106, payload ``reindex``): the stored snapshot is chunked again with the current
+chunker. The source stays ``ready`` and chat keeps using its current chunks: the new chunks are
+embedded first (vectors without rows, which retrieval skips), then the rows are swapped in one
+transaction and the old vectors deleted. A failed or cancelled re-index leaves the source as it
+was and only removes the new vectors.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+import math
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from app.capabilities.bundled import ProviderRegistry, ProviderUnavailableError
+from app.capabilities.bundled import Embedder, ProviderRegistry, ProviderUnavailableError
 from app.capabilities.streams import EmbeddedBatch, embed_in_streams
+from app.chunking.dispatch import snapshot_chunkers
 from app.chunking.tokens import TokenCounter, load_token_counter
 from app.db.models import Source
 from app.index.base import IndexedChunk, IndexRegistry, SpaceIndex, search_text
@@ -27,18 +36,27 @@ from app.index.lance import IndexDimensionError
 from app.ingest import errors
 from app.ingest.browse_root import BrowsePathError, BrowseRootMissingError, resolve_in_root
 from app.ingest.errors import IngestError, fail
-from app.ingest.estimate import job_seconds
+from app.ingest.estimate import JOB_OVERHEAD_S, Workload, estimate, job_seconds, rates_from
 from app.ingest.git import AheadTracker
 from app.ingest.incremental import ChunkPlan, load_previous, plan_chunks
 from app.ingest.readers import IngestTools, read_source
+from app.ingest.reindex import (
+    CHUNKERS_STAT,
+    REINDEX_KEY,
+    StoredSnapshotError,
+    outdated_kinds,
+    parse_locator,
+    reindex_work,
+    stored_snapshot,
+)
 from app.jobs.calibration import Calibration
 from app.jobs.eta import ESTIMATE_KEY
-from app.jobs.handlers import JobCancelledError, JobContext
+from app.jobs.handlers import JobCancelledError, JobContext, JobStage
 from app.jobs.pool import WorkerPool
 from app.jobs.repository import JobNotFoundError, JobRepository
-from app.parse.snapshot import Snapshot, write_snapshot
+from app.parse.snapshot import Snapshot, read_snapshot_files, write_snapshot
 from app.spaces.service import SpaceService
-from app.spaces.source_schemas import AheadOut, SourceOut
+from app.spaces.source_schemas import AheadOut, ReindexOut, ReindexSourceOut, SourceOut
 from app.spaces.sources import (
     FINAL_STATUSES,
     SourceNotFoundError,
@@ -60,9 +78,16 @@ class RefreshNotAllowedError(ValueError):
     """Pasted text and uploads are fixed snapshots. Message is plain English."""
 
 
+def _short(title: str) -> str:
+    return title if len(title) <= 60 else title[:57] + "…"
+
+
 def _title_for_job(title: str) -> str:
-    short = title if len(title) <= 60 else title[:57] + "…"
-    return f"Add “{short}”"
+    return f"Add “{_short(title)}”"
+
+
+def _title_for_reindex(title: str) -> str:
+    return f"Re-index “{_short(title)}”"
 
 
 class IngestService:
@@ -104,6 +129,7 @@ class IngestService:
         status = source.status
         reason, step = source.failure_reason, source.failure_next_step
         progress: float | None = None
+        stage: JobStage | None = None
         if status not in FINAL_STATUSES:
             job = None
             if source.job_id:
@@ -120,6 +146,8 @@ class IngestService:
                     step = self._next_step(source, errors.REFRESH)
             elif job.status == "running":
                 progress = job.progress
+                stage = self.jobs.stage(job)
+        warnings = errors.split_warnings(source.quality_warning)
         return SourceOut(
             id=source.id,
             type=source.type,
@@ -130,7 +158,8 @@ class IngestService:
             progress=progress,
             failure_reason=reason if status == "failed" else None,
             failure_next_step=step if status == "failed" else None,
-            quality_warning=source.quality_warning,
+            quality_warning=" ".join(warnings) or None,
+            quality_warnings=warnings,
             enabled=source.enabled and status != "failed",  # G7: failed is never ticked
             snapshot_at=source.snapshot_at,
             commit_hash=source.commit_hash,
@@ -138,6 +167,7 @@ class IngestService:
             created_at=source.created_at,
             job_id=source.job_id,
             ahead=self._ahead(source) if status == "ready" else None,
+            stage=stage,
         )
 
     def _ahead(self, source: Source) -> AheadOut | None:
@@ -206,11 +236,7 @@ class IngestService:
 
     def estimate_seconds(self, repo: SourceRepository, source: Source) -> int | None:
         """Estimated seconds for indexing ``source`` now (``None``: can't be told)."""
-        try:
-            calibration = self.calibration()
-        except Exception:
-            logger.warning("Could not read the speed test results", exc_info=True)
-            calibration = None
+        calibration = self._calibration()
         return job_seconds(source, repo.folder(source.id), self.tools.browse_root, calibration)
 
     def enqueue(self, repo: SourceRepository, source: Source) -> Source:
@@ -248,6 +274,93 @@ class IngestService:
             source = repo.update(source.id, enabled=True)
         self._cancel_job(source)
         return self.enqueue(repo, source)
+
+    # --- re-indexing (D-106) ----------------------------------------------------------------
+
+    def _job_unfinished(self, source: Source) -> bool:
+        if not source.job_id:
+            return False
+        try:
+            return self.jobs.get(source.job_id).status in ("queued", "running", "paused")
+        except JobNotFoundError:
+            return False
+
+    def outdated(self, repo: SourceRepository, source: Source) -> set[str]:
+        """The kinds of chunk a ready source holds that an older chunker made."""
+        if source.status != "ready":
+            return set()
+        recorded = isinstance(load_stats(source).get(CHUNKERS_STAT), dict)
+        files = repo.files(source.id) if source.type == "folder" and not recorded else []
+        first = None if recorded else repo.chunk_locators(source.id, limit=1)
+        locator = parse_locator(first[0]) if first else None
+        return outdated_kinds(source, files, locator)
+
+    def reindex_status(self, space_id: str) -> ReindexOut:
+        """The space's sources that hold chunks of an older chunker, and the estimate for
+        re-indexing those not queued yet."""
+        repo = self.repo(space_id)
+        items: list[ReindexSourceOut] = []
+        work = Workload()
+        for source in repo.list_all():
+            kinds = self.outdated(repo, source)
+            if not kinds:
+                continue
+            running = self._job_unfinished(source)
+            items.append(ReindexSourceOut(id=source.id, title=source.title, reindexing=running))
+            if not running:
+                work += self._reindex_workload(repo, source, kinds)
+        waiting = [i for i in items if not i.reindexing]
+        result = estimate(work, self._calibration()) if waiting else None
+        return ReindexOut(
+            needed=bool(items),
+            sources=items,
+            reindexing=any(i.reindexing for i in items),
+            estimate_seconds=result.seconds if result else None,
+            estimate_summary=result.summary if result else None,
+            confirm=result.confirm if result else False,
+        )
+
+    def reindex(self, space_id: str) -> ReindexOut:
+        """Queue a re-index of every source with chunks of an older chunker (not already
+        queued). Each is an ``ingest`` job with its estimate, shown in the queue."""
+        repo = self.repo(space_id)
+        queued = False
+        for source in repo.list_all():
+            kinds = self.outdated(repo, source)
+            if not kinds or self._job_unfinished(source):
+                continue
+            seconds = math.ceil(
+                self._reindex_workload(repo, source, kinds).seconds(rates_from(self._calibration()))
+            )
+            job = self.jobs.enqueue(
+                INGEST_KIND,
+                _title_for_reindex(source.title),
+                space_id=space_id,
+                payload={"source_id": source.id, REINDEX_KEY: True, ESTIMATE_KEY: seconds},
+            )
+            repo.update(source.id, job_id=job.id)  # stays ready: chat keeps using it
+            queued = True
+        if queued:
+            self.pool.notify()
+        return self.reindex_status(space_id)
+
+    def _reindex_workload(
+        self, repo: SourceRepository, source: Source, kinds: set[str]
+    ) -> Workload:
+        locators = [parse_locator(raw) for raw in repo.chunk_locators(source.id)]
+        work = reindex_work(locators, kinds)
+        return Workload(
+            code_chunks=float(work.code_chunks),
+            text_chunks=float(work.text_chunks),
+            fixed_s=JOB_OVERHEAD_S,
+        )
+
+    def _calibration(self) -> Calibration | None:
+        try:
+            return self.calibration()
+        except Exception:
+            logger.warning("Could not read the speed test results", exc_info=True)
+            return None
 
     def delete(self, space_id: str, source_id: str) -> None:
         repo = self.repo(space_id)
@@ -287,6 +400,19 @@ class IngestService:
         source = repo.find(str(ctx.payload.get("source_id") or ""))
         if source is None or source.job_id not in (None, ctx.job_id):
             return  # deleted, or superseded by a newer job
+        if ctx.payload.get(REINDEX_KEY):
+            try:  # a failure leaves the source as it was (the job shows the error)
+                self._reindex(ctx, repo, source)
+            except (JobCancelledError, IngestError):
+                raise
+            except IndexDimensionError as exc:
+                raise fail(errors.EMBEDDING_CHANGED) from exc
+            except Exception:
+                logger.exception("Re-index of source %s failed", source.id)
+                raise
+            finally:
+                self._release_replicas(ctx)
+            return
         try:
             self._run(ctx, repo, source)
         except JobCancelledError:
@@ -300,9 +426,12 @@ class IngestService:
             self._fail_quietly(repo, source, fail(errors.INTERNAL))
             raise
         finally:
-            # Indexing replicas hold GBs; keep them only while more indexing is waiting (D-054).
-            if self.jobs.others_unfinished(INGEST_KIND, ctx.job_id) == 0:
-                self.providers.release_replicas()
+            self._release_replicas(ctx)
+
+    def _release_replicas(self, ctx: JobContext) -> None:
+        # Indexing replicas hold GBs; keep them only while more indexing is waiting (D-054).
+        if self.jobs.others_unfinished(INGEST_KIND, ctx.job_id) == 0:
+            self.providers.release_replicas()
 
     def _fail_quietly(self, repo: SourceRepository, source: Source, exc: IngestError) -> None:
         try:
@@ -330,20 +459,26 @@ class IngestService:
 
         def on_batch(batch: EmbeddedBatch) -> None:
             nonlocal done
+            ctx.stage(None)  # a batch is done: the models are loaded and running
             pending.extend(zip(batch.indices, batch.vectors, strict=True))
             done += len(batch.indices)
             if len(pending) >= WRITE_BATCH:
                 flush()
             ctx.progress(0.4 + 0.55 * done / len(chunks))
 
+        def embedder_for(stream: int) -> Embedder:
+            if not self.providers.ingest_embedder_loaded(stream):
+                ctx.stage("loading_models")  # the first batch of a stream loads its embedder
+            return self.providers.ingest_embedder(stream)
+
         try:
             streams = self.providers.ingest_streams()
             used = embed_in_streams(
                 [c.text for c in chunks],
-                embedder_for=self.providers.ingest_embedder,
+                embedder_for=embedder_for,
                 streams=streams,
                 on_batch=on_batch,
-                guard=self.providers.use.shared,  # waits while calibration measures
+                guard=lambda: self._models(ctx),  # waits while calibration measures
                 check_cancelled=ctx.check_cancelled,
             )
         except ProviderUnavailableError as exc:
@@ -351,6 +486,21 @@ class IngestService:
         if pending:
             flush()
         logger.info("Embedded %d chunks with %d stream(s)", len(chunks), used)
+
+    @contextmanager
+    def _models(self, ctx: JobContext) -> Iterator[None]:
+        """The shared model lock; the job's stage says so while calibration holds it (D-113)."""
+        waited = False
+
+        def on_wait() -> None:
+            nonlocal waited
+            waited = True
+            ctx.stage("waiting_for_calibration")
+
+        with self.providers.use.shared(on_wait=on_wait):
+            if waited:
+                ctx.stage(None)
+            yield
 
     def _run(self, ctx: JobContext, repo: SourceRepository, source: Source) -> None:
         space_id = repo.record.id
@@ -362,7 +512,7 @@ class IngestService:
         old_ids = [c.id for c in repo.chunks(source.id)] if previous is not None else []
         # Trusted again only after this run succeeds (a crash mid-run means a full re-index).
         repo.replace_files(source.id, [])
-        with self.providers.use.shared():  # parsing (Docling, STT) also uses the CPU models
+        with self._models(ctx):  # parsing (Docling, STT) also uses the CPU models
             snapshot, snapshot_at = read_source(
                 self.tools,
                 source,
@@ -393,6 +543,79 @@ class IngestService:
         self._mark_ready(repo, source, snapshot, snapshot_at, len(plan.rows))
         ctx.progress(1.0)
         self._notify_ready(space_id, source.id)
+
+    def _reindex(self, ctx: JobContext, repo: SourceRepository, source: Source) -> None:
+        """Chunk the stored snapshot again with the current chunker (D-106).
+
+        Nothing is read, fetched or parsed again. The source stays ``ready``: the new chunks are
+        embedded before any row changes (vectors without rows are skipped by retrieval), then
+        the rows are swapped in one transaction and the old vectors deleted. Chunks whose text
+        and place did not change keep their id and vector, so old citations of them still open.
+        """
+        ctx.progress(0.0)
+        folder = repo.folder(source.id)
+        stored = read_snapshot_files(folder)
+        if stored is None:
+            raise fail(errors.REINDEX_NO_SNAPSHOT)
+        markdown, data = stored
+        previous = load_previous(repo, source.id, folder) if source.type == "folder" else None
+        files = repo.files(source.id) if source.type == "folder" else []
+        try:
+            reusable = (
+                {path: f.start for path, f in previous.snapshot.files.items()}
+                if previous is not None
+                else None
+            )
+            snapshot = stored_snapshot(markdown, data, files, reusable)
+        except StoredSnapshotError as exc:
+            raise fail(errors.REINDEX_NO_SNAPSHOT) from exc
+        old = repo.chunks(source.id)
+        plan = plan_chunks(
+            snapshot,
+            self.token_counter(),
+            source.id,
+            old_ids=[c.id for c in old],
+            previous=previous,
+            identical=old,
+        )
+        if not plan.rows:
+            raise fail(errors.NO_TEXT)
+        ctx.progress(0.4)
+        ctx.check_cancelled()
+        index = self.indexes.for_space(repo.record.id)
+        indexed = [IndexedChunk(r.id, source.id, search_text(r.text)) for r in plan.new_rows]
+        try:
+            if indexed:
+                self._embed_into(ctx, index, indexed)
+            ctx.check_cancelled()
+            current = repo.find(source.id)
+            if current is None or current.job_id != ctx.job_id:
+                raise JobCancelledError()  # deleted or superseded meanwhile
+            # The swap: from here on chat uses the new chunks.
+            repo.replace_chunks(source.id, plan.rows)
+        except BaseException:
+            try:
+                index.delete_chunks([c.chunk_id for c in indexed])
+            except Exception:
+                logger.warning("Could not remove the new vectors of %s", source.id, exc_info=True)
+            raise
+        index.delete_chunks(plan.stale_ids)
+        index.refresh_text_index()
+        repo.replace_files(source.id, plan.files)
+        stats = {
+            **load_stats(current),
+            "chunks": len(plan.rows),
+            CHUNKERS_STAT: snapshot_chunkers(snapshot),
+        }
+        repo.update(source.id, stats=stats)
+        logger.info(
+            "Re-index of %s: %d chunks, %d embedded, %d removed",
+            source.id,
+            len(plan.rows),
+            len(indexed),
+            len(plan.stale_ids),
+        )
+        ctx.progress(1.0)
 
     def _index(
         self,
@@ -439,6 +662,7 @@ class IngestService:
             **snapshot.stats,
             "chunks": chunk_count,
             "chars": len(snapshot.markdown),
+            CHUNKERS_STAT: snapshot_chunkers(snapshot),  # D-106
         }
         warnings = list(dict.fromkeys(snapshot.warnings))
         if len(snapshot.markdown.strip()) < errors.SHORT_TEXT_CHARS:
@@ -451,7 +675,7 @@ class IngestService:
         values: dict[str, Any] = {
             "status": "ready",
             "stats": stats,
-            "quality_warning": " ".join(warnings) or None,
+            "quality_warning": errors.join_warnings(warnings),
             "snapshot_at": snapshot_at,
             "commit_hash": snapshot.commit_hash,
             "title": title,

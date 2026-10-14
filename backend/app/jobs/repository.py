@@ -11,6 +11,7 @@ from sqlalchemy import Engine, case, func, update
 from sqlmodel import Session, col, select
 
 from app.db.models import Job
+from app.jobs.handlers import JobStage
 from app.timeutil import utc_now_iso
 
 UNFINISHED = ("queued", "running", "paused")
@@ -31,6 +32,26 @@ class JobRepository:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
         self._lock = threading.RLock()
+        # Stages of running jobs (D-113): in memory, since they only describe this process's
+        # threads right now; a restarted app re-runs the job from the start anyway.
+        self._stages: dict[str, JobStage] = {}
+        self._stages_lock = threading.Lock()
+
+    # --- stages ----------------------------------------------------------------------------
+
+    def set_stage(self, job_id: str, stage: JobStage | None) -> None:
+        with self._stages_lock:
+            if stage is None:
+                self._stages.pop(job_id, None)
+            else:
+                self._stages[job_id] = stage
+
+    def stage(self, job: Job) -> JobStage | None:
+        """The stage of ``job`` while it runs; ``None`` otherwise."""
+        if job.status != "running":
+            return None
+        with self._stages_lock:
+            return self._stages.get(job.id)
 
     # --- queries ---------------------------------------------------------------------------
 

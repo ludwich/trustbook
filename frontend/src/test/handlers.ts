@@ -1,5 +1,5 @@
 import { http, HttpResponse } from "msw";
-import { allCapabilities, jobList, overview } from "./fixtures";
+import { allCapabilities, jobList, overview, reindexStatus } from "./fixtures";
 
 /** Baseline API: setup done, nothing running, no spaces. Tests override with server.use(). */
 export function defaultHandlers() {
@@ -32,5 +32,6 @@ export function defaultHandlers() {
     ),
     http.get("*/api/spaces/:sid/conversations", () => HttpResponse.json([])),
     http.get("*/api/spaces/:sid/overview", () => HttpResponse.json(overview())),
+    http.get("*/api/spaces/:sid/reindex", () => HttpResponse.json(reindexStatus())),
   ];
 }

@@ -284,4 +284,6 @@ questions:
       - {file: src/requests/status_codes.py, lines: [85, 85]}
       - {file: src/requests/status_codes.py, lines: [1, 19]}
       - {file: src/requests/status_codes.py, lines: [109, 114]}
+      # Added 2026-10-14 by Ludwig's decision (Gate 5, G3-2): the definition of requests.codes.
+      - {file: src/requests/status_codes.py, lines: [106, 106]}
     must_contain: [too_many_requests]

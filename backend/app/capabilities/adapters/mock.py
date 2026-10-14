@@ -19,6 +19,10 @@ Test hooks (docs/ARCHITECTURE.md, "Test hooks"):
   window (D-091): the first sentence of a neighbour's line with a word no numbered chunk has,
   citing ``c1``. The window is not a chunk, so the sentence fails verification and is removed.
   Without a window nothing is added.
+- A question containing ``TB-GARBLED`` gets the reply shape of eval question ref-near-05
+  (D-117): the answer's sentences, then a sentence that is only :data:`GARBLED_FRAGMENT` citing
+  the last sentence's chunk, then the answer's sentences again. Layer 3 drops the fragment and
+  merges the repeats, so the answer is shown once.
 
 The mock never quotes the outline or a window otherwise: answers and judge verdicts read only the
 numbered chunks (:func:`~app.chat.prompt.parse_prompt` returns both separately).
@@ -31,7 +35,7 @@ numbered chunks (:func:`~app.chat.prompt.parse_prompt` returns both separately).
   words with the idea and branch, citing it; without such a chunk, one uncited suggestion.
   ``TB-UNSUPPORTED`` in the idea adds :data:`UNSUPPORTED_SENTENCE` citing ``c1`` (it fails
   verification and is removed). A last answer containing ``TB-BRANCH`` adds one new branch under
-  the answered one; one containing "risk" adds a risk.
+  the answered one; one containing "risk" adds a risk about the answered branch.
 - Judge prompts (schema with ``verdicts``): a statement is supported when its cited lines share
   at least two content words with it; each cited chunk's whole line range is the evidence.
 - :class:`MockSearchAdapter`: the ``mock`` web-search provider, fixed results for any query.
@@ -65,6 +69,8 @@ _OUTLINE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 WINDOW_FACT_TRIGGER = "TB-WINDOW-FACT"
 _WINDOW_LINE = re.compile(r"^\s+\[[^\]]*\]\s+(.*)$")
 _SPEAKER = re.compile(r"^[^\s:][^:]{0,38}:\s+")
+GARBLED_TRIGGER = "TB-GARBLED"
+GARBLED_FRAGMENT = "}]}]}```json{"
 JUDGE_MIN_SHARED = 2
 BRANCH_TRIGGER = "TB-BRANCH"
 SEEDS4_TRIGGER = "TB-SEEDS4"
@@ -82,13 +88,14 @@ def _overlap(terms: set[str], text: str) -> int:
 
 
 def _body(text: str) -> str:
-    """A chunk's text without a code chunk's ``File: … (lines a-b)`` header line.
+    """A chunk's text without a code chunk's ``File: … (lines a-b)`` header line or a web
+    chunk's ``Section: …`` line (D-105).
 
     A model quotes the code, not the header; quoting it put line numbers into the answer, which
     the judge's anchor check (correctly) finds in no code line.
     """
     first, sep, rest = text.partition("\n")
-    return rest if sep and first.startswith("File: ") else text
+    return rest if sep and first.startswith(("File: ", "Section: ")) else text
 
 
 def _best_sentence(chunk: PromptChunk, terms: set[str]) -> str:
@@ -161,6 +168,11 @@ def grounded_answer(
         quoted = window_only_sentence(chunks, transcript)
         if quoted is not None:
             sentences.append({"text": quoted, "chunk_ids": [chunks[0].label]})
+    if GARBLED_TRIGGER in question:
+        # ref-near-05 (D-117): the answer, a syntax fragment citing the last sentence's chunk,
+        # then the answer again.
+        fragment = {"text": GARBLED_FRAGMENT, "chunk_ids": list(sentences[-1]["chunk_ids"])}
+        sentences = [*sentences, fragment, *(dict(s) for s in sentences)]
     return {"sentences": sentences}
 
 
@@ -277,7 +289,10 @@ def ideation_turn(prompt: str) -> dict[str, Any]:
     if BRANCH_TRIGGER in answer and parts.last_label:
         topic = truncate(answer.replace(BRANCH_TRIGGER, " "), 40) or "the answer"
         branches.append({"title": f"Follow-up on {topic}", "parent": parts.last_label})
-    risks = [f"Raised in an answer: {truncate(answer, 80)}"] if "risk" in answer.lower() else []
+    risks: list[dict[str, str]] = []
+    if "risk" in answer.lower():
+        text = f"Raised in an answer: {truncate(answer, 80)}"
+        risks.append({"text": text, "branch": parts.last_label or ""})
     return {
         "question": question,
         "recommendation": {"sentences": sentences},

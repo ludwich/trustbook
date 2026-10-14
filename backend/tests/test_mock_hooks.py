@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from app.capabilities.adapters.base import AdapterError
 from app.capabilities.adapters.factory import build_search_adapter
 from app.capabilities.adapters.mock import (
+    GARBLED_FRAGMENT,
     SEEDS4_BRANCH,
     SEEDS4_TRIGGER,
     UNSUPPORTED_SENTENCE,
@@ -77,6 +78,37 @@ def test_tb_unsupported_adds_a_failing_sentence_and_the_answer_is_partially_veri
     assert isinstance(outcome, Answered)
     assert outcome.badge == "partially_verified"
     assert outcome.removed == [UNSUPPORTED_SENTENCE]
+
+
+def test_tb_garbled_reply_is_shown_once_without_the_fragment() -> None:
+    """D-117, ref-near-05's shape through the whole pipeline with the mock adapter: the
+    fragment is dropped before verification, the repeats are merged, nothing is removed."""
+    mock = MockChatAdapter()
+    question = "How are proxies configured? TB-GARBLED"
+    reply = json.loads(
+        mock.chat(answer_messages(question, [PROSE]), json_schema=ANSWER_SCHEMA).text
+    )
+    answer_sentence = {"text": PROSE.text, "chunk_ids": ["c1"]}
+    fragment = {"text": GARBLED_FRAGMENT, "chunk_ids": ["c1"]}
+    assert reply["sentences"] == [answer_sentence, fragment, answer_sentence]
+
+    grounding = FakeGrounding()
+    found = Retrieval(chunks=[PROSE], ranked=[PROSE], source_ids=["s1"])
+    outcome = answer(
+        question,
+        retrieve=lambda _q: found,
+        chat_adapter=MockChatAdapter,
+        refuse_threshold=0.15,
+        verifier=Verifier(grounding.score, threshold=0.5),
+    )
+    assert isinstance(outcome, Answered)
+    assert [s.text for s in outcome.sentences] == [PROSE.text]
+    assert outcome.badge == "verified" and outcome.removed == []
+    checked = {hypothesis for call in grounding.calls for _premise, hypothesis in call}
+    assert checked == {PROSE.text}  # the fragment never reached the checker
+    assert outcome.diagnostics.syntax_fragments == [GARBLED_FRAGMENT]
+    assert outcome.diagnostics.duplicate_sentences == 1
+    assert len(outcome.diagnostics.sentence_scores) == 1
 
 
 def test_mock_judge_supports_two_shared_words_and_names_the_lines() -> None:

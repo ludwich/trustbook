@@ -35,7 +35,9 @@ class TrustbookError(Exception):
 class ApiError(TrustbookError):
     """An API call failed: an HTTP error status, or a response that is not JSON.
 
-    ``http_status`` is the response's status code (None: no response, or a 2xx that was unusable).
+    ``http_status`` is the status code of the response that failed: the API's, or for an answer
+    stream whose model endpoint failed, that endpoint's (e.g. 401 for a rejected key). None only
+    when no response was received.
     """
 
     def __init__(self, message: str, http_status: int | None = None) -> None:
@@ -187,7 +189,17 @@ def read_json(resp: httpx.Response, what: str, *, empty_ok: bool = False) -> Any
     try:
         return resp.json()
     except ValueError as exc:
-        raise ApiError(f"{what}: response is not JSON") from exc
+        raise ApiError(f"{what}: response is not JSON", resp.status_code) from exc
+
+
+def send_request(
+    client: httpx.Client, method: str, url: str, what: str, **kwargs: Any
+) -> httpx.Response:
+    """Send one request; :class:`ApiUnreachableError` when there is no connection."""
+    try:
+        return client.request(method, url, **kwargs)
+    except httpx.TransportError as exc:
+        raise ApiUnreachableError(f"{what}: {type(exc).__name__}: {exc}") from exc
 
 
 def request_json(
@@ -198,11 +210,7 @@ def request_json(
     :raises ApiUnreachableError: no connection (refused, DNS, timeout).
     :raises ApiError: an error status or an unusable body.
     """
-    try:
-        resp = client.request(method, url, **kwargs)
-    except httpx.TransportError as exc:
-        raise ApiUnreachableError(f"{what}: {type(exc).__name__}: {exc}") from exc
-    return read_json(resp, what, empty_ok=empty_ok)
+    return read_json(send_request(client, method, url, what, **kwargs), what, empty_ok=empty_ok)
 
 
 class TrustbookClient:
@@ -219,20 +227,29 @@ class TrustbookClient:
         self.http = client or httpx.Client(
             base_url=self.base_url, timeout=DEFAULT_TIMEOUT, trust_env=False
         )
+        # Status of the last response, for errors about its body's shape (``http_status``).
+        self._last_status: int | None = None
 
     def close(self) -> None:
         if self._owned:
             self.http.close()
 
-    def request(self, method: str, path: str, what: str, **kwargs: Any) -> Any:
-        return request_json(self.http, method, path, what, **kwargs)
+    def request(
+        self, method: str, path: str, what: str, *, empty_ok: bool = False, **kwargs: Any
+    ) -> Any:
+        resp = send_request(self.http, method, path, what, **kwargs)
+        self._last_status = resp.status_code
+        return read_json(resp, what, empty_ok=empty_ok)
+
+    def _unexpected(self, what: str) -> ApiError:
+        return ApiError(f"{what}: unexpected response", self._last_status)
 
     # --- spaces --------------------------------------------------------------------------------
 
     def spaces(self) -> list[dict[str, Any]]:
         data = self.request("GET", "/api/spaces", "list spaces")
         if not isinstance(data, list):
-            raise ApiError("list spaces: expected a list")
+            raise ApiError("list spaces: expected a list", self._last_status)
         return [s for s in data if isinstance(s, dict)]
 
     def space(self, key: str) -> dict[str, Any]:
@@ -256,7 +273,7 @@ class TrustbookClient:
     def sources(self, space_id: str) -> list[dict[str, Any]]:
         data = self.request("GET", f"/api/spaces/{space_id}/sources", "list sources")
         if not isinstance(data, list):
-            raise ApiError("list sources: expected a list")
+            raise ApiError("list sources: expected a list", self._last_status)
         return [s for s in data if isinstance(s, dict)]
 
     def source(self, space_id: str, source_id: str) -> dict[str, Any]:
@@ -290,7 +307,7 @@ class TrustbookClient:
         data = self.request("POST", url, "web search", json={"query": query, "limit": limit})
         results = data.get("results") if isinstance(data, dict) else None
         if not isinstance(results, list):
-            raise ApiError("web search: unexpected response")
+            raise self._unexpected("web search")
         return [r for r in results if isinstance(r, dict)]
 
     def add_from_search(self, space_id: str, items: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -319,7 +336,7 @@ class TrustbookClient:
             "create conversation",
         )
         if "id" not in data:
-            raise ApiError("create conversation: unexpected response")
+            raise self._unexpected("create conversation")
         return str(data["id"])
 
     def jobs(self) -> dict[str, Any]:
@@ -330,14 +347,12 @@ class TrustbookClient:
         what = "read gate log"
         return self._list(self.request("GET", url, what, params={"limit": limit}), what)
 
-    @staticmethod
-    def _object(data: Any, what: str) -> dict[str, Any]:
+    def _object(self, data: Any, what: str) -> dict[str, Any]:
         if not isinstance(data, dict):
-            raise ApiError(f"{what}: unexpected response")
+            raise self._unexpected(what)
         return data
 
-    @staticmethod
-    def _list(data: Any, what: str) -> list[dict[str, Any]]:
+    def _list(self, data: Any, what: str) -> list[dict[str, Any]]:
         if not isinstance(data, list):
-            raise ApiError(f"{what}: unexpected response")
+            raise self._unexpected(what)
         return [item for item in data if isinstance(item, dict)]

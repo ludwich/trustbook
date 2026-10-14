@@ -335,3 +335,99 @@ def meeting_specs(*, tokens: int | None = None) -> list[Spec]:
         turn(n, text, speaker=speaker, tokens=tokens)
         for n, (speaker, text) in enumerate(MEETING_TEXTS)
     ]
+
+
+# --- a status_codes.py-like file: a split data table and the function reading it (D-119) ---------
+
+STATUS = "src/requests/status_codes.py"
+STATUS_MODULE = module_key(STATUS)
+
+DOCSTRING = (
+    '"""\nThe ``codes`` object defines a mapping from common names for HTTP statuses\n'
+    "to their numerical codes, accessible either as attributes or as dictionary\nitems.\n\n"
+    ">>> requests.codes['temporary_redirect']\n307\n>>> requests.codes.teapot\n418\n"
+    '"""\n\nfrom .structures import LookupDict'
+)
+TABLE_HEAD = (
+    '_codes = {\n    # Informational.\n    100: ("continue",),\n    101: ("switching_protocols",),'
+)
+TABLE_429 = (
+    '    428: ("precondition_required", "precondition"),\n'
+    '    429: ("too_many_requests", "too_many"),\n'
+    '    431: ("header_fields_too_large", "fields_too_large"),'
+)
+CODES = 'codes = LookupDict(name="status_codes")'
+INIT = (
+    "def _init():\n    for code, titles in _codes.items():\n        for title in titles:\n"
+    '            setattr(codes, title, code)\n            if not title.startswith(("\\\\", "/")):\n'
+    "                setattr(codes, title.upper(), code)"
+)
+DOC = 'def doc(code):\n    found = ", ".join(f"``{n}``" for n in _codes[code])\n    return found'
+
+
+def status_structure(head: bool = False, defines: tuple[str, ...] = ()) -> Structure:
+    return Structure("module", STATUS, None, head, defines=defines)
+
+
+def table_part(ordinal: int, part: int, start: int, end: int, body: str, tokens: int) -> Spec:
+    """A part of the split ``_codes`` literal: header ``_codes (part N)``, locator kind data."""
+    text = f"File: {STATUS} · _codes (part {part}) (lines {start}-{end})\n{body}"
+    locator = {"file": STATUS, "start_line": start, "end_line": end, "kind": "data"}
+    locator["symbol"] = "_codes"
+    defines = ("_codes",) if part == 1 else ()
+    return Spec(ordinal, text, locator, STATUS_MODULE, status_structure(defines=defines), tokens)
+
+
+def status_specs(*, init_tokens: int = 120, doc_tokens: int = 60) -> list[Spec]:
+    return [
+        code(
+            0,
+            None,
+            "module",
+            1,
+            21,
+            DOCSTRING,
+            parent_key=STATUS_MODULE,
+            structure=status_structure(head=True),
+            file=STATUS,
+            tokens=150,
+        ),
+        table_part(1, 1, 23, 40, TABLE_HEAD, 140),
+        table_part(2, 6, 77, 85, TABLE_429, 130),
+        code(
+            3,
+            None,
+            "module",
+            104,
+            106,
+            CODES,
+            parent_key=STATUS_MODULE,
+            structure=status_structure(defines=("codes",)),
+            file=STATUS,
+            tokens=20,
+        ),
+        code(
+            4,
+            "_init",
+            "function",
+            109,
+            125,
+            INIT,
+            parent_key=STATUS_MODULE,
+            structure=status_structure(defines=("_init",)),
+            file=STATUS,
+            tokens=init_tokens,
+        ),
+        code(
+            5,
+            "doc",
+            "function",
+            128,
+            131,
+            DOC,
+            parent_key=STATUS_MODULE,
+            structure=status_structure(defines=("doc",)),
+            file=STATUS,
+            tokens=doc_tokens,
+        ),
+    ]

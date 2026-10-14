@@ -7,8 +7,9 @@ import json
 
 import pytest
 
-from app.chat.pipeline import Answered, Refused, answer, failed_sentences
+from app.chat.pipeline import Answered, Refused, answer, failed_sentences, joint_cover
 from app.chat.prompt import (
+    ANSWER_SYSTEM,
     FEEDBACK_HEADING,
     FEEDBACK_TASK,
     FailedSentence,
@@ -534,13 +535,16 @@ def test_the_feedback_names_each_missing_name_and_the_chunks_that_have_it() -> N
         FailedSentence("It is `rate_limited`.", ("c2",), (("rate_limited", ()),)),
         FailedSentence('He said "hi" here.', ("c1", "c2")),
     ]
-    assert failure_reason(failed[0]) == "`requests.codes` is not in c2; it is in c1"
+    # D-120: each reason names the chunk to add, so the model can cite it as well.
+    assert failure_reason(failed[0]) == (
+        "`requests.codes` is not in c2; it is in c1, so cite c1 as well"
+    )
     assert failure_reason(failed[1]) == "`rate_limited` is in none of the chunks"
     assert regeneration_feedback(failed) == "\n".join(
         [
             FEEDBACK_HEADING,
             '1. "Use `requests.codes.too_many`." (cited c2): `requests.codes` is not in c2; it is '
-            "in c1.",
+            "in c1, so cite c1 as well.",
             '2. "It is `rate_limited`." (cited c2): `rate_limited` is in none of the chunks.',
             "3. \"He said 'hi' here.\" (cited c1, c2): not supported by the cited chunks.",
             FEEDBACK_TASK,
@@ -570,10 +574,26 @@ def test_failed_sentences_find_the_context_chunks_holding_the_missing_names() ->
             SentenceCheck(0.9, (0.9,)),
         ]
     )
-    # Layer 5's test: every part of requests.codes.too_many is in neither chunk alone.
+    # Layer 5's test: every part of requests.codes.too_many is in neither chunk alone, but c2
+    # (too_many) with c1 (requests.codes) has every part: the feedback says to cite c1 too (D-120).
     assert failed_sentences(sentences, checked, chunks) == [
-        FailedSentence(sentences[0].text, ("c2",), (("requests.codes.too_many", ()),))
+        FailedSentence(
+            sentences[0].text,
+            ("c2",),
+            (("requests.codes.too_many", ("c1",)),),
+            ("requests.codes.too_many",),
+        )
     ]
+    # A part no chunk has: no cover, "in none of the chunks" as before.
+    checked = Checked(
+        [
+            SentenceCheck(0.1, (0.1,), passed=False, missing=("requests.codes.too_few",)),
+            SentenceCheck(0.9, (0.9,)),
+        ]
+    )
+    assert failed_sentences(sentences, checked, chunks)[0].missing == (
+        ("requests.codes.too_few", ()),
+    )
     checked = Checked(
         [
             SentenceCheck(0.1, (0.1,), passed=False, missing=("requests.codes",)),
@@ -581,6 +601,18 @@ def test_failed_sentences_find_the_context_chunks_holding_the_missing_names() ->
         ]
     )
     assert failed_sentences(sentences, checked, chunks)[0].missing == (("requests.codes", ("c1",)),)
+    # A name the cited chunk does hold (the code judge's ``absent``: its evidence lines lacked it)
+    # is left out: no other chunk is suggested, the reason falls back to "not supported".
+    checked = Checked(
+        [
+            SentenceCheck(0.1, (0.1,), passed=False, missing=("too_many",)),
+            SentenceCheck(0.9, (0.9,)),
+        ]
+    )
+    (only,) = failed_sentences(sentences, checked, chunks)
+    assert (only.missing, only.combined) == ((), ())
+    assert failure_reason(only) == "not supported by the cited chunks"
+    assert joint_cover("too_many", ("c2",), chunks) == ()
 
 
 QUESTION = "Which names compare equal to HTTP 429?"
@@ -613,10 +645,69 @@ def test_the_regeneration_gets_the_feedback_and_its_citations_are_checked_as_giv
     outcome = run(chat, {})
     assert isinstance(outcome, Refused) and outcome.refusal.reason == "unsupported"
     user = chat.calls[1]["messages"][1]["content"]
-    assert f'1. "{first}" (cited c2): `requests.codes.teapot` is not in c2; it is in c1.' in user
+    assert (
+        f'1. "{first}" (cited c2): `requests.codes.teapot` is not in c2; it is in c1, so cite c1 '
+        "as well." in user
+    )
     assert [f.model_dump() for f in outcome.diagnostics.failed_sentences] == [
         {"text": first, "reason": "`requests.codes.teapot` is not in the cited chunks"}
     ]
+
+
+def test_the_feedback_says_which_chunks_to_add_for_one_several_or_joint_places() -> None:
+    """D-120: one place, several places (any one will do), places that only together with the
+    cited chunks hold every part of a dotted name."""
+    several = FailedSentence("Use `Session`.", ("c3",), (("Session", ("c1", "c2", "c4", "c5")),))
+    assert failure_reason(several) == (
+        "`Session` is not in c3; it is in c1, c2 and c4, so cite one of them as well"
+    )
+    joint = FailedSentence(
+        "Use `requests.codes.too_many`.",
+        ("c2",),
+        (("requests.codes.too_many", ("c1",)),),
+        ("requests.codes.too_many",),
+    )
+    assert failure_reason(joint) == (
+        "`requests.codes.too_many` is not in c2 alone; c2 and c1 together have every part of it, "
+        "so cite c1 as well"
+    )
+    pair = FailedSentence("Use `a.b.c`.", ("c2",), (("a.b.c", ("c1", "c3")),), ("a.b.c",))
+    assert failure_reason(pair) == (
+        "`a.b.c` is not in c2 alone; c2, c1 and c3 together have every part of it, so cite c1 "
+        "and c3 as well"
+    )
+
+
+def test_the_answer_rules_ask_for_every_chunk_a_sentence_combines() -> None:
+    assert (
+        "A sentence that uses names or facts from more than one chunk must list each of those "
+        'chunks, for example ["c1", "c3"]' in ANSWER_SYSTEM
+    )
+    assert FEEDBACK_TASK.endswith(
+        "A sentence that uses names from several chunks cites all of them."
+    )
+
+
+def test_ref_near_10_shape_the_regeneration_that_adds_the_named_chunk_passes() -> None:
+    """G3-2: the first reply cites only the table for a sentence naming ``requests.codes``; the
+    feedback names c1 (the docstring) and the second reply, citing both, passes layer 5 as given.
+    """
+    first = "`requests.codes.too_many` is a name for 429."
+    chat = ScriptedChat(
+        answer_json((first, ["c2"])),
+        answer_json((first, ["c2", "c1"])),
+    )
+    outcome = run(chat, {})
+    user = chat.calls[1]["messages"][1]["content"]
+    assert (
+        "`requests.codes.too_many` is not in c2 alone; c2 and c1 together have every part of it, "
+        "so cite c1 as well." in user
+    )
+    assert isinstance(outcome, Answered) and outcome.badge == "verified"
+    assert outcome.diagnostics.regenerated is True
+    (sentence,) = outcome.sentences
+    assert {c.chunk_id for c in sentence.citations} == {"d", "t"}
+    assert outcome.diagnostics.failed_sentences == []
 
 
 def test_a_partially_verified_answer_lists_its_failed_sentence_capped() -> None:

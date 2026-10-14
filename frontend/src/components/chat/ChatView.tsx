@@ -60,6 +60,7 @@ function AssistantMessage({
         <RefusalCard
           message={message.content.text ?? sentences.map((s) => s.text).join(" ")}
           suggestion={message.content.suggestion}
+          reason={message.refusal_reason}
         />
       ) : plain ? (
         <p className="leading-relaxed whitespace-pre-wrap">{plain}</p>
@@ -81,7 +82,11 @@ function StreamingAnswer({ state, onRetry }: { state: StreamState; onRetry: () =
         {state.refusal && (
           <>
             <AnswerBadge badge="refused" />
-            <RefusalCard message={state.refusal.message} suggestion={state.refusal.suggestion} />
+            <RefusalCard
+              message={state.refusal.message}
+              suggestion={state.refusal.suggestion}
+              reason={state.refusal.reason}
+            />
           </>
         )}
         {state.sentences.length > 0 && <CitedText sentences={state.sentences} />}

@@ -47,7 +47,7 @@ BANNED_PARTS = ("outline", "parent_key", "expansion", "promot")
 # Transcript windows (D-091). Not the bare word "window": grounding has its own support windows.
 BANNED_PARTS += ("transcript_window", "transcriptwindow", "window_tokens")
 BANNED_MODULES = ("app.retrieval.parents", "app.chunking.structure")
-PIPELINE_HELPERS = ("check_sentences", "failed_sentences")
+PIPELINE_HELPERS = ("check_sentences", "failed_sentences", "joint_cover", "_holds", "_plain")
 
 
 def _banned(name: str) -> bool:

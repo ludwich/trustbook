@@ -1,4 +1,4 @@
-import type { Source, SourceGroup, SourceStatus } from "@/api/types";
+import type { JobStage, Source, SourceGroup, SourceStatus } from "@/api/types";
 import { formatClock, plural } from "@/lib/format";
 
 export const GROUP_ORDER: SourceGroup[] = ["documents", "transcripts", "web", "code"];
@@ -16,6 +16,12 @@ export const STATUS_TEXT: Record<SourceStatus, string> = {
   indexing: "Indexing",
   ready: "Ready",
   failed: "Failed",
+};
+
+/** Shown instead of "Reading…" while a job cannot make progress yet (D-113). */
+export const STAGE_TEXT: Record<JobStage, string> = {
+  waiting_for_calibration: "Waiting for calibration",
+  loading_models: "Loading models",
 };
 
 export const TYPE_LABELS: Record<Source["type"], string> = {
@@ -79,19 +85,18 @@ export function groupChecked(sources: Source[]): boolean | "mixed" {
 const SECRETS_SENTENCE = /\b\d+\s+files?\s+skipped:\s*possible secrets\.?/gi;
 
 /**
- * The quality warning to show under a source. When the source has skipped secrets, the backend's
- * "N files skipped: possible secrets." sentence is dropped here because the row shows it once,
- * as a button that opens the report (G4).
+ * The quality warnings to show under a source, one per problem (G4-4; an older backend sends one
+ * string, shown as one line). When the source has skipped secrets, the backend's "N files skipped:
+ * possible secrets." sentence is dropped here because the row shows it once, as a button that
+ * opens the report (G4).
  */
-export function visibleQualityWarning(source: Source): string | null {
-  const warning = source.quality_warning;
-  if (!warning) return null;
-  if (!(source.stats.skipped_secrets && source.stats.skipped_secrets > 0)) return warning;
-  const rest = warning
-    .replace(SECRETS_SENTENCE, "")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-  return rest || null;
+export function visibleQualityWarnings(source: Source): string[] {
+  const warnings =
+    source.quality_warnings ?? (source.quality_warning ? [source.quality_warning] : []);
+  const secrets = (source.stats.skipped_secrets ?? 0) > 0;
+  return warnings
+    .map((w) => (secrets ? w.replace(SECRETS_SENTENCE, "") : w).replace(/\s{2,}/g, " ").trim())
+    .filter(Boolean);
 }
 
 /** First 7 characters of a commit hash, the way git shows it. */

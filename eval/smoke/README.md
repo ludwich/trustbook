@@ -200,3 +200,42 @@ used. If your saved chat settings have an API key, an endpoint on another server
 Trustbook would delete the key (keys never travel to another host), and the runner could not restore
 it. `--compare` lists the questions whose outcome differs and whether their retrieval was the same
 (then the model made the difference) or different (then the pipeline or the index did).
+
+## Gate 3 with a second model family, in one command (G3-3)
+
+`--also-model NAME` asks the same questions again with a comparison model after the main run, in the
+same space and with the same settings, and adds its numbers to the same report: a side-by-side row per
+model (precision, correct refusals, false refusals docs / code / multi, p50 / p95, cited ranges valid)
+and a section with the comparison model's metrics and questions. They are **reported, not a
+criterion**: the pass/fail verdicts and the exit code come from the main model only. The saved chat
+settings are restored afterwards, also after an error or Ctrl-C.
+
+```sh
+uv run --project backend python eval/runner.py \
+  --base-url http://localhost:8484 \
+  --space "requests smoke" \
+  --setup eval/smoke/corpus.yaml \
+  --questions eval/smoke/questions.yaml \
+  --questions eval/smoke/refusal.yaml \
+  --report gate-3.md \
+  --min-precision 0.9 --min-refusal 0.95 \
+  --max-false-refusals-code 1 \
+  --code-root ~/trustbook-eval/requests --min-ranges-valid 1.0 \
+  --max-p95 60 \
+  --also-model <second-model> --also-endpoint http://192.168.155.52:8080/v1
+```
+
+In the container (the Gate 3 command in `docs/GATES.md`), add the same two options:
+`docker compose exec app python /app/eval/runner.py … --max-p95 60 --also-model <second-model>`.
+Leave out `--also-endpoint` when the comparison model is served by the same endpoint as the main
+model (for example a llama-server router or llama-swap that loads models by name). `--also-model` can
+be repeated. A comparison model whose endpoint test fails, or a Ctrl-C during the comparison, still
+writes the main report with the comparison marked `failed` or `interrupted` (see `eval/format.md`,
+"Comparison models in the same run").
+
+On a single-GPU llama-server a model switch unloads one model and loads the next, which can take
+minutes. The runner waits for it after every switch (`--chat-model`, each `--also-model`), retrying
+the endpoint test and logging `waiting for NAME to load on the chat server (Ns)`, for up to
+`--model-load-timeout` seconds (default 900). A model that has not loaded by then is reported as
+`failed: the chat server did not load NAME within N s`; the main result is unchanged. A rejected key or
+an unknown model fails at once (see `eval/format.md`, "Waiting for a model to load").

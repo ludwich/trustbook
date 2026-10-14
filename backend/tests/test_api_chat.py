@@ -134,6 +134,7 @@ def test_grounded_answer_streams_and_is_persisted(env: Env) -> None:
         "sentences": [{"text": sentence["text"], "citations": [citation]}],
     }
     assert message["removed_sentences"] == []
+    assert message["refusal_reason"] is None  # answers carry no refusal reason (D-118)
     diagnostics = message["diagnostics"]
     assert diagnostics["sentence_scores"] == [1.0] and diagnostics["regenerated"] is False
     assert diagnostics["top_rerank"] > 0
@@ -169,6 +170,7 @@ def test_low_score_question_is_refused_before_generating(
     }
     message = events[2][1]["message"]
     assert message["badge"] == "refused"
+    assert message["refusal_reason"] == "not_in_sources"  # stored with the message (D-118)
     assert message["content"]["text"] == "Not in your sources"
     assert message["content"]["suggestion"] == refused["suggestion"]
     assert message["content"]["sentences"] == [] and message["sources_used"] == []
@@ -241,6 +243,40 @@ def test_model_with_no_supported_sentences_is_refused(
     monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
     events = env.ask(env.conversation(), "How are proxies configured?")
     assert events[-2][1]["reason"] == "invalid_output" and len(chat.calls) == 2
+    assert events[-1][1]["message"]["refusal_reason"] == "invalid_output"
+
+
+def test_refusal_reason_survives_a_reload_and_old_refusals_still_read(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-118 (G3-2): the UI after a reload and the CLI tell a verification refusal from a
+    not-in-sources one by ``refusal_reason``; refusals stored before it have none."""
+    add_chunk(env.engine, env.index, add_source(env.engine, "Guide"), GUIDE)
+    cid = env.conversation()
+    chat = ScriptedChat(
+        answer_json(("Made-up fact.", ["c1"])), answer_json(("Another invention.", ["c1"]))
+    )
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: chat)
+    unsupported = env.ask(cid, "How are proxies configured?")[-1][1]["message"]
+    monkeypatch.setattr(env.services, "chat_adapter", lambda: ScriptedChat('{"sentences": []}'))
+    missing = env.ask(cid, "How are proxies configured?")[-1][1]["message"]
+    assert (unsupported["refusal_reason"], missing["refusal_reason"]) == (
+        "unsupported",
+        "not_in_sources",
+    )
+    assert unsupported["content"]["text"] == "Couldn't verify an answer"
+    assert missing["content"]["text"] == "Not in your sources"
+
+    # A refusal stored before migration 007: no reason, its stored title and suggestion as before.
+    with env.engine.begin() as conn:
+        conn.exec_driver_sql(
+            "UPDATE messages SET refusal_reason = NULL WHERE id = ?", (missing["id"],)
+        )
+    history = env.client.get(env.url(f"/conversations/{cid}/messages")).json()
+    assert [m["refusal_reason"] for m in history] == [None, "unsupported", None, None]
+    assert history[1] == unsupported
+    assert history[3]["badge"] == "refused"
+    assert history[3]["content"] == missing["content"]
 
 
 def test_endpoint_failure_becomes_an_error_event(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:

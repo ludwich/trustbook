@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from app.db.engine import get_engine
-from app.db.migrate import MIGRATIONS_ROOT, migrate
+from app.db.migrate import MIGRATIONS_ROOT, latest_version, migrate
 from app.ideation.repository import (
     MAX_RISKS,
     AskedQuestion,
@@ -47,7 +47,7 @@ def test_migration_006_upgrades_existing_rows(tmp_path: Path) -> None:
             "INSERT INTO ideation_nodes (id, session_id, title, created_at, updated_at) "
             "VALUES ('n', 's', 'Branch', 't', 't')"
         )
-    assert migrate(db, "space") == 6
+    assert migrate(db, "space") == latest_version("space") >= 6
     session = IdeationStore(get_engine(db)).get("s")
     assert session.risks == [] and session.brief_at is None
     node = session.nodes[0]
@@ -94,6 +94,61 @@ def test_risks_are_deduplicated_and_capped(store: IdeationStore) -> None:
     store.apply_turn(sid, None, None, [], risks)
     stored = store.get(sid).risks
     assert len(stored) == MAX_RISKS and stored[0].text == "Risk 0"
+
+
+def test_normalised_repeats_on_the_same_branch_are_not_added(store: IdeationStore) -> None:
+    """D-116: lower case, punctuation and whitespace are ignored, per branch (None: general);
+    near-duplicates in other words stay (no fuzzy matching)."""
+    sid = store.create("Idea").id
+    store.apply_turn(sid, None, None, [], [Risk(text="Infinite retries may hang.", node_id="r")])
+    store.apply_turn(
+        sid,
+        None,
+        None,
+        [],
+        [
+            Risk(text="infinite  retries, may hang", node_id="r"),  # same branch: dropped
+            Risk(text="Infinite retries may hang!", node_id="p"),  # other branch: kept
+            Risk(text="Infinite retries with no delay may hang.", node_id="r"),  # other words
+        ],
+    )
+    store.apply_turn(
+        sid,
+        None,
+        None,
+        [],
+        [Risk(text="No auth plan.", node_id=None), Risk(text="no auth plan", node_id=None)],
+    )
+    assert [(r.text, r.node_id) for r in store.get(sid).risks] == [
+        ("Infinite retries may hang.", "r"),
+        ("Infinite retries may hang!", "p"),
+        ("Infinite retries with no delay may hang.", "r"),
+        ("No auth plan.", None),
+    ]
+
+
+def test_branch_source_is_stored_but_not_returned(tmp_path: Path) -> None:
+    db = tmp_path / "space.db"
+    migrate(db, "space")
+    store = IdeationStore(get_engine(db))
+    sid = store.create("Idea").id
+    risks = [
+        Risk(text="Storms", node_id="a", branch_source="label"),
+        Risk(text="Cost", branch_source="unknown"),
+        Risk(text="Old"),
+    ]
+    store.apply_turn(sid, None, None, [], risks)
+    session = store.get(sid)
+    assert [r.branch_source for r in session.risks] == ["label", "unknown", None]
+    assert session.model_dump()["risks"] == [
+        {"text": "Storms", "node_id": "a"},
+        {"text": "Cost", "node_id": None},
+        {"text": "Old", "node_id": None},
+    ]
+    with sqlite3.connect(db) as conn:
+        raw = conn.execute("SELECT risks FROM ideation_sessions WHERE id = ?", (sid,)).fetchone()
+    assert '"branch_source": "label"' in raw[0] and '"branch_source": "unknown"' in raw[0]
+    assert raw[0].count("branch_source") == 2
 
 
 def test_delete_removes_the_tree(store: IdeationStore) -> None:

@@ -23,6 +23,7 @@ the prompt forbids stating source facts in them.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -52,6 +53,7 @@ from app.ideation.schemas import (
     RecommendationBadge,
     RecommendationSentence,
     Risk,
+    RiskBranchSource,
 )
 from app.retrieval.service import Retrieval, RetrievedChunk
 
@@ -276,5 +278,44 @@ def turn(
         if context.last is not None
         else []
     )
-    risks = [Risk(text=r, node_id=last_id) for r in parsed.risks] if context.last else []
+    risks = risks_of(parsed.risks, context.nodes) if context.last is not None else []
     return TurnResult(asked, branches, risks)
+
+
+# A map label in prose: [n5], (n5) or a bare lower-case n5 (an upper-case bare "N2" may be a
+# real term, so only the prompt's own form is read bare).
+_TEXT_LABEL = re.compile(r"\[\s*(n\d+)\s*\]|\(\s*(n\d+)\s*\)|\b(n\d+)\b", re.IGNORECASE)
+
+
+def name_labels(text: str, titles: Mapping[str, str]) -> str:
+    """``text`` with each map label that names a branch (``titles``: label → title) replaced by
+    the branch title in quotes (D-116): labels are renumbered as the map grows, so a stored
+    "as requested in n5" would later point at another branch. Other text is left as it is."""
+
+    def title(match: re.Match[str]) -> str:
+        bracketed = match.group(1) or match.group(2)
+        bare = match.group(3)
+        if bare is not None and not bare.islower():
+            return match.group(0)
+        label = (bracketed or bare).lower()
+        return f"“{titles[label]}”" if label in titles else match.group(0)
+
+    return " ".join(_TEXT_LABEL.sub(title, text).split())
+
+
+def risks_of(proposed: Sequence[tuple[str, str | None]], nodes: Sequence[MapNode]) -> list[Risk]:
+    """Attach each risk to the branch the model named (a label on the map, D-108). A missing or
+    unknown label gives a general risk with no branch (D-116): falling back to the answered
+    branch was the G4-3 misattribution. Labels in the text are replaced by branch titles."""
+    by_label = {label: node_id for node_id, label in branch_map.labels(nodes).items()}
+    titles = {n.id: n.title for n in nodes}
+    label_titles = {label: titles[node_id] for label, node_id in by_label.items()}
+    risks: list[Risk] = []
+    for text, label in proposed:
+        node_id = by_label.get(label or "")
+        source: RiskBranchSource = "label" if node_id else ("unknown" if label else "missing")
+        logger.info("Risk branch from %s (label %s)", source, label or "none")
+        risks.append(
+            Risk(text=name_labels(text, label_titles), node_id=node_id, branch_source=source)
+        )
+    return risks

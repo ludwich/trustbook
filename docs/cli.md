@@ -24,6 +24,44 @@ checkout `pip install "./cli[eval]"`, from GitHub
 The image and the backend's environment have it. Without it `trustbook eval` stops with an error
 (exit 1) that says how to install it.
 
+### If `trustbook.exe` is blocked
+
+Application control on a locked-down Windows laptop can block the `trustbook.exe` that pip creates
+("Access denied"). Run the installed package through Python instead; it takes the same arguments
+and gives the same exit codes:
+
+```
+python -m trustbook_cli ask "How does HTTPBasicAuth add the Authorization header?" --space Smoke --json
+```
+
+Use the Python that `trustbook-cli` was installed into (`py -m trustbook_cli …` works too).
+
+**Git Bash (Claude Code on Windows).** Make `trustbook` a two-line script in `~/bin`:
+
+```bash
+mkdir -p ~/bin
+printf '#!/bin/sh\nexec python -m trustbook_cli "$@"\n' > ~/bin/trustbook
+chmod +x ~/bin/trustbook
+command -v trustbook   # should print /c/Users/<you>/bin/trustbook
+```
+
+`~/bin/trustbook` then contains:
+
+```sh
+#!/bin/sh
+exec python -m trustbook_cli "$@"
+```
+
+`~/bin` must be on Git Bash's `PATH`. If `command -v trustbook` prints nothing, add
+`export PATH="$HOME/bin:$PATH"` to `~/.bashrc` and open a new Git Bash (and restart Claude Code).
+
+**PowerShell.** A function does the same; put it in your `$PROFILE` to keep it:
+
+```powershell
+function trustbook { python -m trustbook_cli @args }
+trustbook --version   # $LASTEXITCODE is the CLI's exit code, as with trustbook.exe
+```
+
 ## Options and environment
 
 | Option | Environment | Default | Meaning |
@@ -145,8 +183,11 @@ Shown indented; the CLI writes it on one line.
   reason (`{text, reason}`). They are **not** from the sources and must not be presented as facts.
 - `refusal`: `null`, or `{reason, message, suggestion}` with `verdict` `refused`, empty `answer`,
   `sentences` and `citations`, and exit code 2. Reasons: `not_in_sources`, `no_sources` (nothing
-  ready in the space), `invalid_output` (the model's reply was unusable), `unsupported`, and
-  `chitchat` (a greeting got the fixed small-talk reply).
+  ready in the space), `invalid_output` (the model's reply was unusable), `unsupported` (an answer
+  was drafted but could not be verified against the passages it cited; message "Couldn't verify an
+  answer", D-118), and `chitchat` (a greeting got the fixed small-talk reply). Without a `refused`
+  event the reason comes from the stored message's `refusal_reason` (`not_in_sources` for refusals
+  stored before it existed).
 - `latency_s`: seconds from sending the question to the final answer.
 
 ### Other documents
@@ -155,15 +196,19 @@ Shown indented; the CLI writes it on one line.
 |---|---|
 | `trustbook.spaces/1` | `spaces[]`: `{id, slug, name, description, source_count, created_at}` |
 | `trustbook.space/1` | `space`: as above |
-| `trustbook.sources/1` | `space {id, name}`, `sources[]`: `{id, type, title, origin, group, status, progress, failure_reason, failure_next_step, quality_warning, enabled, snapshot_at, commit_hash, stats, created_at, job_id, ahead}` |
+| `trustbook.sources/1` | `space {id, name}`, `sources[]`: `{id, type, title, origin, group, status, progress, failure_reason, failure_next_step, quality_warning, enabled, snapshot_at, commit_hash, stats, created_at, job_id, ahead, stage}` |
 | `trustbook.source/1` | `space {id, name}`, `source`: as above |
 | `trustbook.search/1` | `space {id, name}`, `query`, `results[]`: `{n, title, url, snippet}` |
-| `trustbook.jobs/1` | `jobs[]`: `{id, kind, title, space_id, space_name, status, progress, position, error, created_at, started_at, finished_at, eta_seconds}`, `summary {queued, running, paused, eta_seconds, workers}` |
+| `trustbook.jobs/1` | `jobs[]`: `{id, kind, title, space_id, space_name, status, progress, position, error, created_at, started_at, finished_at, eta_seconds, stage}`, `summary {queued, running, paused, eta_seconds, workers}` |
 | `trustbook.gate_log/1` | `space {id, name}`, `entries[]`: `{id, created, input, decision, confidence, user_correction}` |
 | `trustbook.deleted/1` | `kind` (`space` or `source`), `id`, `name` |
-| `trustbook.error/1` | `message`, `http_status` (the API's status code, `null` when there was no response); `created` only when a `sources add` with several items failed part-way: the sources already added before the error (as in `trustbook.sources/1`), so don't add them again |
+| `trustbook.error/1` | `message`, `http_status` (the status code of the response that failed: the API's, or for `ask` the chat endpoint's when it answered with an error, e.g. `401` for a rejected key; `null` only when no response was received); `created` only when a `sources add` with several items failed part-way: the sources already added before the error (as in `trustbook.sources/1`), so don't add them again |
 
 Source `status`: `queued`, `reading`, `indexing`, `ready`, `failed`; `progress` is 0–1 or `null`.
+`stage` (sources and running jobs) says why there is no progress yet, else `null`:
+`waiting_for_calibration` (the app measures this computer on first start, after an update that changes the
+models or the chunker, and on "Run again" in Settings; minutes on a slow machine) or `loading_models` (the
+embedding model loads before the first batch). `--wait` shows "waiting for calibration (reading 0%)" or "loading models (indexing 40%)".
 
 ## Examples
 
@@ -199,6 +244,36 @@ $r = docker compose exec -T app trustbook ask "How does HTTPBasicAuth add the Au
 $LASTEXITCODE   # the CLI's exit code: 0, 1, 2 or 3
 docker compose exec -T app trustbook sources add folder trustbook-eval/requests --space Smoke --wait
 Get-Content question.txt | docker compose exec -T app trustbook ask - --space Smoke --json
+```
+
+## Checking the Claude Code skill (Gate 3b #8)
+
+Once: copy `skills/trustbook/` to `%USERPROFILE%\.claude\skills\trustbook\`. Then, with Trustbook
+running, the `Smoke` space indexed and `trustbook` on `PATH`, run in PowerShell:
+
+```powershell
+claude -p "Using Trustbook space Smoke: how does requests encode Basic auth credentials?" --allowedTools "Bash(trustbook:*)"
+claude -p "Using Trustbook space Smoke: what is the capital of Mongolia?" --allowedTools "Bash(trustbook:*)"
+```
+
+`-p` runs Claude Code once, without the interactive screen, and prints its reply. `--allowedTools`
+lets it run `trustbook` without asking. With the fallback, allow `"Bash(python -m trustbook_cli:*)"`
+instead; through Docker, `"Bash(docker compose exec:*)"`.
+
+What to expect:
+
+1. **Basic auth:** an answer with Trustbook's citations: the source and the file with line numbers
+   (in the requests code or docs).
+2. **Mongolia:** Claude says plainly that this is not in the sources of `Smoke` (Trustbook's refusal
+   message). Nothing else: no answer from its own knowledge (no "Ulaanbaatar"), no second try, no
+   rephrased question, no other space.
+
+To check that Claude asked only once, count the questions Trustbook received. Every `trustbook ask`
+adds a conversation titled `CLI: …` to the space:
+
+```powershell
+$s = ((Invoke-RestMethod http://localhost:8484/api/spaces) | Where-Object name -eq Smoke).id; $n = { @((Invoke-RestMethod "http://localhost:8484/api/spaces/$s/conversations") | Where-Object title -like 'CLI:*').Count }; $a = & $n
+claude -p "Using Trustbook space Smoke: what is the capital of Mongolia?" --allowedTools "Bash(trustbook:*)"; "Questions asked: $((& $n) - $a)"   # expect 1
 ```
 
 ## Secrets

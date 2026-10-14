@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Paths
@@ -169,3 +171,83 @@ def test_search_and_stt_tests(client: TestClient, router: Router) -> None:
     assert client.post("/api/capabilities/web_search/test").json()["ok"]
     assert client.post("/api/capabilities/stt/test").json()["message"] == "Model works."
     assert client.post("/api/capabilities/embeddings/test").json()["ok"]
+
+
+# --- G3b-2: optional key for "Other OpenAI-compatible" chat and the speech-to-text endpoint ---
+
+OPTIONAL_KEY = "or-optional-key-9f8e7d6c"
+
+
+def _assert_key_hidden(client: TestClient, *texts: str) -> None:
+    for text in (*texts, client.get("/api/capabilities").text):
+        assert OPTIONAL_KEY not in text
+        assert OPTIONAL_KEY[-8:] not in text
+    assert OPTIONAL_KEY not in json.dumps(client.get("/api/request-log").json())
+
+
+def test_custom_chat_optional_key_end_to_end(
+    client: TestClient, router: Router, paths: Paths, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    router.json("POST", LLM, chat_reply("OK"))
+    # No key: the endpoint is ready and no Authorization header is sent.
+    put = client.put(
+        "/api/capabilities/chat", json={"preset": "custom", "base_url": LLM, "model": "m"}
+    )
+    assert put.json()["status"] == "ready"
+    api_key = next(f for f in put.json()["fields"] if f["name"] == "api_key")
+    assert api_key["required"] is False
+    assert client.post("/api/capabilities/chat/test").json()["ok"]
+    assert "authorization" not in router.requests[-1].headers
+
+    # A draft key is used by the Test button but not saved.
+    draft = client.post("/api/capabilities/chat/test", json={"api_key": OPTIONAL_KEY})
+    assert draft.json()["ok"]
+    assert router.requests[-1].headers["authorization"] == f"Bearer {OPTIONAL_KEY}"
+    assert client.get("/api/capabilities/chat").json()["config"]["api_key_set"] is False
+
+    # Saved like a preset key: settings.json only, a hint in responses, never the value.
+    saved = client.put("/api/capabilities/chat", json={"api_key": OPTIONAL_KEY})
+    assert saved.status_code == 200
+    config = saved.json()["config"]
+    assert (config["api_key_set"], config["api_key_hint"]) == (True, "…7d6c")
+    stored = json.loads(paths.settings_file.read_text())["capabilities"]["chat"]
+    assert stored["api_key"] == OPTIONAL_KEY
+    tested = client.post("/api/capabilities/chat/test")
+    assert router.requests[-1].headers["authorization"] == f"Bearer {OPTIONAL_KEY}"
+
+    # Changing another field keeps the key; an empty key clears it.
+    kept = client.put("/api/capabilities/chat", json={"model": "m2"})
+    assert kept.json()["config"]["api_key_set"] is True
+    client.post("/api/capabilities/chat/test")
+    assert router.requests[-1].headers["authorization"] == f"Bearer {OPTIONAL_KEY}"
+    cleared = client.put("/api/capabilities/chat", json={"api_key": ""})
+    assert cleared.json()["config"]["api_key_set"] is False
+    assert cleared.json()["status"] == "ready"
+    client.post("/api/capabilities/chat/test")
+    assert "authorization" not in router.requests[-1].headers
+
+    _assert_key_hidden(client, put.text, draft.text, saved.text, tested.text, kept.text)
+    assert OPTIONAL_KEY not in caplog.text
+
+
+def test_stt_endpoint_optional_key(client: TestClient, router: Router, paths: Paths) -> None:
+    router.json("POST", f"{LLM}/audio/transcriptions", {"text": ""})
+    body = {"mode": "endpoint", "base_url": LLM, "model": "whisper-1"}
+    put = client.put("/api/capabilities/stt", json=body)
+    assert put.json()["status"] == "ready"
+    assert client.post("/api/capabilities/stt/test").json()["message"] == "Endpoint works."
+    assert "authorization" not in router.requests[-1].headers
+
+    saved = client.put("/api/capabilities/stt", json={"api_key": OPTIONAL_KEY})
+    assert saved.json()["config"]["api_key_set"] is True
+    stored = json.loads(paths.settings_file.read_text())["capabilities"]["stt"]
+    assert stored["api_key"] == OPTIONAL_KEY
+    tested = client.post("/api/capabilities/stt/test")
+    assert tested.json()["ok"]
+    assert router.requests[-1].headers["authorization"] == f"Bearer {OPTIONAL_KEY}"
+    assert OPTIONAL_KEY.encode() not in router.requests[-1].content
+
+    kept = client.put("/api/capabilities/stt", json={"model": "whisper-2"})
+    assert kept.json()["config"]["api_key_set"] is True
+    _assert_key_hidden(client, put.text, saved.text, tested.text, kept.text)

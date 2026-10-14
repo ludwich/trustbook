@@ -11,6 +11,7 @@ import {
   draftFromCapability,
   draftToUpdate,
   isDraftDirty,
+  isKeyRequired,
   missingFields,
   visibleFields,
   type Draft,
@@ -25,11 +26,19 @@ function withValues(d: Draft, values: Record<string, string | boolean>): Draft {
 describe("field visibility", () => {
   const chat = chatCapability();
 
-  it("shows API key only for presets that need one, API version only for Azure", () => {
+  it("shows an API key for every endpoint preset, API version only for Azure", () => {
     const d = draftFromCapability(chat);
+    expect(names(visibleFields(chat, d.values))).toEqual(["preset", "base_url", "model"]);
     expect(names(visibleFields(chat, withValues(d, { preset: "ollama" }).values))).toEqual([
       "preset",
       "base_url",
+      "api_key",
+      "model",
+    ]);
+    expect(names(visibleFields(chat, withValues(d, { preset: "custom" }).values))).toEqual([
+      "preset",
+      "base_url",
+      "api_key",
       "model",
     ]);
     expect(names(visibleFields(chat, withValues(d, { preset: "openai" }).values))).toEqual([
@@ -62,8 +71,8 @@ describe("field visibility", () => {
     expect(names(visibleFields(stt, d.values))).toEqual(["mode"]);
     expect(names(visibleFields(stt, withValues(d, { mode: "endpoint" }).values))).toEqual([
       "mode",
-      "preset",
       "base_url",
+      "api_key",
       "model",
     ]);
   });
@@ -116,6 +125,56 @@ describe("draft to update", () => {
     const cleared: Draft = { ...d, clearKey: true };
     expect(draftToUpdate(chat, cleared).api_key).toBe("");
     expect(missingFields(chat, cleared)).toEqual(["api_key"]);
+  });
+
+  it("an optional key (G3b-2): not required, sent when typed, kept or cleared like a preset key", () => {
+    const empty = withValues(draftFromCapability(chatCapability()), {
+      preset: "custom",
+      base_url: "https://openrouter.example/api/v1",
+      model: "m",
+    });
+    expect(isKeyRequired(chatCapability(), empty.values)).toBe(false);
+    expect(missingFields(chatCapability(), empty)).toEqual([]);
+    expect(draftToUpdate(chatCapability(), empty)).not.toHaveProperty("api_key");
+    expect(draftToUpdate(chatCapability(), withValues(empty, { api_key: " or-k " })).api_key).toBe(
+      "or-k",
+    );
+
+    const saved = chatCapability({
+      config: config({
+        preset: "custom",
+        base_url: "https://openrouter.example/api/v1",
+        model: "m",
+        api_key_set: true,
+        api_key_hint: "…7d6c",
+      }),
+    });
+    const d = withValues(draftFromCapability(saved), { model: "m2" });
+    expect(draftToUpdate(saved, d)).not.toHaveProperty("api_key"); // other edits keep the key
+    const cleared: Draft = { ...d, clearKey: true };
+    expect(draftToUpdate(saved, cleared).api_key).toBe("");
+    expect(missingFields(saved, cleared)).toEqual([]);
+
+    const stt = sttCapability();
+    const sttDraft = withValues(draftFromCapability(stt), {
+      mode: "endpoint",
+      base_url: "http://stt:9000/v1",
+      model: "whisper-1",
+      api_key: "stt-k",
+    });
+    expect(isKeyRequired(stt, sttDraft.values)).toBe(false);
+    expect(draftToUpdate(stt, sttDraft).api_key).toBe("stt-k");
+  });
+
+  it("still requires a key for presets that need one", () => {
+    const chat = chatCapability();
+    const d = withValues(draftFromCapability(chat), {
+      preset: "openai",
+      base_url: "https://api.openai.com/v1",
+      model: "gpt-x",
+    });
+    expect(isKeyRequired(chat, d.values)).toBe(true);
+    expect(missingFields(chat, d)).toEqual(["api_key"]);
   });
 
   it("requires preset, URL and model for endpoints, empty strings become null", () => {

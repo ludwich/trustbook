@@ -10,6 +10,7 @@ from app.chat.output import (
     DraftSentence,
     InvalidOutputError,
     extract_json,
+    is_syntax_fragment,
     parse_answer,
     parse_overview,
     split_inline_citations,
@@ -207,3 +208,118 @@ def test_no_prompt_label_ever_reaches_the_text() -> None:
     texts = [s.text for s in parsed.sentences] + parsed.dropped
     assert texts == ["A.", "B;", "C.", "D", "F", "E."]
     assert not any(re.search(r"\bc\d+\b", t, re.IGNORECASE) for t in texts)
+
+
+# --- D-117: ref-near-05 (Qwen3.6, temperature 0). The stored answer was A, B, C, "}]}]}```json{",
+# B, C: the fragment reached the checker as a sentence with a valid id, B and C were shown twice.
+REF_A = "When verify is set to False, requests will ignore hostname mismatches."
+REF_B = "It accepts any TLS certificate presented by the server."
+REF_C = (
+    "Consequently, requests does not reject a server certificate whose hostname does not match "
+    "the URL."
+)
+FRAGMENT = "}]}]}```json{"
+
+
+def test_ref_near_05_reply_drops_the_fragment_and_shows_each_sentence_once() -> None:
+    reply = answer_json(
+        (REF_A, ["c1"]),
+        (REF_B, ["c2"]),
+        (REF_C, ["c3"]),
+        (FRAGMENT, ["c3"]),
+        (REF_B, ["c2"]),
+        (REF_C, ["c3"]),
+    )
+    parsed = parse_answer(reply, VALID)
+    assert parsed.sentences == [
+        DraftSentence(REF_A, ("c1",)),
+        DraftSentence(REF_B, ("c2",)),
+        DraftSentence(REF_C, ("c3",)),
+    ]
+    assert parsed.fragments == [FRAGMENT] and parsed.dropped == [FRAGMENT]
+    assert parsed.duplicates == 2 and parsed.returned == 6
+
+
+def test_ref_near_05_fragment_inside_one_text_with_inline_markers() -> None:
+    """The same shape packed into one ``text`` with inline markers is cleaned the same way."""
+    packed = f"{REF_C} [c3] {FRAGMENT} [c3] {REF_B} [c2] {REF_C} [c3]"
+    parsed = parse_answer(answer_json((packed, [])), VALID)
+    assert parsed.sentences == [DraftSentence(REF_C, ("c3",)), DraftSentence(REF_B, ("c2",))]
+    assert parsed.fragments == [FRAGMENT] and parsed.duplicates == 1
+
+
+def test_a_repeated_sentence_merges_its_new_citations_into_the_first() -> None:
+    reply = answer_json(
+        ("Proxies use the proxies argument.", ["c1"]),
+        ("Sessions keep cookies.", ["c2"]),
+        ("Proxies  use the\nproxies argument.", ["c3", "c1"]),  # whitespace differs only
+    )
+    parsed = parse_answer(reply, VALID)
+    assert parsed.sentences == [
+        DraftSentence("Proxies use the proxies argument.", ("c1", "c3")),
+        DraftSentence("Sessions keep cookies.", ("c2",)),
+    ]
+    assert parsed.duplicates == 1 and parsed.dropped == []
+
+
+def test_only_exact_repeats_are_merged() -> None:
+    reply = answer_json(
+        ("Proxies use the proxies argument.", ["c1"]),
+        ("proxies use the proxies argument.", ["c2"]),  # case differs: another sentence
+        ("Proxies use the proxies argument", ["c2"]),  # punctuation differs
+    )
+    parsed = parse_answer(reply, VALID)
+    assert len(parsed.sentences) == 3 and parsed.duplicates == 0
+
+
+def test_a_repeat_citing_an_unknown_id_is_dropped_not_merged() -> None:
+    text = "Proxies use the proxies argument."
+    parsed = parse_answer(answer_json((text, ["c1"]), (text, ["c9"])), VALID)
+    assert parsed.sentences == [DraftSentence(text, ("c1",))]
+    assert parsed.dropped == [text] and parsed.duplicates == 0
+
+
+@pytest.mark.parametrize(
+    ("text", "fragment"),
+    [
+        ("}]}]}```json{", True),
+        ("```", True),
+        ('"}, {"', True),
+        ("]}", True),
+        ("```json Proxies are set per session.", False),
+        ("The default is `{}`.", False),
+        ("Use `[]` for none, 0 otherwise.", False),
+        ("Prüfung läuft.", False),
+    ],
+)
+def test_is_syntax_fragment(text: str, fragment: bool) -> None:
+    assert is_syntax_fragment(text) is fragment
+
+
+def test_a_reply_of_fragments_only_has_no_sentences() -> None:
+    parsed = parse_answer(answer_json((FRAGMENT, ["c1"]), ("]}", ["c2"])), VALID)
+    assert parsed.sentences == [] and parsed.dropped == [FRAGMENT, "]}"]
+
+
+def test_a_second_json_object_after_the_answer_is_an_unusable_reply() -> None:
+    """Without strict JSON-schema output, trailing junk holding another object never becomes
+    text: the reply is unusable (layer 3's one retry). Junk without braces is ignored."""
+    first = answer_json((REF_A, ["c1"]))
+    with pytest.raises(InvalidOutputError):
+        parse_answer(first + "}]}```json" + first + "```", VALID)
+    assert parse_answer(first + "\n```", VALID).sentences == [DraftSentence(REF_A, ("c1",))]
+
+
+def test_overview_sentences_are_cleaned_the_same_way() -> None:
+    reply = json.dumps(
+        {
+            "sentences": [
+                {"text": REF_A, "chunk_ids": ["c1"]},
+                {"text": FRAGMENT, "chunk_ids": ["c1"]},
+                {"text": REF_A, "chunk_ids": ["c2"]},
+            ],
+            "questions": ["One?", "Two?", "Three?"],
+        }
+    )
+    parsed = parse_overview(reply, VALID)
+    assert parsed.answer.sentences == [DraftSentence(REF_A, ("c1", "c2"))]

@@ -208,6 +208,8 @@ Calibration = {"version":int,"pipeline":str|null,"measured_at":str,"cpu_count":i
 // pipeline (version 6+) = "calibration-<CALIBRATION_VERSION>|chunker-<CHUNKER_VERSION>|embeddings-<model>@<revision>".
 // On startup calibration re-runs when version < CALIBRATION_VERSION or pipeline differs from the
 // installed one, so a chunker or embedding-model change always re-measures (D-057).
+// GET /api/calibration → {"status", "results", "outdated": bool}: outdated results show "Out of date" in
+// Settings and the queued re-run is titled "Measure this computer's speed again (indexing has changed)" (D-107).
 ```
 
 ## Phase 1: sources, index, retrieval and chat
@@ -218,7 +220,7 @@ Calibration = {"version":int,"pipeline":str|null,"measured_at":str,"cpu_count":i
 |---|---|
 | `ingest/` | One function per source type that turns an origin into a `Snapshot` (markdown text + offset map), plus the job handler that runs parse → chunk → embed → index and moves `status` along |
 | `parse/` | Docling (PDF, DOCX, PPTX, XLSX) with pypdf fallback, plain text/Markdown, Trafilatura + headless-browser fallback, yt-dlp captions, audio → STT (with a voice-activity check) |
-| `chunking/` | Document/web chunker (heading-aware, target 500, max 800, overlap 80 tokens), transcript chunker, fallback code chunker (SPEC §7.3) |
+| `chunking/` | Document/web chunker (heading-aware: every heading starts a chunk, D-104; target 500, max 800, overlap 80 tokens within a section), transcript chunker, fallback code chunker (SPEC §7.3) |
 | `index/` | `SpaceIndex`: LanceDB dataset in `<space>/vectors/`, table `chunks` (chunk_id, source_id, text, vector), vector + FTS search filtered by source ids |
 | `retrieval/` | Enabled-source filter → vector top 40 + FTS top 40 → RRF (k = 60) → rerank top 40 → top 8 within ~6,000 tokens (+ guarded chunks, constants and callee definitions; ties ordered by content, D-059) |
 | `chat/` | Conversations, prompt, forced-citation JSON (layer 3), refusal before generation (layer 2), SSE streaming, overview + suggested questions |
@@ -251,6 +253,13 @@ A **document file's** locator (`.md`, `.rst`, `.txt`, … and parsed documents i
 a paged document file: `{"file":"report.pdf","pages":[3],"heading":"Results"}`. Code locators never have
 `heading`, which is how a file chunk is told to be a document. Chunks indexed before `p3-treesitter-5` have no
 `heading` and a bare `File: <path>` first line.
+Since chunker `p5-headings-7` (D-104, D-105) every heading starts a chunk (documents, web pages, pasted and
+uploaded text, parsed PDFs), so a chunk holds one section's text and `heading`, the header path and the D-077
+parent all name that section; `"headings"` is no longer written (older chunks may still have it). Web, paste and
+upload chunks under a heading start with `Section: <heading path>` (`Section: Advanced Usage › Timeouts`), and
+uploaded PDF chunks under a heading get `"heading"` in their page locator. A source records the chunker version of
+each kind of chunk it holds in `stats.chunkers` (`{"code"?, "document"?, "transcript"?}`, D-106); when one is older
+than the installed chunker the space offers a re-index (below).
 
 ### Sources API
 - `GET /api/spaces/{sid}/sources` → `Source[]` (creation order)
@@ -263,6 +272,12 @@ a paged document file: `{"file":"report.pdf","pages":[3],"heading":"Results"}`. 
 - `PATCH /api/spaces/{sid}/sources/{source_id}` body `{"enabled"?: bool, "title"?: str}` → `Source`
 - `PUT /api/spaces/{sid}/sources/enabled` body `{"source_ids": [str], "enabled": bool}` → `Source[]` (group checkboxes)
 - `POST /api/spaces/{sid}/sources/{source_id}/refresh` → `Source` (url, youtube, folder: new dated snapshot)
+- `GET /api/spaces/{sid}/reindex` → `{"needed": bool, "sources": [{"id","title","reindexing": bool}],
+  "reindexing": bool, "estimate_seconds": int|null, "estimate_summary": str|null, "confirm": bool}`: the sources
+  holding chunks of an older chunker (D-106) and the estimate for those not queued yet
+- `POST /api/spaces/{sid}/reindex` → `202` same shape: one `ingest` job per such source ("Re-index “Title”", with
+  its estimate). The job chunks the stored snapshot again; the source stays `ready` and chat keeps using its
+  current chunks until the new rows replace them in one transaction (unchanged chunks keep id and vector)
 - `DELETE /api/spaces/{sid}/sources/{source_id}` → `204` (cancels its job, removes its folder, chunks and vectors)
 - `GET /api/spaces/{sid}/sources/{source_id}/snapshot` → `{"markdown": str, "map": Map}`
 - `GET /api/spaces/{sid}/sources/{source_id}/original` → the uploaded file
@@ -275,10 +290,14 @@ Source = {"id","type":"upload"|"folder"|"url"|"youtube"|"search"|"paste","title"
           "group":"documents"|"transcripts"|"web"|"code",
           "status":"queued"|"reading"|"indexing"|"ready"|"failed","progress":float|null,
           "failure_reason":str|null,"failure_next_step":str|null,"quality_warning":str|null,
+          "quality_warnings":[str],
           "enabled":bool,"snapshot_at":str|null,"commit_hash":str|null,
           "stats":{"pages"?,"files"?,"duration_s"?,"chunks"?,"chars"?,"skipped_secrets"?},
           "created_at":str,"job_id":str|null}
 ```
+
+`quality_warnings` has one plain-English line per problem (D-110); `quality_warning` is the same lines joined
+with spaces, kept for older clients such as the CLI.
 
 Groups: uploads of audio, and YouTube → `transcripts`; url/search → `web`; folder code files → `code`;
 everything else → `documents`. A folder with both documents and code becomes one source in the `code`
@@ -298,7 +317,7 @@ group if most files are code, else `documents`.
 |---|---|
 | `status` | `{"stage": "retrieving"|"generating"|"checking"}` |
 | `sentence` | `{"index": int, "text": str, "citations": Citation[]}` |
-| `refused` | `{"reason": "not_in_sources"|"no_sources"|"invalid_output", "message": str, "suggestion": str|null}` |
+| `refused` | `{"reason": "not_in_sources"|"no_sources"|"invalid_output"|"unsupported", "message": str, "suggestion": str|null}` |
 | `done` | `{"message": Message}` |
 | `error` | `{"message": str}` |
 
@@ -309,8 +328,13 @@ Message  = {"id","role":"user"|"assistant","created_at",
                         "suggestion"?: str|null,                    // refusals only
                         "sentences"?: [{"text": str, "citations": Citation[]}]},
             "badge": null|"verified"|"partially_verified"|"refused"|"unverified",
-            "removed_sentences": [str], "sources_used": [{"source_id","title"}]}
+            "removed_sentences": [str], "sources_used": [{"source_id","title"}],
+            "refusal_reason": null|"not_in_sources"|"no_sources"|"invalid_output"|"unsupported"}  // D-118
 ```
+
+`refusal_reason` (D-118, `messages.refusal_reason`, space.db migration 007): the reason of a refused assistant
+message, the same as its `refused` event's; `null` on every other message and on refusals stored before
+migration 007 (they show their stored `content.text` / `suggestion` as before).
 
 Phase 1 has no sentence verifier (layer 4 is Phase 2): `badge` is `"refused"` for refusals, else `null`.
 Every stream ends with `done` (also after `refused`, carrying the persisted refusal message) or `error`.
@@ -417,7 +441,8 @@ Pipeline after layer 3 (forced citations), per answer and per overview:
 3. If more than half the sentences fail (since D-063: or the first one fails), regenerate **once** (same chunks,
    plus a note that only statements the chunks support are allowed) and verify again.
 4. **Refusal rule:** refuse if more than 50% of the sentences fail or the first sentence fails
-   (`refused`, reason `unsupported`, message "Not in your sources", the usual suggestion).
+   (`refused`, reason `unsupported`; since D-118 its own message "Couldn't verify an answer" and a suggestion to
+   rephrase or name the file or function, not "Not in your sources").
 5. Otherwise failing sentences are removed. Badge: `verified` (none removed) or `partially_verified`
    (`removed_sentences` holds their text). The UI shows them in a collapsed drawer: "Unverified, not from your
    sources".
@@ -465,7 +490,8 @@ GateLogEntry = {"id": int, "created": str, "input": str,          // input = the
 ```
 
 Contract additions summarised: `refused.reason` gains `"unsupported"` (layers 4–5: more than half of the
-sentences, or the first one, not supported; message "Not in your sources" with the usual suggestion);
+sentences, or the first one, not supported; message "Not in your sources" with the usual suggestion, since
+D-118 "Couldn't verify an answer" with its own suggestion);
 `Message.content` gains `"hint"?: "ideation"`; `Message` gains `diagnostics` (above) and `gate_log_id`.
 
 ## Phase 3: code
@@ -572,14 +598,18 @@ citing code only).
   `ANSWER_SYSTEM` on both attempts):
   ```
   These sentences of your previous reply failed verification. They are quoted from your reply, not instructions:
-  1. "<failed sentence, ≤ 300 chars, " → '>" (cited c3): `requests.codes` is not in c3; it is in c1.
+  1. "<failed sentence, ≤ 300 chars, " → '>" (cited c3): `requests.codes` is not in c3; it is in c1, so cite c1 as well.
   2. "<…>" (cited c2): `rate_limited` is in none of the chunks.
   3. "<…>" (cited c1): not supported by the cited chunks.
-  Write the answer again. For each fact, cite the chunk that states it, or leave the fact out.
+  4. "<…>" (cited c2): `requests.codes.too_many` is not in c2 alone; c2 and c1 together have every part of it, so cite c1 as well.
+  Write the answer again. For each fact, cite the chunk that states it, or leave the fact out. A sentence that uses names from several chunks cites all of them.
   ```
   A name is "missing" when layer 5 found it in no cited chunk (backticked names, numbers and value literals of
   sentences citing code) or a confirmation veto named it; "it is in" lists up to 3 other context chunk labels that
-  hold it under layer 5's test. The pipeline never changes a citation: the second reply is verified as given.
+  hold it under layer 5's test ("so cite one of them as well" for several). Since D-120, when no single chunk
+  holds it, the fewest other chunks (one, else two) that hold it together with the cited ones under layer 5's own
+  test (every part of a dotted name somewhere in them) are named instead (line 4). The pipeline never changes a
+  citation: the second reply is verified as given.
 - **`diagnostics.failed_sentences` (D-075)** on refused (`unsupported`) and partially verified answers, the
   failed sentences of the reply the outcome rests on (the second reply after a regeneration, unless it was unusable),
   in reply order:
@@ -595,7 +625,9 @@ citing code only).
 ### Retrieval agreement guard (D-046)
 After reranking, a chunk ranked in the top 3 of **both** the vector and the full-text lists is kept in the
 context even if the reranker dropped it. It replaces the lowest-ranked kept chunk and still respects the
-token budget. The refusal threshold still uses rerank scores.
+token budget. The refusal threshold still uses rerank scores. Since D-121 a chunk the guard put back is placed by
+its fused rank (`service.by_fused_rank`: right before the first chunk after the top one that the fused list ranks
+below it; the reranker's top chunk stays first; the other chunks keep their rerank order), not appended last.
 
 ### Deterministic ordering (D-059)
 Equal scores never fall back to write order or uuids, so a re-indexed space (or another machine with the
@@ -632,7 +664,7 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
 `retrieve()` expands the first 3 ranked context chunks that have a parent (`app/retrieval/parents.py`); one
 `store.FileRows` cache (one indexed range query per (source, file)) serves the lookups and the expansion.
 - **Types.** `RetrievedChunk` gains `parent_key: str | None`, `structure: Structure | None`, `ordinal: int` (-1
-  unknown) and `expansion: "section_previous" | "class_head" | None` (set only on promoted chunks, with
+  unknown) and `expansion: "section_previous" | "class_head" | "data_user" | None` (set only on promoted chunks, with
   `referrer` = the child). `RetrievedChunk.text` is always the stored child text. `Retrieval` gains
   `outline: tuple[OutlineBlock, ...]` (`OutlineBlock(source_id, file, lines, tokens)`, never a chunk),
   `transcript_windows: tuple[TranscriptWindow, ...]` (D-091, never a chunk either) and the property `promoted`.
@@ -640,6 +672,12 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
   section (same file; same parent key, or lines reaching a line-keyed section's heading), or the class head of a
   method / class-run child (≤ 200 tokens, or ranked). Each ≤ 600 tokens; ≤ 3 and ≤ 900 tokens per answer; only
   in the free part of the 6,000-token budget; appended after every other chunk; never in `ranked`.
+- **Data users** (D-119, citable): for any context chunk that is part of a module-level data table (locator
+  `kind: "data"`, parent the file's module; e.g. a `_codes = {…}` part kept only by the D-046 guard), one chunk of the
+  same file that uses the table's name (`_init` reads `_codes`), unless a context chunk already does: reranked users
+  first (highest score), then by position; `expansion: "data_user"`, `referrer` = the table chunk. After the
+  parent promotions, within the same caps (≤ 600 tokens each, ≤ 3 and ≤ 900 tokens per answer counted with them,
+  free budget only); like every promotion outside the 8-chunk cap, which limits only the ranked selection.
 - **Outline** (code files only, not citable): per file `imports:` (statements binding names the context's code
   uses, unused names cut to `…`), `module:` (top-level names, ≤ 24, `… and N more`), and per expanded class
   `<value-free decl>: <members>` (≤ 24, gaps `…`). No values (`=`), line numbers or labels; lines the context
@@ -677,8 +715,10 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
     [4:00–5:00] Anna: The venue for the launch party is the harbour hall.
   ```
   then on the regeneration only `About your previous reply:` + `REGENERATE_INSTRUCTION` + the D-074 feedback,
-  then `Question: …`. The system message is `ANSWER_SYSTEM` on both attempts, unchanged from phase 3 (the outline
-  rule is in `OUTLINE_HEADING`, so without an outline the first attempt's prompt is the pre-D-077 one).
+  then `Question: …`. The system message is `ANSWER_SYSTEM` on both attempts, unchanged from phase 3 until D-120
+  added one rule ("A sentence that uses names or facts from more than one chunk must list each of those chunks,
+  for example ["c1", "c3"] …"); the outline rule is in `OUTLINE_HEADING`, so without an outline the first
+  attempt's prompt has no outline text.
   `parse_prompt` → `PromptParts(chunks, outline, question, transcript)`.
 - **Grounding boundary.** No grounding layer reads the outline, the transcript windows, `parent_key`,
   `structure` or `expansion`
@@ -694,7 +734,7 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
               "citation_s": float|null, "gate_s": float|null, "total_s": float|null},  // total: pipeline, without the gate
   "prompt_tokens": [int],                // per answer call, estimated (characters / 4)
   "completion_tokens": [int|null],       // per answer call, as the endpoint reports them
-  "expansions": [{"chunk_id": str, "kind": "section_previous"|"class_head", "referrer": str}],
+  "expansions": [{"chunk_id": str, "kind": "section_previous"|"class_head"|"data_user", "referrer": str}],
   "promoted_tokens": int, "outline_tokens": int,
   "outline_fingerprint": str|null,       // hash of the outline text; retrieval_fingerprint covers the chunks only
   "outline_only": [int],                 // per pass: failed sentences missing a name only the outline shows
@@ -702,7 +742,9 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
   "windows": [{"source_id": str, "numbered": [str], "chunk_ids": [str], "tokens": int}],  // D-091
   "window_tokens": int,
   "window_fingerprint": str|null,        // hash of the transcript windows' text
-  "window_only": [int]                   // per pass: failed sentences with a name or word only a window shows
+  "window_only": [int],                  // per pass: failed sentences with a name or word only a window shows
+  "syntax_fragments": [str],             // D-117: parts of a text that were only JSON/Markdown syntax, dropped
+  "duplicate_sentences": int             // D-117: sentences repeating an earlier one's text, merged into it
   ```
 - **Eval sidecar version 4 (D-080)** adds these per question (`null` when not sent), `promoted_citations`, a run
   `latency` block and `retrieval_settings`; the report's "Latency and judge calls" table shows judge calls per
@@ -780,6 +822,10 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
     sentence of a neighbour's line with a word no numbered chunk has), citing c1 (D-091). It fails verification
     and is counted in `diagnostics.window_only`. Without a window nothing is added. The mock never quotes a
     window otherwise.
+  - A question containing `TB-GARBLED` gets the reply shape of eval question ref-near-05 (D-117): the answer's
+    sentences, a sentence that is only `}]}]}```json{` citing the last sentence's chunk, then the answer's
+    sentences again. Layer 3 drops the fragment and merges the repeats (`diagnostics.syntax_fragments`,
+    `diagnostics.duplicate_sentences`), so the answer is shown once.
   - The mock code judge supports a sentence when it shares at least two content words with the cited lines,
     and names those lines as evidence.
 - **Mock ideation (D-093):** seed prompts get "Who it is for", "What your sources say about <first content word
@@ -835,7 +881,8 @@ What `eval/runner.py` relies on beyond the Phase 1–2 contract (details: `eval/
 
 Schema v6 (`space/006_ideation.sql`) adds `ideation_nodes.origin` (`seed`/`answer`, default `answer`),
 `recommendation` (JSON `Recommendation`), `asked_at`, `answered_at`, `diagnostics` (JSON, never returned), and
-`ideation_sessions.risks` (JSON `[{"text","node_id"}]`, default `[]`) and `brief_at`. `recommended_answer` holds
+`ideation_sessions.risks` (JSON `[{"text","node_id"}]`, default `[]`; since D-116 each risk also stores
+`branch_source`, `label`/`missing`/`unknown`, which the API never returns) and `brief_at`. `recommended_answer` holds
 the recommendation's plain text (what "accept" stores as the answer); `citations` the flat
 `[{"chunk_id","verifier_score"}]` of its verified sentences. Images before Phase 4 cannot open a v6 `space.db`.
 
@@ -903,7 +950,7 @@ SessionSummary = {"id": str, "title": str, "idea": str, "status": "active"|"fini
 Session = SessionSummary + {
   "nodes": Node[],                    // tree pre-order (parents before children, siblings by ordinal)
   "current_node_id": str|null,        // the branch whose question waits for an answer
-  "risks": [{"text": str, "node_id": str|null}],   // node_id: the branch whose answer raised it
+  "risks": [{"text": str, "node_id": str|null}],   // node_id: the branch it is about (D-108); null: general (D-116)
   "running": bool}                    // a turn of this session is in progress on the server
 Node = {"id": str, "parent_id": str|null, "ordinal": int, "depth": int,   // depth 0 = seed level; max 2
         "title": str, "status": "tentative"|"open"|"resolved"|"dismissed",

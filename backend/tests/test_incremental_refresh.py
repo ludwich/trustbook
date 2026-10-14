@@ -219,11 +219,32 @@ def test_other_chunker_version_reindexes_everything(
     services = services_of(client)
     _root, sid, source_id = _setup(client, paths)
     first = {c.id for c in _chunks(services, sid, source_id)}
-    monkeypatch.setattr(incremental, "CHUNKER_VERSION", "next-chunker")
+    monkeypatch.setitem(incremental.CHUNKER_VERSIONS, "code", "next-chunker")
+    monkeypatch.setitem(incremental.CHUNKER_VERSIONS, "document", "next-chunker")
     source = _refresh(client, sid, source_id)
     assert source["stats"]["unchanged_files"] == 0
     assert first.isdisjoint(c.id for c in _chunks(services, sid, source_id))
     assert {f.chunker for f in services.ingest.repo(sid).files(source_id)} == {"next-chunker"}
+
+
+def test_a_new_document_chunker_keeps_the_code_chunks(
+    client: TestClient, paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-106: each kind of file is re-chunked only when its own chunker version changed."""
+    services = services_of(client)
+    _root, sid, source_id = _setup(client, paths)
+    before = _chunks(services, sid, source_id)
+    code = {c.id for c in before if json.loads(c.locator)["file"].endswith(".py")}
+    docs = {c.id for c in before if json.loads(c.locator)["file"] == "README.md"}
+    assert code and docs
+    monkeypatch.setitem(incremental.CHUNKER_VERSIONS, "document", "next-chunker")
+    _refresh(client, sid, source_id)
+    after = {c.id for c in _chunks(services, sid, source_id)}
+    assert code <= after  # same ids, nothing embedded again
+    assert docs.isdisjoint(after)
+    records = {f.path: f.chunker for f in services.ingest.repo(sid).files(source_id)}
+    assert records["README.md"] == "next-chunker"
+    assert records["src/a.py"] == incremental.CHUNKER_VERSIONS["code"]
 
 
 def test_records_that_no_longer_match_the_snapshot_are_not_trusted(

@@ -3,7 +3,9 @@
 Seed: ``{"title", "branches": [str]}`` with at least 3 distinct titles (else
 :class:`~app.chat.output.InvalidOutputError`, which triggers the one retry).
 
-Turn: ``{"question", "recommendation": {"sentences": [...]}, "new_branches", "risks"}``.
+Turn: ``{"question", "recommendation": {"sentences": [...]}, "new_branches", "risks"}``. Each
+risk is ``{"text", "branch"}`` with the label of the branch it is about (a plain string is
+accepted and has no branch; the engine then stores it as a general risk, D-108/D-116).
 Recommendation sentences differ from chat answers in one way only (D-094): a sentence with an
 empty ``chunk_ids`` list is kept as a *suggestion* (chat drops it). A sentence citing any id that
 was not in the prompt is dropped, never turned into a suggestion. Inline citation markers are
@@ -23,6 +25,8 @@ from app.chat.output import (
     DraftSentence,
     InvalidOutputError,
     extract_json,
+    is_syntax_fragment,
+    merge_duplicates,
     normalise_id,
     split_inline_citations,
 )
@@ -43,13 +47,14 @@ class ParsedSeed:
 @dataclass(frozen=True)
 class ParsedTurn:
     """``sentences`` in the model's order: cited ones (labels in ``chunk_ids``) and suggestions
-    (empty ``chunk_ids``). ``branches``: ``(title, parent label or None)``."""
+    (empty ``chunk_ids``). ``branches``: ``(title, parent label or None)``; ``risks``:
+    ``(text, branch label or None)``."""
 
     question: str
     sentences: list[DraftSentence] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
     branches: list[tuple[str, str | None]] = field(default_factory=list)
-    risks: list[str] = field(default_factory=list)
+    risks: list[tuple[str, str | None]] = field(default_factory=list)
 
     @property
     def cited(self) -> list[DraftSentence]:
@@ -102,10 +107,13 @@ def _recommendation(raw: Any, valid: set[str]) -> tuple[list[DraftSentence], lis
         if rest.strip(" .!?;:,"):
             candidates.append((rest, declared))
         for part, ids in candidates:
-            if ids is None or any(i not in valid for i in ids):
+            if not part:
+                continue
+            if is_syntax_fragment(part) or ids is None or any(i not in valid for i in ids):
                 dropped.append(part[:MAX_SENTENCE_CHARS])
                 continue
             kept.append(DraftSentence(part[:MAX_SENTENCE_CHARS], tuple(dict.fromkeys(ids))))
+    kept, _ = merge_duplicates(kept)
     return kept[:MAX_RECOMMENDATION_SENTENCES], dropped
 
 
@@ -141,7 +149,25 @@ def parse_turn(text: str, valid_ids: Collection[str], *, expect_question: bool) 
             branches.append((cleaned, parent or None))
         if len(branches) == MAX_PROPOSED_BRANCHES:
             break
-    raw_risks = data.get("risks")
-    risks = [plain(r) for r in (raw_risks if isinstance(raw_risks, list) else [])]
-    risks = [r for r in dict.fromkeys(r for r in risks if r)][:MAX_RISKS_PER_TURN]
-    return ParsedTurn(question, sentences, dropped, branches, risks)
+    return ParsedTurn(question, sentences, dropped, branches, _risks(data.get("risks")))
+
+
+def _risks(raw: Any) -> list[tuple[str, str | None]]:
+    """``(text, branch label or None)`` per risk, first of each text kept, at most
+    :data:`MAX_RISKS_PER_TURN`."""
+    risks: dict[str, str | None] = {}
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, str):
+            text, branch = item, None
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            raw_branch = item.get("branch")
+            text = item["text"]
+            branch = normalise_id(raw_branch) if isinstance(raw_branch, str) else None
+        else:
+            continue
+        cleaned = plain(text)
+        if cleaned and cleaned not in risks:
+            risks[cleaned] = branch or None
+        if len(risks) == MAX_RISKS_PER_TURN:
+            break
+    return list(risks.items())

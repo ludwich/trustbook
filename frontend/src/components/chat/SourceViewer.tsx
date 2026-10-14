@@ -63,10 +63,15 @@ export function SourceViewerBody({ spaceId, citation }: { spaceId: string; citat
   const ctx = context.data;
   const code = ctx?.view === "code" ? ctx.code : undefined;
   const commit = shortCommit(code ? code.commit : source?.commit_hash);
+  // The code chunk's qualified symbol (`Class.method`); none for module code or document files.
+  const symbol = code ? (ctx?.chunk.locator.symbol ?? citation.locator.symbol ?? null) : null;
   const where = code
     ? null
     : ((ctx?.view === "text" ? ctx.text?.label : null) ??
       formatLocator(ctx?.chunk.locator ?? citation.locator));
+  // A document file's chunk is shown as lines of the file; its section is named too. Chunks are
+  // split at headings (D-104), so the section holds every highlighted line.
+  const section = code ? (ctx?.chunk.locator.heading ?? null) : null;
 
   return (
     <>
@@ -82,6 +87,12 @@ export function SourceViewerBody({ spaceId, citation }: { spaceId: string; citat
               · {code.file}, {lineRange(code.highlight)}
             </span>
           )}
+          {symbol && (
+            <span className="min-w-0 font-mono text-xs wrap-anywhere" data-testid="viewer-symbol">
+              · {symbol}
+            </span>
+          )}
+          {section && <span data-testid="viewer-section">· Section: {section}</span>}
           {where && <span data-testid="viewer-label">· {where}</span>}
           {commit && (
             <span

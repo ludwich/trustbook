@@ -9,8 +9,12 @@ from app.chunking.header import (
     header_content,
     header_context,
     section_at,
+    section_header,
     section_of,
+    section_path,
+    split_header,
     without_numbering,
+    without_section_header,
 )
 from app.chunking.headings import (
     Heading,
@@ -23,6 +27,7 @@ from app.chunking.headings import (
 from app.chunking.units import Unit, split_units
 from app.index.base import search_text
 from app.parse.snapshot import FileEntry, Snapshot, SnapshotBuilder
+from app.parse.text import text_snapshot
 from tests.test_chunking import WordCounter
 
 
@@ -168,6 +173,25 @@ def test_document_header_and_its_context() -> None:
     )
 
 
+def test_a_chunk_named_by_a_heading_inside_it_gives_lines_above_it_no_section() -> None:
+    """D-104: a chunk that starts with headings without text is named by the last of them.
+    The lines above that heading are not in its section; it and the lines below it are."""
+    body = "Guide\n=====\n\nInstall\n-------\n\nRun pip.\n"
+    snap = _files_snapshot("g.rst", body, start_line=1, end_line=8)
+    (draft,) = chunk_file(snap, snap.files[0], WordCounter())
+    assert draft.text.startswith("File: g.rst · Guide › Install (lines 1-7)\n")
+    assert section_at(draft.text, "g.rst", 1, 1) == ""  # the "Guide" title line
+    assert section_at(draft.text, "g.rst", 1, 2) == ""
+    assert section_of(draft.text, "g.rst", 1, 1, 7) == ""  # across the "Install" heading
+    assert section_at(draft.text, "g.rst", 1, 4) == "Guide › Install"
+    assert section_at(draft.text, "g.rst", 1, 7) == "Guide › Install"
+    assert section_of(draft.text, "g.rst", 1, 4, 7) == "Guide › Install"
+    # A chunk made before D-104 (header = the first line's section) reads as it always did.
+    old = "File: g.rst · Guide (lines 1-7)\n" + body.rstrip("\n")
+    assert section_at(old, "g.rst", 1, 1) == "Guide"
+    assert section_at(old, "g.rst", 1, 7) == "Install"
+
+
 # --- units and packing ------------------------------------------------------------------------
 
 
@@ -197,30 +221,84 @@ def test_a_heading_inside_a_paragraph_starts_its_own_unit() -> None:
     ]
 
 
-def test_a_small_section_joins_the_chunk_before_it() -> None:
-    def unit(i: int, tokens: int, heading: str | None = None) -> Unit:
-        return Unit(i * 10, i * 10 + 9, tokens, heading=heading, line_start=True, clean_start=True)
+def _unit(i: int, tokens: int, heading: str | None = None) -> Unit:
+    return Unit(i * 10, i * 10 + 9, tokens, heading=heading, line_start=True, clean_start=True)
 
+
+def test_every_heading_starts_a_chunk() -> None:
+    """D-104: a chunk holds the text of one section only, however small the section."""
     units = [
-        unit(0, 5, "A"),
-        unit(1, 150),
-        unit(2, 5, "B"),  # a small section (20 tokens)
-        unit(3, 15),
-        unit(4, 5, "C"),
-        unit(5, 150),
+        _unit(0, 5, "A"),
+        _unit(1, 150),
+        _unit(2, 5, "B"),  # a small section (20 tokens)
+        _unit(3, 15),
+        _unit(4, 5, "C"),
+        _unit(5, 150),
     ]
-    forward = pack_units(units, target=200, max_tokens=300, overlap=0)
-    assert [[u.heading for u in g if u.heading] for g in forward] == [["A"], ["B", "C"]]
-    back = pack_units(units, target=200, max_tokens=300, overlap=0, join_back=True)
-    assert [[u.heading for u in g if u.heading] for g in back] == [["A", "B"], ["C"]]
-    # Not when the chunk before would pass the target: then it joins the next one as before.
-    big = [unit(0, 5, "A"), unit(1, 190), *units[2:]]
-    assert pack_units(big, target=200, max_tokens=300, overlap=0, join_back=True)[1][0].heading == (
-        "B"
+    merged = pack_units(units, target=200, max_tokens=300, overlap=0)
+    assert [[u.heading for u in g if u.heading] for g in merged] == [["A"], ["B", "C"]]
+    split = pack_units(units, target=200, max_tokens=300, overlap=0, split_headings=True)
+    assert [[u.heading for u in g if u.heading] for g in split] == [["A"], ["B"], ["C"]]
+    assert [len(g) for g in split] == [2, 2, 2]
+
+
+def test_text_before_the_first_heading_is_a_chunk_of_its_own() -> None:
+    units = [_unit(0, 3), _unit(1, 5, "A"), _unit(2, 50)]
+    split = pack_units(units, target=200, max_tokens=300, overlap=0, split_headings=True)
+    assert [[u.heading for u in g] for g in split] == [[None], ["A", None]]
+
+
+def test_headings_without_text_stay_with_the_next_heading() -> None:
+    """A heading right above another one has no text of its own: it is not a chunk alone."""
+    units = [_unit(0, 5, "Usage"), _unit(1, 5, "Install"), _unit(2, 50), _unit(3, 5, "Run")]
+    split = pack_units(units, target=200, max_tokens=300, overlap=0, split_headings=True)
+    assert [[u.heading for u in g] for g in split] == [["Usage", "Install", None], ["Run"]]
+
+
+def test_a_long_section_never_carries_another_sections_text() -> None:
+    """The overlap of a long section's next chunk comes from the same section only."""
+    units = [_unit(0, 5, "A"), *[_unit(i, 40) for i in range(1, 12)], _unit(12, 5, "B")]
+    units += [_unit(13, 40)]
+    split = pack_units(units, target=200, max_tokens=300, overlap=80, split_headings=True)
+    assert len(split) > 2
+    assert split[-1][0].heading == "B"
+    for group in split[:-1]:
+        assert all(u.heading in (None, "A") for u in group)
+
+
+def test_a_retry_example_after_a_short_ssl_example_is_named_by_its_own_heading() -> None:
+    """Gate 4 (G4-1): a small "Example: Specific SSL Version" section was merged with the next
+    section, and the retry text was shown under the SSL heading. Each is now its own chunk, in
+    a document file and in a web page alike."""
+    ssl = "Example: Specific SSL Version\n^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\nUse SSLv3 here.\n"
+    retries = (
+        "Example: Automatic Retries\n^^^^^^^^^^^^^^^^^^^^^^^^^^\n\n"
+        "By default, Requests does not retry failed connections. " * 3
     )
-    # A small last section joins back too.
-    tail = [unit(0, 5, "A"), unit(1, 150), unit(2, 5, "B"), unit(3, 15)]
-    assert len(pack_units(tail, target=200, max_tokens=300, overlap=0, join_back=True)) == 1
+    body = "Transport Adapters\n------------------\n\nAdapters.\n\n" + ssl + "\n" + retries
+    snap = _files_snapshot("advanced.rst", body, start_line=1, end_line=body.count("\n") + 1)
+    drafts = chunk_file(snap, snap.files[0], WordCounter())
+    retry = next(d for d in drafts if "does not retry" in d.text)
+    assert retry.text.startswith(
+        "File: advanced.rst · Transport Adapters › Example: Automatic Retries (lines "
+    )
+    assert retry.locator["heading"] == "Example: Automatic Retries"
+    assert "SSLv3" not in retry.text
+    assert all("headings" not in d.locator for d in drafts)
+
+    web_text = (
+        "## Transport Adapters\n\nAdapters.\n\n### Example: Specific SSL Version\n\n"
+        "Use SSLv3 here.\n\n### Example: Automatic Retries\n\n"
+        + "By default, Requests does not retry failed connections. "
+        * 3
+    )
+    web = chunk_snapshot(text_snapshot(web_text), WordCounter())
+    retry = next(d for d in web if "does not retry" in d.text)
+    assert retry.text.startswith(
+        "Section: Transport Adapters › Example: Automatic Retries\n### Example: Automatic"
+    )
+    assert retry.locator["heading"] == "Example: Automatic Retries"
+    assert "SSLv3" not in retry.text
 
 
 # --- chunks of document files -----------------------------------------------------------------
@@ -273,10 +351,13 @@ def test_a_changelog_entry_carries_its_release_heading() -> None:
         assert header.endswith(f" (lines {start}-{end})")
         assert rest == "\n".join(file_lines[start - 1 : end])  # the body is exactly its lines
         assert draft.locator["kind"] is None and draft.locator["symbol"] is None
-    # The tiny 2.32.1 entry joined the chunk before it, so 2.32.0 starts a chunk of its own.
+    # Every release starts a chunk of its own (D-104), the tiny 2.32.1 entry too.
     starts = {d.locator["start_line"] for d in drafts}
-    assert file_lines.index("2.32.0 (2024-05-20)") + 1 in starts
-    assert any(d.locator.get("headings") for d in drafts)
+    for release in ("2.33.0 (2026-03-25)", "2.32.1 (2024-05-20)", "2.32.0 (2024-05-20)"):
+        assert file_lines.index(release) + 1 in starts
+    tiny = next(d for d in drafts if d.locator["heading"] == "2.32.1 (2024-05-20)")
+    assert "Add test certs." in tiny.text and "2.32.0" not in tiny.text
+    assert all("headings" not in d.locator for d in drafts)
 
 
 def test_a_chunk_starting_in_a_section_is_named_by_it_and_keeps_indentation() -> None:
@@ -305,15 +386,26 @@ def test_paged_document_files_get_the_heading_without_line_numbers() -> None:
     assert draft.locator == {"file": "report.pdf", "pages": [3], "heading": "Results"}
 
 
-def test_web_and_pasted_documents_are_unchanged() -> None:
-    """Section sources keep their behaviour: no File header, Markdown # headings only."""
-    text = "# Install\n\nRun pip.\n\nUsage\n-----\n\nCall it."
-    builder = SnapshotBuilder()
-    builder.add(text, heading="Install")
-    snap = Snapshot(builder.build(), "sections", builder.segments)
-    (draft,) = chunk_snapshot(snap, WordCounter())
-    assert draft.text == text
-    assert draft.locator["heading"] == "Install"
+def test_web_and_pasted_documents_carry_their_section_path() -> None:
+    """D-105: web pages, pasted and uploaded text are split at every Markdown heading (fenced
+    code holds none) and a chunk under a heading starts with ``Section: <heading path>``."""
+    text = (
+        "Intro.\n\n# Guide\n\n## Install\n\nRun pip.\n\n```\n# not a heading\n```\n\n"
+        "Usage\n-----\n\nCall it."
+    )
+    drafts = chunk_snapshot(text_snapshot(text), WordCounter())
+    assert [d.text.split("\n", 1)[0] for d in drafts] == [
+        "Intro.",
+        "Section: Guide › Install",
+        "Section: Guide › Usage",
+    ]
+    assert [d.locator["heading"] for d in drafts] == [None, "Install", "Usage"]
+    for draft in drafts:
+        assert draft.text.endswith(text[draft.start : draft.end])  # the body is the snapshot's
+        assert draft.locator["offset"] == draft.start
+    assert "# not a heading" in drafts[1].text
+    # "Guide" has no text of its own: it stays with "Install", named by the nearest heading.
+    assert drafts[1].text.split("\n")[1] == "# Guide"
 
 
 def test_what_a_header_states() -> None:
@@ -326,6 +418,24 @@ def test_what_a_header_states() -> None:
     assert header_content("File: a.pdf · 2 Results") == "File: a.pdf · Results"
     assert header_content("not a header") == ""
     assert without_numbering("2024 Annual report › Version 2.0") == "Annual report › Version 2.0"
+    # A web chunk's "Section:" line states its heading path without the numbering (D-105).
+    assert header_content("Section: 4 Limits › 4.2 Timeouts") == "Section: Limits › Timeouts"
+
+
+def test_the_section_line_of_web_chunks() -> None:
+    assert section_header("Guide ›  Install\n") == "Section: Guide › Install"
+    assert section_header("") == ""
+    chunk = "Section: Guide › Install\n# Install\n\nRun pip."
+    assert section_path(chunk) == "Guide › Install"
+    assert without_section_header(chunk) == "# Install\n\nRun pip."
+    assert split_header(chunk) == ("Section: Guide › Install", "# Install\n\nRun pip.")
+    # Only a first line followed by the body is a section line.
+    assert section_path("Section: alone") == ""
+    assert without_section_header("Section: alone") == "Section: alone"
+    assert section_path("Some text.\nSection: Guide\n") == ""
+    assert split_header("Plain text.") == ("", "Plain text.")
+    # Full-text search keeps the section path (D-051 drops only file line numbers).
+    assert search_text(chunk) == chunk
 
 
 def test_asciidoc_and_org_files_get_their_sections() -> None:
@@ -340,15 +450,13 @@ def test_asciidoc_and_org_files_get_their_sections() -> None:
     headers = [d.text.split("\n", 1)[0] for d in drafts]
     assert headers[0].startswith("File: guide.adoc · User Guide")
     assert all("[source" not in h and "[NOTE]" not in h for h in headers)
-    assert {t for d in drafts for t in d.locator.get("headings", [d.locator["heading"]])} <= {
-        "User Guide",
-        "Installation",
-        "Limits",
-    }
+    assert [d.locator["heading"] for d in drafts] == ["Installation", "Limits"]
+    assert headers[0].startswith("File: guide.adoc · User Guide › Installation (lines 1-")
     org = "#+TITLE: Ops notes\n\n* Setup\nInstall it.\n\n** Ports\nThe default port is 8080.\n"
     snap = _files_snapshot("ops.org", org, start_line=1, end_line=org.count("\n") + 1)
-    (draft,) = chunk_file(snap, snap.files[0], WordCounter())
-    assert draft.locator["headings"] == ["Setup", "Ports"]
+    drafts = chunk_file(snap, snap.files[0], WordCounter())
+    assert [d.locator["heading"] for d in drafts] == [None, "Setup", "Ports"]
+    assert drafts[2].text.startswith("File: ops.org · Setup › Ports (lines 6-7)")
 
 
 def test_a_tilde_transition_keeps_later_sections_in_restructuredtext() -> None:

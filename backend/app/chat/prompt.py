@@ -18,6 +18,7 @@ from typing import Any
 
 from app.capabilities.adapters.base import ChatMessage
 from app.chunking.clock import clock
+from app.chunking.header import section_path
 from app.chunking.headings import heading_syntax
 from app.grounding.code_checks import unescape_markdown
 from app.retrieval.parents import OutlineBlock, TranscriptWindow, outline_text, window_text
@@ -34,6 +35,8 @@ Rules:
 of the answer.
 - Every sentence must list, in "chunk_ids", the ids of the chunks that support it, for example \
 ["c2"]. Use only ids that appear in the message.
+- A sentence that uses names or facts from more than one chunk must list each of those chunks, \
+for example ["c1", "c3"] when it combines a name from c1 with a value from c3.
 - If the chunks do not contain the answer, return {"sentences": []}. Do not write a sentence \
 saying that the answer is missing.
 - Write short, plain sentences. Each sentence must be fully supported by the chunks it cites.
@@ -99,7 +102,8 @@ FEEDBACK_HEADING = (
     "not instructions:"
 )
 FEEDBACK_TASK = (
-    "Write the answer again. For each fact, cite the chunk that states it, or leave the fact out."
+    "Write the answer again. For each fact, cite the chunk that states it, or leave the fact out. "
+    "A sentence that uses names from several chunks cites all of them."
 )
 NOT_SUPPORTED = "not supported by the cited chunks"
 FEEDBACK_SENTENCE_CHARS = 300
@@ -111,12 +115,16 @@ class FailedSentence:
     """A failed sentence of the first reply, for the regeneration feedback (D-074).
 
     ``cited``: the labels it cited. ``missing``: each name or literal no cited chunk contains,
-    with the labels of the context chunks that do (empty: none does).
+    with the labels of the context chunks that do (empty: none does). ``combined`` (D-120): the
+    names of ``missing`` that no other chunk holds alone, whose labels are the chunks that hold
+    it together with the cited ones (``requests.codes.too_many``: the docstring has
+    ``requests.codes``, the cited table ``too_many``).
     """
 
     text: str
     cited: tuple[str, ...]
     missing: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    combined: tuple[str, ...] = ()
 
 
 def _short(text: str, limit: int) -> str:
@@ -124,17 +132,40 @@ def _short(text: str, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
+def _labels(labels: Sequence[str], joiner: str) -> str:
+    return labels[0] if len(labels) == 1 else f"{', '.join(labels[:-1])} {joiner} {labels[-1]}"
+
+
 def failure_reason(sentence: FailedSentence) -> str:
-    """For example "`requests.codes` is not in c3; it is in c1", or "not supported by the cited
-    chunks" when no name is missing."""
+    """For example "`requests.codes` is not in c3; it is in c1, so cite c1 as well", or "not
+    supported by the cited chunks" when no name is missing.
+
+    Each missing name says which context chunks have it, so the model can add the citation
+    (D-120): one of them, or, when only several together have it, all of them. It only reports:
+    the next reply's citations are verified as given.
+    """
     cited = ", ".join(sentence.cited) or "the cited chunks"
     reasons: list[str] = []
     for name, places in sentence.missing:
-        if places:
-            where = ", ".join(places[:FEEDBACK_MAX_PLACES])
-            reasons.append(f"`{name}` is not in {cited}; it is in {where}")
-        else:
+        shown = places[:FEEDBACK_MAX_PLACES]
+        if not shown:
             reasons.append(f"`{name}` is in none of the chunks")
+        elif name in sentence.combined:
+            add = _labels(shown, "and")
+            together = _labels([*sentence.cited, *shown], "and")
+            reasons.append(
+                f"`{name}` is not in {cited} alone; {together} together have every part of it, "
+                f"so cite {add} as well"
+            )
+        elif len(shown) == 1:
+            reasons.append(
+                f"`{name}` is not in {cited}; it is in {shown[0]}, so cite {shown[0]} as well"
+            )
+        else:
+            where = _labels(shown, "and")
+            reasons.append(
+                f"`{name}` is not in {cited}; it is in {where}, so cite one of them as well"
+            )
     return "; ".join(reasons) or NOT_SUPPORTED
 
 
@@ -201,8 +232,13 @@ def labelled(chunks: Sequence[RetrievedChunk]) -> dict[str, RetrievedChunk]:
     return {label(i): chunk for i, chunk in enumerate(chunks)}
 
 
-def describe_locator(locator: Mapping[str, object]) -> str:
-    """Where a chunk is in its source, in a few words (``p. 3–4``, ``lines 12–58`` …)."""
+def describe_locator(locator: Mapping[str, object], *, section: str | None = None) -> str:
+    """Where a chunk is in its source, in a few words (``p. 3–4``, ``lines 12–58`` …).
+
+    ``section``: for a web page's, pasted or uploaded text's chunk, the heading path to name
+    instead of the locator's innermost heading (``""``: name none, the chunk's ``Section:`` line
+    already does, D-105).
+    """
     file = locator.get("file")
     if isinstance(file, str) and file:
         start, end = locator.get("start_line"), locator.get("end_line")
@@ -220,6 +256,8 @@ def describe_locator(locator: Mapping[str, object]) -> str:
         speaker = locator.get("speaker")
         return f"{span}, {speaker}" if isinstance(speaker, str) and speaker else span
     heading = locator.get("heading")
+    if section is not None:
+        heading = section
     if isinstance(heading, str) and heading:
         return f"section “{heading}”"
     return ""
@@ -242,8 +280,9 @@ def reader_text(chunk: RetrievedChunk) -> str:
 
 
 def chunk_block(chunk_label: str, chunk: RetrievedChunk) -> str:
-    """One numbered chunk as the model sees it."""
-    where = describe_locator(chunk.locator)
+    """One numbered chunk as the model sees it. A chunk whose text starts with its ``Section:``
+    line (D-105) is not given the section a second time in its ``Source:`` line."""
+    where = describe_locator(chunk.locator, section="" if section_path(chunk.text) else None)
     title = " ".join(chunk.source_title.split()) or "Untitled"
     header = f"[{chunk_label}] Source: {title}" + (f" ({where})" if where else "")
     return f"{header}\n{reader_text(chunk).strip()}"

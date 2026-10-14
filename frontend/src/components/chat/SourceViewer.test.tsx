@@ -107,6 +107,8 @@ describe("source viewer: code (G6)", () => {
     expect(file).toHaveTextContent("src/requests/sessions.py, lines 250–253");
     expect(file).toHaveClass("font-mono");
     expect(within(viewer).getByTestId("viewer-commit")).toHaveTextContent("0123456");
+    // Module-level code has no symbol: nothing is shown for it.
+    expect(within(viewer).queryByTestId("viewer-symbol")).not.toBeInTheDocument();
 
     // Monospace, numbered from first_line.
     expect(code).toHaveClass("font-mono");
@@ -128,6 +130,37 @@ describe("source viewer: code (G6)", () => {
     // Scrolled so the highlight is in view.
     expect(code.scrollTop).toBe(codeScrollTop(201, 250, [250, 253], VIEWPORT));
     expect(code.scrollTop).toBeGreaterThan(0);
+  });
+
+  it("shows the code chunk's qualified symbol after the file path (G3-1)", async () => {
+    mockViewport();
+    const locator = {
+      file: "src/requests/sessions.py",
+      start_line: 250,
+      end_line: 253,
+      symbol: "SessionRedirectMixin.should_strip_auth",
+      kind: "method" as const,
+    };
+    const context = codeChunkContext();
+    spaceBackend({
+      sources: [repoSource()],
+      conversations: [conversation()],
+      messages: { cv_1: [userMessage("How are calls made?"), answerCitingCode()] },
+      contexts: { ch_code: { ...context, chunk: { ...context.chunk, locator } } },
+    });
+    const user = userEvent.setup();
+    renderApp(SPACE);
+
+    await user.click(
+      await screen.findByRole("button", { name: /^Citation 1: requests, src\/requests/ }),
+    );
+    const viewer = await screen.findByRole("dialog", { name: "requests" });
+    const symbol = await within(viewer).findByTestId("viewer-symbol");
+    expect(symbol).toHaveTextContent("· SessionRedirectMixin.should_strip_auth");
+    expect(symbol).toHaveClass("font-mono");
+    // After the file path, in the header.
+    const file = within(viewer).getByTestId("viewer-file");
+    expect(file.compareDocumentPosition(symbol) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("is positioned before paint: scrollTop is set before any passive effect runs", () => {
@@ -276,5 +309,93 @@ describe("source viewer: text and states", () => {
       "def request(self, method, url):",
     );
     expect(within(viewer).queryByTestId("code-view")).not.toBeInTheDocument();
+  });
+});
+
+describe("source viewer: document file sections (G4-1)", () => {
+  const DOC_LOCATOR = {
+    file: "docs/user/advanced.rst",
+    start_line: 1032,
+    end_line: 1056,
+    symbol: null,
+    kind: null,
+    heading: "Example: Automatic Retries",
+  };
+
+  function docAnswer(): Message {
+    return assistantMessage({
+      content: {
+        sentences: [
+          {
+            text: "Requests does not retry failed connections by default.",
+            citations: [
+              citation({
+                n: 1,
+                chunk_id: "ch_doc",
+                source_id: "src_repo",
+                source_title: "requests",
+                locator: DOC_LOCATOR,
+              }),
+            ],
+          },
+        ],
+      },
+      sources_used: [{ source_id: "src_repo", title: "requests" }],
+    });
+  }
+
+  it("names the section of the cited lines next to the file", async () => {
+    mockViewport();
+    spaceBackend({
+      sources: [repoSource()],
+      conversations: [conversation()],
+      messages: { cv_1: [userMessage("Does it retry?"), docAnswer()] },
+      contexts: {
+        ch_doc: {
+          ...codeChunkContext(
+            codeContext({
+              file: "docs/user/advanced.rst",
+              first_line: 1001,
+              language: "rst",
+              highlight: [1032, 1056],
+            }),
+          ),
+          chunk: chunk({
+            id: "ch_doc",
+            source_id: "src_repo",
+            source_title: "requests",
+            text: "By default, Requests does not retry failed connections.",
+            locator: DOC_LOCATOR,
+          }),
+        },
+      },
+    });
+    const user = userEvent.setup();
+    renderApp(SPACE);
+    await user.click(await screen.findByRole("button", { name: /^Citation 1: requests/ }));
+    const viewer = await screen.findByRole("dialog", { name: "requests" });
+    await within(viewer).findByTestId("code-view");
+    expect(within(viewer).getByTestId("viewer-file")).toHaveTextContent(
+      "docs/user/advanced.rst, lines 1032–1056",
+    );
+    expect(within(viewer).getByTestId("viewer-section")).toHaveTextContent(
+      "· Section: Example: Automatic Retries",
+    );
+  });
+
+  it("shows no section for code", async () => {
+    mockViewport();
+    spaceBackend({
+      sources: [repoSource()],
+      conversations: [conversation()],
+      messages: { cv_1: [userMessage("How are calls made?"), answerCitingCode()] },
+      contexts: { ch_code: codeChunkContext() },
+    });
+    const user = userEvent.setup();
+    renderApp(SPACE);
+    await user.click(await screen.findByRole("button", { name: /^Citation 1: requests/ }));
+    const viewer = await screen.findByRole("dialog", { name: "requests" });
+    await within(viewer).findByTestId("code-view");
+    expect(within(viewer).queryByTestId("viewer-section")).not.toBeInTheDocument();
   });
 });

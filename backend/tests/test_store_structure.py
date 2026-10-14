@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import Engine, event, text
 
-from app.chunking.dispatch import CHUNKER_VERSION
+from app.chunking.dispatch import CHUNKER_VERSION, CHUNKER_VERSIONS
 from app.chunking.document import ChunkDraft
 from app.chunking.imports import SourceFiles
 from app.chunking.structure import (
@@ -26,7 +26,7 @@ from app.chunking.structure import (
 from app.db.engine import get_engine
 from app.db.migrate import MIGRATIONS_ROOT, migrate
 from app.ingest import incremental
-from app.jobs.calibration import pipeline_key
+from app.jobs.calibration import CALIBRATION_VERSION, pipeline_key
 from app.retrieval.service import RetrievedChunk
 from app.retrieval.store import ChunkRow, FileRows, chunks_at_ordinals, load_chunks
 from tests.chat_helpers import add_source
@@ -293,10 +293,16 @@ def test_moved_rows_resolve_their_imports_against_the_new_files() -> None:
     assert [(i.target, i.module) for i in resolved.imports] == [("pkg/b/LIMIT.py", True)]
 
 
-def test_chunker_version_six_changes_the_calibration_pipeline() -> None:
-    """D-077: the chunker bump re-chunks every file on refresh and makes saved calibration
-    rates stale (D-057), without anyone bumping CALIBRATION_VERSION."""
-    assert CHUNKER_VERSION == "p3-treesitter-6"
+def test_chunker_version_seven_changes_the_calibration_pipeline() -> None:
+    """D-104/D-107: the chunker bump re-chunks document files on refresh and makes saved
+    calibration rates stale (D-057); the calibration version is bumped with it."""
+    assert CHUNKER_VERSION == "p5-headings-7"
+    assert CALIBRATION_VERSION == 7
+    assert CHUNKER_VERSIONS == {
+        "code": "p3-treesitter-6",  # code chunks did not change in 7: they are kept
+        "document": "p5-headings-7",
+        "transcript": "p3-treesitter-6",
+    }
     current = pipeline_key("google/embeddinggemma-2", "rev")
-    assert "chunker-p3-treesitter-6" in current
-    assert current != current.replace("p3-treesitter-6", "p3-treesitter-5")
+    assert "chunker-p5-headings-7" in current and "calibration-7" in current
+    assert current != current.replace("p5-headings-7", "p3-treesitter-6")

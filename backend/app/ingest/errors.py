@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from app.ideation.marker import IDEA_BRIEF_NEXT_STEP, IDEA_BRIEF_REASON
 
 
@@ -144,6 +146,10 @@ EMBEDDING_CHANGED = (
     "This space was indexed with a different embedding model.",
     "Create a new space for new sources.",
 )
+REINDEX_NO_SNAPSHOT = (
+    "The saved copy of this source could not be read, so it was not re-indexed.",
+    "Refresh the source, or remove it and add it again.",
+)
 CANCELLED = ("Processing was cancelled.", "Remove this source, or add it again.")
 CANCELLED_REFRESHABLE = ("Processing was cancelled.", REFRESH)
 INTERNAL = ("Something went wrong while processing this source.", REFRESH)
@@ -160,6 +166,18 @@ WARN_BASIC_PDF = (
     "layout may be lost."
 )
 SHORT_TEXT_CHARS = 300
+
+
+def join_warnings(warnings: Iterable[str]) -> str | None:
+    """Store a source's quality warnings one per line (``sources.quality_warning``)."""
+    lines = [" ".join(w.split()) for w in warnings]
+    return "\n".join(dict.fromkeys(w for w in lines if w)) or None
+
+
+def split_warnings(stored: str | None) -> list[str]:
+    """The stored warnings, one per problem. Rows stored before one-per-line (G4-4) come back as a
+    single warning."""
+    return [line.strip() for line in (stored or "").splitlines() if line.strip()]
 
 
 def fail(pair: tuple[str, str]) -> IngestError:

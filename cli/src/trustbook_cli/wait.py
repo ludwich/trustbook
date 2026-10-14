@@ -14,11 +14,33 @@ POLL_S = 2.0
 QUIET_S = 30.0
 
 
-def _progress(source: dict[str, Any]) -> str:
-    status = str(source.get("status", "?"))
-    progress = source.get("progress")
+# Why a running job shows no progress yet (the API's ``stage``, D-113).
+STAGES = {
+    "waiting_for_calibration": "waiting for calibration",
+    "loading_models": "loading models",
+}
+
+
+def stage_text(item: dict[str, Any]) -> str | None:
+    """``loading models`` / ``waiting for calibration`` while the API reports one, else None."""
+    stage = item.get("stage")
+    if not isinstance(stage, str) or not stage:
+        return None
+    return STAGES.get(stage, stage.replace("_", " "))
+
+
+def status_text(item: dict[str, Any]) -> str:
+    """``reading 40%``; with a stage ``loading models (indexing 40%)``."""
+    status = str(item.get("status", "?"))
+    progress = item.get("progress")
     if status not in DONE and isinstance(progress, int | float) and not isinstance(progress, bool):
         status += f" {round(progress * 100)}%"
+    stage = stage_text(item) if status not in DONE else None
+    return f"{stage} ({status})" if stage else status
+
+
+def _progress(source: dict[str, Any]) -> str:
+    status = status_text(source)
     if status == "failed" and source.get("failure_reason"):
         status += f": {source['failure_reason']}"
     return f"{source.get('title') or source.get('id')}: {status}"

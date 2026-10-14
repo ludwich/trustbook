@@ -12,6 +12,13 @@ reference: `docs/cli.md` in the Trustbook repository.
 ## Running it
 
 - Installed on this computer: `trustbook …`
+- If `trustbook` is blocked ("Access denied") or not found but the package is installed:
+  `python -m trustbook_cli …` (same arguments, same exit codes). To keep typing `trustbook` in
+  Git Bash, create `~/bin/trustbook` (`~/bin` must be on `PATH`) and run `chmod +x ~/bin/trustbook`:
+  ```sh
+  #!/bin/sh
+  exec python -m trustbook_cli "$@"
+  ```
 - Otherwise through Docker, from the folder with Trustbook's `compose.yaml`:
   `docker compose exec -T app trustbook …`
 - Always pass `--json` and read the single JSON document on stdout. Check the exit code.
@@ -52,9 +59,10 @@ it never returns 2.
 
 ## Refusals (exit 2): final
 
-Exit 2 (`verdict` `refused`) means Trustbook did not find the answer in the space's sources. Tell
-the user plainly: "Trustbook could not find this in the sources of <space>", with
-`refusal.message` and `refusal.suggestion` if there is one.
+Exit 2 (`verdict` `refused`) means Trustbook did not give a verified answer from the space's
+sources. Tell the user plainly: "Trustbook could not find this in the sources of <space>" (for
+`refusal.reason` `unsupported`: "Trustbook could not verify an answer from the sources of
+<space>"), with `refusal.message` and `refusal.suggestion` if there is one.
 
 Then stop. Do **not**:
 
@@ -67,7 +75,9 @@ The refusal is Trustbook's result, not an error to work around.
 
 `refusal.reason` tells why: `not_in_sources`, `no_sources` (the space has nothing ready yet: the
 user may want to add or wait for sources), `invalid_output` (the model's reply was unusable; the
-user may try again later), `chitchat` (the question was taken as small talk).
+user may try again later), `unsupported` (an answer was drafted but Trustbook could not verify it
+against its sources; tell the user that, not that the sources lack it; the user may rephrase or
+name the file or function), `chitchat` (the question was taken as small talk).
 
 ## Adding sources (only when the user asks)
 

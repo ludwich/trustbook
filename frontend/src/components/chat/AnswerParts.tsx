@@ -5,9 +5,10 @@ import {
   IconFileSearch,
   IconInfoCircle,
   IconShieldQuestion,
+  IconShieldX,
 } from "@tabler/icons-react";
 import { useId, useState } from "react";
-import type { AnswerSentence, Citation, MessageBadge } from "@/api/types";
+import type { AnswerSentence, Citation, MessageBadge, RefusalReason } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { formatLocator } from "@/lib/locator";
 import { cn } from "@/lib/utils";
@@ -137,26 +138,39 @@ export function IdeationHint({ onOpenIdeation }: { onOpenIdeation?: () => void }
 }
 
 export const NOT_IN_SOURCES = "Not in your sources";
+export const NOT_VERIFIED = "Couldn't verify an answer";
 
 /**
  * Calm card for "the sources don't answer this" (G5). The title is the refusal message
  * ("Not in your sources", or e.g. "No answer with citations" for unusable model output); the only
  * subtitle is the suggestion, and nothing repeats the title. No suggestion → no subtitle.
+ *
+ * `reason` (D-118): a verification refusal (`unsupported`: an answer was drafted but could not be
+ * verified) gets its own icon and fallback title, so it never looks like "Not in your sources".
+ * Messages stored before the reason was have none and show their stored text as before.
  */
 export function RefusalCard({
   message,
   suggestion,
+  reason,
 }: {
   message: string | null | undefined;
   suggestion: string | null | undefined;
+  reason?: RefusalReason | null;
 }) {
-  const title = message?.trim() || NOT_IN_SOURCES;
+  const unverified = reason === "unsupported";
+  const title = message?.trim() || (unverified ? NOT_VERIFIED : NOT_IN_SOURCES);
   const sub = suggestion?.trim();
   const showSub = Boolean(sub) && !sameText(sub, title);
+  const Icon = unverified ? IconShieldX : IconFileSearch;
   return (
-    <div className="grid gap-1 rounded-lg border bg-muted/50 px-4 py-3" data-testid="refusal-card">
+    <div
+      className="grid gap-1 rounded-lg border bg-muted/50 px-4 py-3"
+      data-testid="refusal-card"
+      data-reason={reason ?? undefined}
+    >
       <p className="flex items-center gap-1.5 font-medium" data-testid="refusal-title">
-        <IconFileSearch className="size-4 text-muted-foreground" aria-hidden />
+        <Icon className="size-4 text-muted-foreground" aria-hidden />
         {title}
       </p>
       {showSub && (

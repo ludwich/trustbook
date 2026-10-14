@@ -30,10 +30,11 @@ import {
   canRefresh,
   isWebSnapshot,
   refreshStatsText,
+  STAGE_TEXT,
   STATUS_TEXT,
   statsLine,
   TYPE_LABELS,
-  visibleQualityWarning,
+  visibleQualityWarnings,
 } from "./sourceMeta";
 import { SourceTypeIcon } from "./SourceTypeIcon";
 
@@ -56,7 +57,7 @@ export function SourceRow({
   const failed = source.status === "failed";
   const stats = source.status === "ready" ? statsLine(source) : "";
   const skipped = source.stats.skipped_secrets ?? 0;
-  const warning = visibleQualityWarning(source);
+  const warnings = visibleQualityWarnings(source);
   const actionError = refresh.error ?? remove.error;
   const snapshot =
     isWebSnapshot(source) && source.snapshot_at ? `Snapshot ${formatDate(source.snapshot_at)}` : "";
@@ -85,10 +86,11 @@ export function SourceRow({
           />
         </span>
         <SourceTypeIcon source={source} className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-        <div className="min-w-0 flex-1">
+        {/* Long names, paths and messages wrap anywhere instead of running past the edge (G4-4). */}
+        <div className="min-w-0 flex-1 wrap-anywhere">
           <p
             className={cn(
-              "truncate text-sm leading-snug",
+              "text-sm leading-snug",
               (failed || !source.enabled) && "text-muted-foreground",
             )}
             title={source.origin ? `${source.title}\n${source.origin}` : source.title}
@@ -102,7 +104,7 @@ export function SourceRow({
               <span className="text-xs text-muted-foreground">
                 {source.status === "queued"
                   ? "Waiting in the queue"
-                  : `${STATUS_TEXT[source.status]}…`}
+                  : `${source.stage ? STAGE_TEXT[source.stage] : STATUS_TEXT[source.status]}…`}
               </span>
               {source.status !== "queued" && (
                 <Progress
@@ -117,7 +119,9 @@ export function SourceRow({
             <div className="mt-1 grid gap-0.5 text-xs">
               <p className="flex items-start gap-1 text-destructive">
                 <IconAlertCircle className="mt-px size-3.5 shrink-0" aria-hidden />
-                <span>{source.failure_reason ?? "Trustbook could not read this source."}</span>
+                <span className="min-w-0">
+                  {source.failure_reason ?? "Trustbook could not read this source."}
+                </span>
               </p>
               {source.failure_next_step && (
                 <p className="pl-4.5 text-muted-foreground">{source.failure_next_step}</p>
@@ -125,12 +129,16 @@ export function SourceRow({
             </div>
           )}
 
-          {warning && (
-            <p className="mt-1 flex items-start gap-1 text-xs text-warning">
+          {warnings.map((warning) => (
+            <p
+              key={warning}
+              className="mt-1 flex items-start gap-1 text-xs text-warning"
+              data-testid="source-warning"
+            >
               <IconAlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
-              <span>{warning}</span>
+              <span className="min-w-0">{warning}</span>
             </p>
-          )}
+          ))}
 
           {skipped > 0 && (
             <button

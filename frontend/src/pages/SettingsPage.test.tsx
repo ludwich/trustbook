@@ -86,6 +86,32 @@ describe("settings", () => {
     expect(screen.getByText("Document parsing arrives in the next phase.")).toBeInTheDocument();
   });
 
+  it("says when the speed test is out of date because indexing changed (D-107)", async () => {
+    server.use(
+      http.get("*/api/calibration", () =>
+        HttpResponse.json({
+          status: "done",
+          outdated: true,
+          results: {
+            version: 6,
+            measured_at: "2026-10-10T07:00:00Z",
+            cpu_count: 12,
+            embedding_chunks_per_s: 41.5,
+            rerank_pairs_per_s: 120,
+            parse_pages_per_s: null,
+            stt_realtime_factor: 0.18,
+            notes: [],
+          },
+        }),
+      ),
+    );
+    renderApp("/settings");
+    expect(await screen.findByTestId("calibration-outdated")).toHaveTextContent("Out of date");
+    expect(
+      screen.getByText(/Indexing has changed since this was measured\. The speed test runs again/),
+    ).toBeInTheDocument();
+  });
+
   it("shows the request log with expandable excerpt and clears it after confirming", async () => {
     const user = userEvent.setup();
     let entries = [entry];

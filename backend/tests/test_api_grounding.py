@@ -29,7 +29,15 @@ from tests.chat_helpers import (
 )
 from tests.conftest import AppFactory
 from tests.fakes import FakeGrounding, Router
-from tests.parent_helpers import ADAPTERS, adapters_specs, add_rows, doc, turn, with_parent_rows
+from tests.parent_helpers import (
+    ADAPTERS,
+    adapters_specs,
+    add_rows,
+    doc,
+    status_specs,
+    turn,
+    with_parent_rows,
+)
 
 GUIDE = "Requests is an HTTP library for Python. Proxies are configured with the proxies argument."
 QUOTE = "Proxies are configured with the proxies argument."
@@ -150,12 +158,17 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
     assert stages(events) == ["retrieving", "generating", "checking", "generating", "checking"]
     refused = events[-2][1]
     assert refused["reason"] == "unsupported"
-    assert refused["message"] == "Not in your sources"
+    # Its own card (D-118, G3-2): not "Not in your sources" / "Add sources that cover …".
+    assert refused["message"] == "Couldn't verify an answer"
     assert refused["suggestion"] == (
-        "Add sources that cover “how are proxies configured”, then ask again."
+        "An answer was drafted from your sources, but Trustbook could not verify it against the "
+        "passages it cited, so it is not shown. Try rephrasing the question, or name the file or "
+        "function you mean."
     )
     message = events[-1][1]["message"]
     assert message["badge"] == "refused"
+    assert message["refusal_reason"] == "unsupported"
+    assert message["content"]["text"] == "Couldn't verify an answer"
     assert message["content"]["sentences"] == []
     diagnostics = message["diagnostics"]
     assert diagnostics.pop("judge_seconds") is None
@@ -191,6 +204,9 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
         "window_tokens": 0,
         "window_fingerprint": None,
         "window_only": [0, 0],
+        # Layer 3 clean-up (D-117): nothing to drop or merge.
+        "syntax_fragments": [],
+        "duplicate_sentences": 0,
     }
     assert len(chat.calls) == 2  # answer, regeneration
     # The regeneration is told which sentence of the first reply failed and why (D-074), in the
@@ -581,6 +597,29 @@ def test_the_outline_changes_only_the_outline_fingerprint(
     assert off["expansions"] == [] and off["promoted_tokens"] == 0
     # The promoted chunk was a numbered chunk: the context fingerprint covers it.
     assert off["retrieval_fingerprint"] != on["retrieval_fingerprint"]
+
+
+def test_a_data_table_in_context_brings_its_user_into_the_answer_context(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-119 (G3-2 F1): the ``_codes`` part with the 429 row is in the context, ``_init`` (which
+    reads ``_codes``) is cut by the 8-chunk cap; it is promoted as ``data_user`` for the table
+    part, a numbered chunk the diagnostics record like any expansion. Off with parent context."""
+
+    with_parent_rows(monkeypatch)
+    source = add_source(env.engine, "requests", source_type="folder", group="code")
+    notes = [
+        doc(20 + n, 1, 5, f"Note {n} about status names for 429.", section=None, head=False)
+        for n in range(6)
+    ]
+    ids = add_rows(env.engine, env.index, source, [*status_specs(), *notes])
+    question = "Which status names does 429 have?"
+    d = env.ask(question)[-1][1]["message"]["diagnostics"]
+    assert d["expansions"] == [{"chunk_id": ids[4], "kind": "data_user", "referrer": ids[2]}]
+    assert d["promoted_tokens"] == 120
+    env.client.put("/api/settings", json={"retrieval": {"parent_context": False}})
+    off = env.ask(question)[-1][1]["message"]["diagnostics"]
+    assert off["expansions"] == [] and off["promoted_tokens"] == 0
 
 
 # --- transcript windows (D-091) ---------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -181,6 +181,41 @@ describe("Ideation tab", () => {
     expect(within(card).getByTestId("suggestion-tag")).toBeInTheDocument();
     expect(within(card).queryByTestId("answer-badge")).not.toBeInTheDocument();
     expect(state.ideationCalls.streams).toEqual([]);
+  });
+
+  it("keeps the Ideation tab in the URL, so a reload opens it again", async () => {
+    spaceBackend({ ideationSessions: [firstTurn()] });
+    const user = await openIdeation();
+    await waitFor(() =>
+      expect(screen.getByTestId("location")).toHaveTextContent(`${SPACE}?tab=ideation`),
+    );
+    expect(
+      await screen.findByRole("region", { name: "What should be decided about “Who it is for”?" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Chat" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("location")).toHaveTextContent(/^\/spaces\/sp_1$/),
+    );
+    cleanup();
+
+    // A reload at the Ideation URL opens the tab without a click.
+    renderApp(`${SPACE}?tab=ideation`);
+    expect(await screen.findByRole("tab", { name: "Ideation" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(
+      await screen.findByRole("region", { name: "What should be decided about “Who it is for”?" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens Chat for a space URL without a tab or with an unknown one", async () => {
+    spaceBackend({});
+    renderApp(`${SPACE}?tab=nonsense`);
+    expect(await screen.findByRole("tab", { name: "Chat" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   it("after a reload during a turn, waits for the server's turn instead of asking again", async () => {

@@ -40,6 +40,7 @@ def test_jobs_list_and_actions(client: TestClient) -> None:
         "started_at",
         "finished_at",
         "eta_seconds",
+        "stage",
     }
     assert (first["id"], first["space_name"]) == (a.id, "ACME")
 

@@ -66,9 +66,11 @@ from app.chunking.header import (
     header_content,
     header_context,
     section_of,
+    section_path,
     stated_in_full,
     without_numbering,
     without_numbers,
+    without_section_header,
 )
 from app.grounding.code_checks import (
     _NAME_PART,
@@ -275,10 +277,13 @@ def number_chunk(label: str, chunk: RetrievedChunk) -> NumberedChunk:
 
     Code (a file in a folder source): the ``File: …`` header line is stripped and the body is
     numbered from the locator's start line. Prose (web pages, documents, transcripts): numbered
-    from 1 by :func:`prose_lines`.
+    from 1 by :func:`prose_lines`, without a ``Section: …`` first line (D-105; the excerpt's
+    title names the section instead).
     """
     if not is_code_chunk(chunk):
-        return NumberedChunk(label, chunk, 1, tuple(prose_lines(chunk.text)))
+        return NumberedChunk(
+            label, chunk, 1, tuple(prose_lines(without_section_header(chunk.text)))
+        )
     lines = chunk.text.split("\n")
     if lines and lines[0].startswith(FILE_PREFIX):
         lines = lines[1:]
@@ -292,7 +297,8 @@ def _where(chunk: NumberedChunk) -> str:
     locator = chunk.chunk.locator
     if not is_code_chunk(chunk.chunk):
         title = " ".join(chunk.chunk.source_title.split()) or "Untitled"
-        place = describe_locator(locator)
+        path = section_path(chunk.chunk.text)  # the heading path of a ``Section:`` line (D-105)
+        place = describe_locator(locator, section=path or None)
         where = f"{title} ({place})" if place else title
         return f"{where}, lines {chunk.first}-{chunk.last}"
     file = str(locator.get("file") or "")
