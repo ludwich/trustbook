@@ -151,6 +151,27 @@ def test_refused_event_and_suggestion() -> None:
     assert out == "Not answered (not_in_sources): Not in your sources.\nAdd one.\n"
 
 
+def test_a_verification_refusal_keeps_its_own_reason() -> None:
+    """D-118 (G3-2): ``unsupported`` is told apart from ``not_in_sources``, from the ``refused``
+    event or, without one, from the stored message's ``refusal_reason``."""
+    refusal = {
+        "reason": "unsupported",
+        "message": "Couldn't verify an answer",
+        "suggestion": "Try rephrasing the question, or name the file or function you mean.",
+    }
+    content = {"text": refusal["message"], "suggestion": refusal["suggestion"], "sentences": []}
+    stored = done(content, "refused", refusal_reason="unsupported")
+    for stream in (sse(("refused", refusal), stored), sse(stored)):
+        code, out, _err = run(FakeApi(stream), "ask", "q", "--space", "Acme", "--json")
+        assert code == 2 and json.loads(out)["refusal"] == refusal
+    code, out, _err = run(FakeApi(sse(stored)), "ask", "q", "--space", "Acme")
+    assert out.startswith("Not answered (unsupported): Couldn't verify an answer\n")
+    # A refusal stored before the reason was (no event, no field) still reads as before.
+    old = sse(done({"text": "Not in your sources", "sentences": []}, "refused"))
+    code, out, _err = run(FakeApi(old), "ask", "q", "--space", "Acme", "--json")
+    assert code == 2 and json.loads(out)["refusal"]["reason"] == "not_in_sources"
+
+
 @pytest.mark.parametrize(
     ("stream", "message"),
     [

@@ -221,8 +221,9 @@ def ask(
     refusal: dict[str, Any] | None = None
     if stream.refusal is not None or badge == "refused":
         r = stream.refusal or {}
+        # The stored message carries the reason too (D-118); a refusal stored before it had none.
         refusal = {
-            "reason": str(r.get("reason") or "not_in_sources"),
+            "reason": str(r.get("reason") or message.get("refusal_reason") or "not_in_sources"),
             "message": str(r.get("message") or content.get("text") or ""),
             "suggestion": _str(r.get("suggestion")) or _str(content.get("suggestion")),
         }

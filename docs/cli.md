@@ -183,8 +183,11 @@ Shown indented; the CLI writes it on one line.
   reason (`{text, reason}`). They are **not** from the sources and must not be presented as facts.
 - `refusal`: `null`, or `{reason, message, suggestion}` with `verdict` `refused`, empty `answer`,
   `sentences` and `citations`, and exit code 2. Reasons: `not_in_sources`, `no_sources` (nothing
-  ready in the space), `invalid_output` (the model's reply was unusable), `unsupported`, and
-  `chitchat` (a greeting got the fixed small-talk reply).
+  ready in the space), `invalid_output` (the model's reply was unusable), `unsupported` (an answer
+  was drafted but could not be verified against the passages it cited; message "Couldn't verify an
+  answer", D-118), and `chitchat` (a greeting got the fixed small-talk reply). Without a `refused`
+  event the reason comes from the stored message's `refusal_reason` (`not_in_sources` for refusals
+  stored before it existed).
 - `latency_s`: seconds from sending the question to the final answer.
 
 ### Other documents

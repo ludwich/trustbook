@@ -1476,7 +1476,13 @@ def ask(
                     if isinstance(message, dict):
                         if message.get("badge") == "refused" and result.outcome != "refused":
                             result.outcome = "refused"
-                            result.refusal_reason = result.refusal_reason or "refused"
+                            # The stored reason (D-118); "refused" for messages without one.
+                            stored = message.get("refusal_reason")
+                            result.refusal_reason = (
+                                result.refusal_reason
+                                or (stored if isinstance(stored, str) and stored else None)
+                                or "refused"
+                            )
                         content = message.get("content")
                         if isinstance(content, dict) and isinstance(content.get("sentences"), list):
                             final = [
