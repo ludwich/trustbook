@@ -17,9 +17,9 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 - [x] G3-2 ref-near-10: diagnosis (docs/reports/G3-2-ref-near-10.md); Ludwig approved F6, F1, F4, F2 (D-118..D-121,
       review follow-ups) and line 106 in the answer key (GATES.md, Gate 5). Before/after, 20 runs each: refusals
       2 → 2 (`unsupported`), verified 16 → 10, partial 2 → 8 (upper-case names removed by layer 5); report updated
-- [~] G3-3 second family: Ludwig chose gemma-4-26B-A4B-it-UD-Q4_K_XL. First two-model gate run: Qwen3.6 pass
-      (100%, 38/38; p95 42.1 s), Gemma failed to start (model load > test timeout) → runner waits for a model to
-      load (D-122). Re-run on HEAD in progress; then MODELS.md row
+- [x] G3-3 second family: gemma-4-26B-A4B-it-UD-Q4_K_XL (Ludwig's choice), one gate run with both models on
+      `2696786`: Qwen3.6 pass (100%, 0/13, p95 49.2 s); Gemma reported 97.2%, 23/23, code false refusals 2/13, p95
+      56.5 s; runner waits for a model to load (D-122); MODELS.md row
 - [x] Untested gate items made one-step: Gate 3b #8 skill behaviour (docs/cli.md one-liners, `claude -p`), Gate 4 #9 request log (test extended to a
       full session: seed, 4 turns, judge), Gate 4 seed dismiss
 
@@ -35,7 +35,8 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
       precision, p95 ~85 s; the second family once run)
 
 ## Gate 5 (fast to verify: one command or one click per finding; Gate 3 command once with both models)
-- [ ] Gate 5 checklist in docs/GATES.md, PR `phase-5 → main`, `phase-5-rc`
+- [x] Gate 5 checklist in docs/GATES.md
+- [~] PR `phase-5 → main`, `phase-5-rc`; then stop for Ludwig
 
 ## Notes for a restarted session
 - Phase 4 merged (`66bafd5`), tagged `phase-4`; `:latest` = Phase 4.
