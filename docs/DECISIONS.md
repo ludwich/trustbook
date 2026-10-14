@@ -2240,3 +2240,29 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   such a part still goes to the checker and fails there); treating a fragment as an unusable reply and
   retrying (a second answer call for a reply whose sentences are fine); `raw_decode` of the first object
   (does not apply: under strict output the fragment is inside the object).
+
+### D-118 A verification refusal has its own card, and the refusal reason is stored with the message (G3-2, F6)
+- **Finding (G3-2, `docs/reports/G3-2-ref-near-10.md`):** every ref-near-10 refusal was a verification refusal
+  (`unsupported`: layer 5 or the code judge failed the sentences), never `not_in_sources`, but the card showed
+  "Not in your sources" with "Add sources that cover …" for both, and the reason was not stored with the
+  message, so after a reload neither the UI nor the CLI could tell them apart. It looked like retrieval.
+- **Decision:**
+  - `refusal("unsupported")` has its own title, **"Couldn't verify an answer"**, and suggestion: "An answer was
+    drafted from your sources, but Trustbook could not verify it against the passages it cited, so it is not
+    shown. Try rephrasing the question, or name the file or function you mean." `not_in_sources`, `no_sources`
+    and `invalid_output` are unchanged.
+  - space.db migration 007 adds `messages.refusal_reason` (nullable, CHECK: the four reasons). `add_refusal`
+    stores it; `Message` gains `refusal_reason` (set only on refused assistant messages, else `null`). A refusal
+    stored before has `null` and shows its stored title and suggestion as before.
+  - UI: `RefusalCard` takes the reason (live from the `refused` event, after a reload from the message): for
+    `unsupported` a shield icon instead of the file-search one, `data-reason`, and "Couldn't verify an answer"
+    as the fallback title. CLI `trustbook ask` (`trustbook.ask/1`): `refusal.reason` from the event, else from
+    the stored `refusal_reason`, else `not_in_sources` as before; the eval runner reads it the same way. The
+    skill tells the agent to report an `unsupported` refusal as "could not verify", still final.
+- **Reason:** G3-2 (reporting root cause 3). Plain and honest (§15): the sources were not found lacking; an
+  answer drafted from them did not pass verification. No grounding layer changes: the same sentences are
+  refused, only the words and the stored reason differ.
+- **Alternatives:** keeping the reason only in the content JSON (no column: harder to query, and the message
+  API field would still be needed); showing the failed sentences on the card (they are unverified text, which
+  the refusal exists to withhold); one generic "No verified answer" title for all reasons (hides the
+  `not_in_sources` advice that is right in that case).

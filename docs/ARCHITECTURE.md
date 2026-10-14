@@ -317,7 +317,7 @@ group if most files are code, else `documents`.
 |---|---|
 | `status` | `{"stage": "retrieving"|"generating"|"checking"}` |
 | `sentence` | `{"index": int, "text": str, "citations": Citation[]}` |
-| `refused` | `{"reason": "not_in_sources"|"no_sources"|"invalid_output", "message": str, "suggestion": str|null}` |
+| `refused` | `{"reason": "not_in_sources"|"no_sources"|"invalid_output"|"unsupported", "message": str, "suggestion": str|null}` |
 | `done` | `{"message": Message}` |
 | `error` | `{"message": str}` |
 
@@ -328,8 +328,13 @@ Message  = {"id","role":"user"|"assistant","created_at",
                         "suggestion"?: str|null,                    // refusals only
                         "sentences"?: [{"text": str, "citations": Citation[]}]},
             "badge": null|"verified"|"partially_verified"|"refused"|"unverified",
-            "removed_sentences": [str], "sources_used": [{"source_id","title"}]}
+            "removed_sentences": [str], "sources_used": [{"source_id","title"}],
+            "refusal_reason": null|"not_in_sources"|"no_sources"|"invalid_output"|"unsupported"}  // D-118
 ```
+
+`refusal_reason` (D-118, `messages.refusal_reason`, space.db migration 007): the reason of a refused assistant
+message, the same as its `refused` event's; `null` on every other message and on refusals stored before
+migration 007 (they show their stored `content.text` / `suggestion` as before).
 
 Phase 1 has no sentence verifier (layer 4 is Phase 2): `badge` is `"refused"` for refusals, else `null`.
 Every stream ends with `done` (also after `refused`, carrying the persisted refusal message) or `error`.
@@ -436,7 +441,8 @@ Pipeline after layer 3 (forced citations), per answer and per overview:
 3. If more than half the sentences fail (since D-063: or the first one fails), regenerate **once** (same chunks,
    plus a note that only statements the chunks support are allowed) and verify again.
 4. **Refusal rule:** refuse if more than 50% of the sentences fail or the first sentence fails
-   (`refused`, reason `unsupported`, message "Not in your sources", the usual suggestion).
+   (`refused`, reason `unsupported`; since D-118 its own message "Couldn't verify an answer" and a suggestion to
+   rephrase or name the file or function, not "Not in your sources").
 5. Otherwise failing sentences are removed. Badge: `verified` (none removed) or `partially_verified`
    (`removed_sentences` holds their text). The UI shows them in a collapsed drawer: "Unverified, not from your
    sources".
@@ -484,7 +490,8 @@ GateLogEntry = {"id": int, "created": str, "input": str,          // input = the
 ```
 
 Contract additions summarised: `refused.reason` gains `"unsupported"` (layers 4–5: more than half of the
-sentences, or the first one, not supported; message "Not in your sources" with the usual suggestion);
+sentences, or the first one, not supported; message "Not in your sources" with the usual suggestion, since
+D-118 "Couldn't verify an answer" with its own suggestion);
 `Message.content` gains `"hint"?: "ideation"`; `Message` gains `diagnostics` (above) and `gate_log_id`.
 
 ## Phase 3: code
