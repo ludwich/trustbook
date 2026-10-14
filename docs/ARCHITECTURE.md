@@ -658,7 +658,7 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
 `retrieve()` expands the first 3 ranked context chunks that have a parent (`app/retrieval/parents.py`); one
 `store.FileRows` cache (one indexed range query per (source, file)) serves the lookups and the expansion.
 - **Types.** `RetrievedChunk` gains `parent_key: str | None`, `structure: Structure | None`, `ordinal: int` (-1
-  unknown) and `expansion: "section_previous" | "class_head" | None` (set only on promoted chunks, with
+  unknown) and `expansion: "section_previous" | "class_head" | "data_user" | None` (set only on promoted chunks, with
   `referrer` = the child). `RetrievedChunk.text` is always the stored child text. `Retrieval` gains
   `outline: tuple[OutlineBlock, ...]` (`OutlineBlock(source_id, file, lines, tokens)`, never a chunk),
   `transcript_windows: tuple[TranscriptWindow, ...]` (D-091, never a chunk either) and the property `promoted`.
@@ -666,6 +666,12 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
   section (same file; same parent key, or lines reaching a line-keyed section's heading), or the class head of a
   method / class-run child (≤ 200 tokens, or ranked). Each ≤ 600 tokens; ≤ 3 and ≤ 900 tokens per answer; only
   in the free part of the 6,000-token budget; appended after every other chunk; never in `ranked`.
+- **Data users** (D-119, citable): for any context chunk that is part of a module-level data table (locator
+  `kind: "data"`, parent the file's module; e.g. a `_codes = {…}` part kept only by the D-046 guard), one chunk of the
+  same file that uses the table's name (`_init` reads `_codes`), unless a context chunk already does: reranked users
+  first (highest score), then by position; `expansion: "data_user"`, `referrer` = the table chunk. After the
+  parent promotions, within the same caps (≤ 600 tokens each, ≤ 3 and ≤ 900 tokens per answer counted with them,
+  free budget only); like every promotion outside the 8-chunk cap, which limits only the ranked selection.
 - **Outline** (code files only, not citable): per file `imports:` (statements binding names the context's code
   uses, unused names cut to `…`), `module:` (top-level names, ≤ 24, `… and N more`), and per expanded class
   `<value-free decl>: <members>` (≤ 24, gaps `…`). No values (`=`), line numbers or labels; lines the context
@@ -720,7 +726,7 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
               "citation_s": float|null, "gate_s": float|null, "total_s": float|null},  // total: pipeline, without the gate
   "prompt_tokens": [int],                // per answer call, estimated (characters / 4)
   "completion_tokens": [int|null],       // per answer call, as the endpoint reports them
-  "expansions": [{"chunk_id": str, "kind": "section_previous"|"class_head", "referrer": str}],
+  "expansions": [{"chunk_id": str, "kind": "section_previous"|"class_head"|"data_user", "referrer": str}],
   "promoted_tokens": int, "outline_tokens": int,
   "outline_fingerprint": str|null,       // hash of the outline text; retrieval_fingerprint covers the chunks only
   "outline_only": [int],                 // per pass: failed sentences missing a name only the outline shows

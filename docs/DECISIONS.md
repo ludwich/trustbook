@@ -2266,3 +2266,37 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
   API field would still be needed); showing the failed sentences on the card (they are unverified text, which
   the refusal exists to withhold); one generic "No verified answer" title for all reasons (hides the
   `not_in_sources` advice that is right in that case).
+
+### D-119 A module-level data table in the context brings the same-file chunk that uses it (G3-2, F1)
+- **Finding (G3-2):** for ref-near-10 the `_codes` table part with the 429 row was in the context only through
+  the D-046 guard (rerank 0.017), last of 8, and never expanded. No context chunk held both `codes` and the 429
+  row, so a correct sentence needed two citations. `_init` (`for code, titles in _codes.items(): setattr(codes,
+  title, code)`), the chunk that ties the table to `requests.codes`, was reranked 18th and **cut by the 8-chunk
+  cap**, not by tokens (about 1.9k of 6k used).
+- **Decision (`app/retrieval/parents.py`, `data_user_promotions`):**
+  - A **data chunk** is a part of a big literal the code chunker split out (locator `kind: "data"`, D-056) whose
+    parent key is its file's module (`data_symbol`; a class-level table is not module-level). Its name is the
+    locator `symbol` (`_codes`).
+  - For every such chunk in the context (any position, guard-kept included, not only the first 3 that D-077
+    expands), in context order, one chunk of the **same file** that **uses** the name is promoted, unless a
+    context chunk already uses it. A use (`uses_name`): the name as a whole word, not an attribute (`x._codes`),
+    on a line that does not assign it at column 0; the table's own parts never count. Candidates come from the
+    file's stored rows (`FileRows`, D-077 metadata; nothing new is stored): reranked ones first (highest score),
+    then by position in the file; the first that fits is taken. Several parts of one table bring one user.
+  - **Budgets:** the D-077 promotion caps, shared with the parent promotions, which keep first claim:
+    ≤ 600 tokens per promoted chunk, ≤ 3 promoted chunks and ≤ 900 promoted tokens per answer, and only the free
+    part of the 6,000-token budget (it never displaces a chunk). **The 8-chunk cap:** like every D-077 promotion
+    it is outside it; the cap limits only the ranked selection (top 8 by rerank). Raising the cap would add a
+    ninth ranked chunk to every answer; this adds one chunk only when a table is in the context.
+  - The promoted chunk is an ordinary numbered chunk: verbatim stored text, citable by its own lines, verified by
+    every layer like any other, never in `ranked` (layer 2 unchanged). `expansion: "data_user"`, `referrer` =
+    the table chunk; `diagnostics.expansions` records it like the other kinds. Deterministic (stored rows,
+    rerank scores, ordinals). Off with `retrieval.parent_context` (the D-077 switch).
+  - Query-time only: no chunker or calibration version bump (`CHUNKER_VERSION` and `CALIBRATION_VERSION`
+    unchanged; calibration measures indexing speed, which this does not touch).
+- **Reason:** G3-2 (retrieval root cause 2, contributing to the verification refusals): with `_init` in the
+  context, `codes` and the table row are linked by a chunk the model can cite, so a sentence naming
+  `requests.codes` and `too_many_requests` can pass layer 5 on its citations. No grounding layer is loosened.
+- **Alternatives:** raising the 8-chunk cap (every answer pays); promoting `codes = LookupDict(...)` (line 106,
+  not in the ref-near-10 answer key, and it does not use the table); a requests-specific rule (not generic);
+  promoting every user (one is enough to bridge, and the caps are shared).

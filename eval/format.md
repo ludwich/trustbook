@@ -391,8 +391,8 @@ the API did not send them: `judge_calls` (every judge request), `judge_calls_per
 regenerated reply), `answer_calls` (JSON retries and the regeneration included), `timings` (seconds:
 retrieval, each answer call, each verification pass, citation choice, the gate, the pipeline total),
 `prompt_tokens` (estimated) and `completion_tokens` (as reported by the endpoint) per answer call,
-`expansions` (promoted chunk ids, `section_previous` or `class_head`, and the child each was promoted
-for), `promoted_tokens`, `outline_tokens`, `outline_fingerprint` (a hash of the outline;
+`expansions` (promoted chunk ids, `section_previous`, `class_head` or `data_user` (D-119), and the
+child each was promoted for), `promoted_tokens`, `outline_tokens`, `outline_fingerprint` (a hash of the outline;
 `retrieval_fingerprint` still covers only the numbered chunks), `outline_only` (per pass) and
 `promoted_cited` ([kept sentences citing a promoted chunk, those also citing another chunk]).
 Version 5 adds, per question, the transcript windows (D-091): `windows` (per window block, the
