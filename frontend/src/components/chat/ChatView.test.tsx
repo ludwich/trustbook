@@ -181,6 +181,60 @@ describe("chat", () => {
     expect(screen.queryByRole("button", { name: /show sources used/i })).not.toBeInTheDocument();
   });
 
+  it("tells a stored verification refusal from a not-in-sources one after a reload (D-118)", async () => {
+    const unverified =
+      "An answer was drafted from your sources, but Trustbook could not verify it against the " +
+      "passages it cited, so it is not shown. Try rephrasing the question, or name the file or " +
+      "function you mean.";
+    spaceBackend({
+      sources: READY_SOURCES,
+      conversations: [conversation()],
+      messages: {
+        cv_1: [
+          userMessage("Which names does requests.codes have for 429?", "m_u1"),
+          assistantMessage({
+            id: "m_a1",
+            badge: "refused",
+            refusal_reason: "unsupported",
+            content: { text: "Couldn't verify an answer", suggestion: unverified, sentences: [] },
+          }),
+          userMessage("What does the office lease cost?", "m_u2"),
+          assistantMessage({
+            id: "m_a2",
+            badge: "refused",
+            refusal_reason: "not_in_sources",
+            content: { text: "Not in your sources", suggestion: "Add sources.", sentences: [] },
+          }),
+          userMessage("And the parking?", "m_u3"),
+          // Stored before the reason was: no refusal_reason, its stored text as before.
+          assistantMessage({
+            id: "m_a3",
+            badge: "refused",
+            content: { text: "Not in your sources", suggestion: "Add more.", sentences: [] },
+          }),
+        ],
+      },
+    });
+    renderApp(SPACE);
+    await screen.findAllByTestId("refusal-card");
+    await waitFor(() => expect(screen.getAllByTestId("refusal-card")).toHaveLength(3));
+    const [first, second, third] = screen.getAllByTestId("refusal-card") as [
+      HTMLElement,
+      HTMLElement,
+      HTMLElement,
+    ];
+    expect(first).toHaveAttribute("data-reason", "unsupported");
+    expect(within(first).getByTestId("refusal-title")).toHaveTextContent(
+      "Couldn't verify an answer",
+    );
+    expect(within(first).getByTestId("refusal-suggestion")).toHaveTextContent(unverified);
+    expect(second).toHaveAttribute("data-reason", "not_in_sources");
+    expect(within(second).getByTestId("refusal-title")).toHaveTextContent("Not in your sources");
+    expect(third).not.toHaveAttribute("data-reason");
+    expect(within(third).getByTestId("refusal-title")).toHaveTextContent("Not in your sources");
+    expect(within(third).getByTestId("refusal-suggestion")).toHaveTextContent("Add more.");
+  });
+
   it("keeps a refusal visible when the stream ends without a stored message", async () => {
     spaceBackend({
       sources: READY_SOURCES,

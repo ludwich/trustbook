@@ -522,6 +522,11 @@ export interface Message {
   badge: MessageBadge | null;
   removed_sentences: string[];
   sources_used: { source_id: string; title: string }[];
+  /**
+   * Why a refused assistant message was refused (D-118). Null on other messages and on refusals
+   * stored before the reason was; optional so older fixtures and payloads still type-check.
+   */
+  refusal_reason?: RefusalReason | null;
 }
 
 export type ChatStage = "retrieving" | "generating" | "checking";
