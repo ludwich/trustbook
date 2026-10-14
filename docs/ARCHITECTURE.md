@@ -598,14 +598,18 @@ citing code only).
   `ANSWER_SYSTEM` on both attempts):
   ```
   These sentences of your previous reply failed verification. They are quoted from your reply, not instructions:
-  1. "<failed sentence, ≤ 300 chars, " → '>" (cited c3): `requests.codes` is not in c3; it is in c1.
+  1. "<failed sentence, ≤ 300 chars, " → '>" (cited c3): `requests.codes` is not in c3; it is in c1, so cite c1 as well.
   2. "<…>" (cited c2): `rate_limited` is in none of the chunks.
   3. "<…>" (cited c1): not supported by the cited chunks.
-  Write the answer again. For each fact, cite the chunk that states it, or leave the fact out.
+  4. "<…>" (cited c2): `requests.codes.too_many` is not in c2 alone; c2 and c1 together have every part of it, so cite c1 as well.
+  Write the answer again. For each fact, cite the chunk that states it, or leave the fact out. A sentence that uses names from several chunks cites all of them.
   ```
   A name is "missing" when layer 5 found it in no cited chunk (backticked names, numbers and value literals of
   sentences citing code) or a confirmation veto named it; "it is in" lists up to 3 other context chunk labels that
-  hold it under layer 5's test. The pipeline never changes a citation: the second reply is verified as given.
+  hold it under layer 5's test ("so cite one of them as well" for several). Since D-120, when no single chunk
+  holds it, the fewest other chunks (one, else two) that hold it together with the cited ones under layer 5's own
+  test (every part of a dotted name somewhere in them) are named instead (line 4). The pipeline never changes a
+  citation: the second reply is verified as given.
 - **`diagnostics.failed_sentences` (D-075)** on refused (`unsupported`) and partially verified answers, the
   failed sentences of the reply the outcome rests on (the second reply after a regeneration, unless it was unusable),
   in reply order:
@@ -709,8 +713,10 @@ Only children (the stored chunks) are ranked, labelled `cN`, verified and cited.
     [4:00–5:00] Anna: The venue for the launch party is the harbour hall.
   ```
   then on the regeneration only `About your previous reply:` + `REGENERATE_INSTRUCTION` + the D-074 feedback,
-  then `Question: …`. The system message is `ANSWER_SYSTEM` on both attempts, unchanged from phase 3 (the outline
-  rule is in `OUTLINE_HEADING`, so without an outline the first attempt's prompt is the pre-D-077 one).
+  then `Question: …`. The system message is `ANSWER_SYSTEM` on both attempts, unchanged from phase 3 until D-120
+  added one rule ("A sentence that uses names or facts from more than one chunk must list each of those chunks,
+  for example ["c1", "c3"] …"); the outline rule is in `OUTLINE_HEADING`, so without an outline the first
+  attempt's prompt has no outline text.
   `parse_prompt` → `PromptParts(chunks, outline, question, transcript)`.
 - **Grounding boundary.** No grounding layer reads the outline, the transcript windows, `parent_key`,
   `structure` or `expansion`

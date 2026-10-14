@@ -2300,3 +2300,30 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Alternatives:** raising the 8-chunk cap (every answer pays); promoting `codes = LookupDict(...)` (line 106,
   not in the ref-near-10 answer key, and it does not use the table); a requests-specific rule (not generic);
   promoting every user (one is enough to bridge, and the caps are shared).
+
+### D-120 The answer rules and the regeneration feedback ask for every chunk a sentence combines (G3-2, F4)
+- **Finding (G3-2):** in 3 of the 5 ref-near-10 refusals the model cited only the `_codes` table chunk for a
+  sentence that also said `requests.codes`; layer 5 rejected it (the name is not in the cited chunk). The table
+  plus the docstring (or `_init`, or line 106) always passes. The regeneration was told "`requests.codes` is not
+  in c2; it is in c1" (D-074), and for `requests.codes.too_many` "is in none of the chunks", because no single
+  chunk holds every part of that name, though c1 and c2 together do (layer 5's D-042 test over the cited texts).
+- **Decision:**
+  - `ANSWER_SYSTEM` gains one rule: "A sentence that uses names or facts from more than one chunk must list each
+    of those chunks, for example ["c1", "c3"] when it combines a name from c1 with a value from c3."
+    `FEEDBACK_TASK` ends with "A sentence that uses names from several chunks cites all of them."
+  - The feedback says what to add: "it is in c1, so cite c1 as well" (several: "it is in c1, c2 and c4, so
+    cite one of them as well"). When no other chunk holds a missing name alone, `joint_cover` finds the fewest
+    other context chunks (one, else two; the first in label order) that hold it together with the cited ones by
+    layer 5's own test (`name_in` over all their texts), and the feedback says "`requests.codes.too_many` is not in
+    c2 alone; c2 and c1 together have every part of it, so cite c1 as well". `FailedSentence.combined` marks such
+    names. Nothing else changes: "in none of the chunks" when no cover exists.
+  - The feedback only reports. Citations are checked exactly as given: the pipeline never adds or completes one
+    (D-064), and a second reply that still cites c2 alone fails as before. `joint_cover` reads only chunk text
+    (added to the grounding-isolation AST ban with `failed_sentences`).
+  - Prompt goldens retaken; the only differences are these strings (checked by reverting them).
+- **Reason:** G3-2 (verification root cause 1): a correct sentence about `requests.codes` and the 429 row needs
+  two citations; the model is now told so up front and, after a failure, which chunk to add. No grounding layer is
+  loosened.
+- **Alternatives:** completing the model's citations automatically (D-064 forbids it: the model must state its
+  support); relaxing layer 5 to accept a name found in any context chunk (weakens grounding); listing every
+  possible cover (longer feedback, same effect).
