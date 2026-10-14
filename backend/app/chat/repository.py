@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast, get_args
 
 from pydantic import ValidationError
 from sqlalchemy import Engine, literal_column
@@ -21,6 +21,7 @@ from app.chat.schemas import (
     MessageContent,
     MessageOut,
     Refusal,
+    RefusalReason,
     SentenceOut,
 )
 from app.chat.text import truncate
@@ -75,6 +76,10 @@ def message_out(row: Message) -> MessageOut:
         removed_raw = []
     removed = [str(s) for s in removed_raw] if isinstance(removed_raw, list) else []
     badge: Badge | None = row.badge  # type: ignore[assignment]  # CHECK constraint in SQL
+    reason = row.refusal_reason if row.role == "assistant" and badge == "refused" else None
+    refusal_reason: RefusalReason | None = (
+        cast(RefusalReason, reason) if reason in get_args(RefusalReason) else None
+    )
     return MessageOut(
         id=row.id,
         role="assistant" if row.role == "assistant" else "user",
@@ -85,6 +90,7 @@ def message_out(row: Message) -> MessageOut:
         sources_used=sources_used(content.sentences or []),
         diagnostics=diagnostics if row.role == "assistant" else None,
         gate_log_id=gate_log_id if row.role == "assistant" else None,
+        refusal_reason=refusal_reason,
     )
 
 
@@ -213,6 +219,7 @@ class ChatStore:
             "assistant",
             _with_extras(content, diagnostics, hint, gate_log_id),
             badge="refused",
+            refusal_reason=refusal.reason,
         )
 
     def add_reply(
@@ -243,6 +250,7 @@ class ChatStore:
         removed: Sequence[str] = (),
         scores: Sequence[dict[str, float | None]] = (),
         title_from: str | None = None,
+        refusal_reason: RefusalReason | None = None,
     ) -> MessageOut:
         now = utc_now_iso()
         row = Message(
@@ -253,6 +261,7 @@ class ChatStore:
             badge=badge,
             removed_sentences=json.dumps(list(removed), ensure_ascii=False),
             created_at=now,
+            refusal_reason=refusal_reason,
         )
         with Session(self._engine) as session:
             conversation = session.get(Conversation, conversation_id)

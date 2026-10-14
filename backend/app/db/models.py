@@ -103,6 +103,9 @@ class Message(SQLModel, table=True):
     badge: str | None = None
     removed_sentences: str = "[]"
     created_at: str
+    # Refused assistant messages only (D-118): not_in_sources, no_sources, invalid_output or
+    # unsupported. NULL for answers, replies and refusals stored before migration 007.
+    refusal_reason: str | None = None
 
 
 class Citation(SQLModel, table=True):

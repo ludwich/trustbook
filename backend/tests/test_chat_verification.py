@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from app.chat.pipeline import NOT_IN_SOURCES, Answered, Refused, answer, retrieval_fingerprint
+from app.chat.pipeline import (
+    NOT_VERIFIED,
+    UNSUPPORTED_SUGGESTION,
+    Answered,
+    Refused,
+    answer,
+    retrieval_fingerprint,
+)
 from app.chat.prompt import (
     ANSWER_SYSTEM,
     FEEDBACK_HEADING,
@@ -167,10 +174,9 @@ def test_first_sentence_failing_regenerates_once_then_refuses() -> None:
     outcome, stages = run(chat, {"Bad first.": 0.1, "Bad again.": 0.2})
     assert isinstance(outcome, Refused)
     assert outcome.refusal.reason == "unsupported"
-    assert outcome.refusal.message == NOT_IN_SOURCES
-    assert outcome.refusal.suggestion == (
-        "Add sources that cover “how are proxies configured in requests”, then ask again."
-    )
+    # A verification refusal has its own title and suggestion, not "add sources" (D-118).
+    assert outcome.refusal.message == NOT_VERIFIED
+    assert outcome.refusal.suggestion == UNSUPPORTED_SUGGESTION
     assert outcome.diagnostics.sentence_scores == [0.2, 1.0, 1.0]
     assert outcome.diagnostics.regenerated is True
     # The refusal keeps the failed sentence of the reply it rests on and why (D-075).

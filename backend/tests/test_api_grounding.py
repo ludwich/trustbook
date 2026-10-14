@@ -150,12 +150,17 @@ def test_mostly_unsupported_answer_is_regenerated_then_refused(
     assert stages(events) == ["retrieving", "generating", "checking", "generating", "checking"]
     refused = events[-2][1]
     assert refused["reason"] == "unsupported"
-    assert refused["message"] == "Not in your sources"
+    # Its own card (D-118, G3-2): not "Not in your sources" / "Add sources that cover …".
+    assert refused["message"] == "Couldn't verify an answer"
     assert refused["suggestion"] == (
-        "Add sources that cover “how are proxies configured”, then ask again."
+        "An answer was drafted from your sources, but Trustbook could not verify it against the "
+        "passages it cited, so it is not shown. Try rephrasing the question, or name the file or "
+        "function you mean."
     )
     message = events[-1][1]["message"]
     assert message["badge"] == "refused"
+    assert message["refusal_reason"] == "unsupported"
+    assert message["content"]["text"] == "Couldn't verify an answer"
     assert message["content"]["sentences"] == []
     diagnostics = message["diagnostics"]
     assert diagnostics.pop("judge_seconds") is None

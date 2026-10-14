@@ -83,6 +83,7 @@ logger = logging.getLogger("trustbook.chat")
 
 NOT_IN_SOURCES = "Not in your sources"
 NO_CITED_ANSWER = "No answer with citations"
+NOT_VERIFIED = "Couldn't verify an answer"
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,13 @@ Outcome = Answered | Refused
 
 NO_SOURCES_SUGGESTION = "Add or tick at least one ready source, then ask again."
 GENERIC_SUGGESTION = "Add sources about this topic, then ask again."
+# ``unsupported`` (D-118, G3-2): an answer was drafted from the sources, but verification (layers
+# 4 and 5) did not confirm enough of it, so nothing is shown. Not "add sources": they may hold it.
+UNSUPPORTED_SUGGESTION = (
+    "An answer was drafted from your sources, but Trustbook could not verify it against the "
+    "passages it cited, so it is not shown. Try rephrasing the question, or name the file or "
+    "function you mean."
+)
 
 
 def suggestion_for(question: str) -> str:
@@ -123,10 +131,14 @@ def refusal(reason: RefusalReason, question: str) -> Refusal:
     """The plain-English refusal for ``reason``.
 
     ``message`` is only the title the UI shows ("Not in your sources"); ``suggestion`` is the
-    subtitle, so the two never repeat each other.
+    subtitle, so the two never repeat each other. A verification refusal (``unsupported``) has
+    its own title and suggestion (D-118): the sources were not found lacking, the answer drafted
+    from them could not be verified.
     """
     if reason == "no_sources":
         return Refusal(reason=reason, message=NOT_IN_SOURCES, suggestion=NO_SOURCES_SUGGESTION)
+    if reason == "unsupported":
+        return Refusal(reason=reason, message=NOT_VERIFIED, suggestion=UNSUPPORTED_SUGGESTION)
     if reason == "invalid_output":
         return Refusal(
             reason=reason,

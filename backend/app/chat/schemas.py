@@ -211,6 +211,9 @@ class MessageOut(BaseModel):
     sources_used: list[SourceUsed]
     diagnostics: Diagnostics | None = None  # assistant messages only
     gate_log_id: int | None = None  # the gate decision behind an assistant message
+    # Why a refused assistant message was refused (D-118); None for every other message and for
+    # refusals stored before the reason was (their stored title and suggestion still show).
+    refusal_reason: RefusalReason | None = None
 
 
 class ConversationOut(BaseModel):

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from pathlib import Path
 
 import pytest
 from sqlalchemy import inspect
 
+from app.chat.repository import ChatStore
 from app.db.engine import get_engine
-from app.db.migrate import MigrationError, latest_version, load_migrations, migrate
+from app.db.migrate import (
+    MIGRATIONS_ROOT,
+    MigrationError,
+    latest_version,
+    load_migrations,
+    migrate,
+)
 from app.db.models import GLOBAL_TABLES, SPACE_TABLES
 
 
@@ -108,3 +116,34 @@ def test_incomplete_statement(tmp_path: Path) -> None:
     (root / "global" / "001_x.sql").write_text("CREATE TABLE a (id INTEGER")
     with pytest.raises(MigrationError, match="incomplete"):
         migrate(tmp_path / "x.db", "global", root)
+
+
+def test_migration_007_keeps_old_refusals_readable(tmp_path: Path) -> None:
+    """D-118: a refusal stored before ``messages.refusal_reason`` existed reads with no reason
+    and its stored title; new rows only take the four refusal reasons."""
+    old = tmp_path / "migrations"
+    (old / "space").mkdir(parents=True)
+    for path in sorted((MIGRATIONS_ROOT / "space").glob("00[1-6]_*.sql")):
+        shutil.copy(path, old / "space" / path.name)
+    db = tmp_path / "space.db"
+    assert migrate(db, "space", old) == 6
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO conversations (id, title, created_at, updated_at) "
+            "VALUES ('c', 'Q', 't', 't')"
+        )
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, role, content, badge, created_at) "
+            "VALUES ('m', 'c', 'assistant', "
+            '\'{"text": "Not in your sources", "suggestion": "Add sources.", "sentences": []}\', '
+            "'refused', 't')"
+        )
+    assert migrate(db, "space") == latest_version("space") >= 7
+    (message,) = ChatStore(get_engine(db)).list_messages("c")
+    assert message.badge == "refused" and message.refusal_reason is None
+    assert (message.content.text, message.content.suggestion) == (
+        "Not in your sources",
+        "Add sources.",
+    )
+    with sqlite3.connect(db) as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE messages SET refusal_reason = 'because' WHERE id = 'm'")

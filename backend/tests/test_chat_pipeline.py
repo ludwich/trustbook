@@ -7,7 +7,16 @@ import pytest
 from app.capabilities.adapters.base import AdapterError
 from app.chat.llm import generate_structured
 from app.chat.output import InvalidOutputError, parse_answer
-from app.chat.pipeline import NO_CITED_ANSWER, NOT_IN_SOURCES, Answered, Refused, answer
+from app.chat.pipeline import (
+    NO_CITED_ANSWER,
+    NOT_IN_SOURCES,
+    NOT_VERIFIED,
+    UNSUPPORTED_SUGGESTION,
+    Answered,
+    Refused,
+    answer,
+    refusal,
+)
 from app.chat.prompt import ANSWER_SCHEMA, RETRY_INSTRUCTION, TEMPERATURE
 from app.chat.schemas import Stage
 from app.grounding.verify import Verifier
@@ -172,3 +181,22 @@ def test_generate_structured_parses_with_given_parser() -> None:
         generate_structured(
             ScriptedChat("", ""), [], ANSWER_SCHEMA, lambda t: parse_answer(t, {"c1"})
         )
+
+
+def test_each_refusal_reason_has_its_own_card() -> None:
+    """D-118 (G3-2): a verification refusal is not shown as "Not in your sources"."""
+    missing = refusal("not_in_sources", QUESTION)
+    assert (missing.message, missing.suggestion) == (
+        NOT_IN_SOURCES,
+        "Add sources that cover “how are proxies configured in requests”, then ask again.",
+    )
+    unverified = refusal("unsupported", QUESTION)
+    assert unverified.reason == "unsupported"
+    assert (unverified.message, unverified.suggestion) == (NOT_VERIFIED, UNSUPPORTED_SUGGESTION)
+    assert unverified.message == "Couldn't verify an answer"
+    assert "rephras" in UNSUPPORTED_SUGGESTION and "file or function" in UNSUPPORTED_SUGGESTION
+    assert "Add sources" not in UNSUPPORTED_SUGGESTION
+    assert refusal("no_sources", QUESTION).message == NOT_IN_SOURCES
+    assert refusal("invalid_output", QUESTION).message == NO_CITED_ANSWER
+    titles = {refusal(r, QUESTION).message for r in ("not_in_sources", "unsupported")}
+    assert len(titles) == 2

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from app.db.engine import get_engine
-from app.db.migrate import MIGRATIONS_ROOT, migrate
+from app.db.migrate import MIGRATIONS_ROOT, latest_version, migrate
 from app.ideation.repository import (
     MAX_RISKS,
     AskedQuestion,
@@ -47,7 +47,7 @@ def test_migration_006_upgrades_existing_rows(tmp_path: Path) -> None:
             "INSERT INTO ideation_nodes (id, session_id, title, created_at, updated_at) "
             "VALUES ('n', 's', 'Branch', 't', 't')"
         )
-    assert migrate(db, "space") == 6
+    assert migrate(db, "space") == latest_version("space") >= 6
     session = IdeationStore(get_engine(db)).get("s")
     assert session.risks == [] and session.brief_at is None
     node = session.nodes[0]
