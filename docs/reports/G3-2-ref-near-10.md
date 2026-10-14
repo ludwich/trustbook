@@ -74,3 +74,37 @@ Any fix that leads the model to cite line 106 (`codes = LookupDict`) would need 
 needs Ludwig's approval.
 
 Raw traces and scripts: builder scratchpad `g32/` (not committed).
+
+## Before and after the fixes (2026-10-14)
+
+Ludwig approved F6, F1, F4 and F2 (D-118..D-121; F3 and F5 not implemented), and added line 106 to the
+answer key. Same data directory and spaces for both: **CodeOnly** (1,217 chunks, new chunker) and **Smoke**.
+Exact question, a fresh conversation per run, 5 runs per cell, Qwen3.6-35B-A3B on Ludwig's llama-server.
+Before: image from `4dfae43`. After: image from `dcd38df` (the four fixes; the two review fixes in `d7a662f`
+touch only feedback wording and a promotion-slot rule, not this question's path).
+
+| Cell | Before: verified / partial / refused | After: verified / partial / refused | Median / max latency, before → after |
+|---|---|---|---|
+| CodeOnly, app default (0.2) | 4 / 1 / 0 | 3 / 1 / 1 | 29.6 / 32.4 s → 47.2 / 55.0 s |
+| CodeOnly, eval (0, seed 42) | 4 / 0 / 1 | 4 / 1 / 0 | 31.3 / 43.5 s → 39.5 / 65.9 s |
+| Smoke, app default | 4 / 0 / 1 | 0 / 5 / 0 | 36.9 / 43.6 s → 36.6 / 70.1 s |
+| Smoke, eval | 4 / 1 / 0 | 3 / 1 / 1 | 37.1 / 46.0 s → 56.3 / 64.3 s |
+| **Total (20 runs)** | **16 / 2 / 2** | **10 / 8 / 2** | |
+
+- **Refusals:** 2 of 20 before and after, all `unsupported` ("`requests.codes` is not in the cited chunks"); no
+  `not_in_sources`. With F6 these now show "Couldn't verify an answer", not "Not in your sources".
+- **Citations:** all in the answer key before (28/28) and after (32/32), with or without line 106. After the
+  fixes the model cites `_init` (109–125) in 8 of 18 answers (before: never). No run cited line 106.
+- **Context (F1, F2):** in every after run `_init` is in the context (promoted as `data_user`) and the table
+  chunk 77–85 sits by its fused rank, next to the docstring, instead of last.
+- **Why more partial answers:** with `_init` in the context, the model also names the upper-case attributes
+  (`TOO_MANY_REQUESTS`, `TOO_MANY`), which `_init` creates with `title.upper()`. That text is in no chunk, so
+  layer 5 removes the sentence (5 of the 8 partials); the remaining 3 failed the checker and the judge. This is
+  layer 5 working as specified; loosening it for derived names would weaken grounding.
+- **Latency:** answers got slower (a longer context; judge calls per run went from 0–3 to 0–4). The shared
+  llama-server also had another model loaded during the after runs, so part of the difference may be load.
+- **Verdict:** the fixes put the right chunks in front of the model and the refusal reason is now visible, but
+  on this question they did not reduce refusals, and they turned full answers into partial ones. Whether to keep
+  F1 is Ludwig's call (Gate 5). F6 is independent of the partials.
+
+Raw runs: builder scratchpad `g32/before_*.json`, `g32/after_*.json`, `score_before.txt`, `score_after.txt`.
