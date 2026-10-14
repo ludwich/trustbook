@@ -397,7 +397,11 @@ def data_user_promotions(
         if name is None or file is None or (chunk.source_id, file, name) in done:
             continue
         done.add((chunk.source_id, file, name))
-        context: list[Child | ChunkRow] = [*chunks, *(p.row for p in added)]
+        context: list[Child | ChunkRow] = [
+            *chunks,
+            *(p.row for p in promoted),
+            *(p.row for p in added),
+        ]
         if any(
             c.source_id == chunk.source_id
             and code_file(c.locator) == file

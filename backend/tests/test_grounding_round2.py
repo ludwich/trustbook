@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from app.chat.pipeline import Answered, Refused, answer, failed_sentences
+from app.chat.pipeline import Answered, Refused, answer, failed_sentences, joint_cover
 from app.chat.prompt import (
     ANSWER_SYSTEM,
     FEEDBACK_HEADING,
@@ -601,6 +601,18 @@ def test_failed_sentences_find_the_context_chunks_holding_the_missing_names() ->
         ]
     )
     assert failed_sentences(sentences, checked, chunks)[0].missing == (("requests.codes", ("c1",)),)
+    # A name the cited chunk does hold (the code judge's ``absent``: its evidence lines lacked it)
+    # is left out: no other chunk is suggested, the reason falls back to "not supported".
+    checked = Checked(
+        [
+            SentenceCheck(0.1, (0.1,), passed=False, missing=("too_many",)),
+            SentenceCheck(0.9, (0.9,)),
+        ]
+    )
+    (only,) = failed_sentences(sentences, checked, chunks)
+    assert (only.missing, only.combined) == ((), ())
+    assert failure_reason(only) == "not supported by the cited chunks"
+    assert joint_cover("too_many", ("c2",), chunks) == ()
 
 
 QUESTION = "Which names compare equal to HTTP 429?"

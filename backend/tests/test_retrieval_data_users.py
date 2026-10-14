@@ -194,6 +194,18 @@ def test_the_answer_caps_are_shared_with_the_parent_promotions(
     assert data_user_promotions(context, spent(EXPANSION_TOKENS - 50), {}, file_rows=files) == []
 
 
+def test_no_promotion_when_another_promotion_already_uses_the_table(
+    engine: Engine, index: InMemorySpaceIndex
+) -> None:
+    source, _ = setup(engine, index)
+    context = chunks(engine, source, [0, 2])
+    rows = chunks_at_ordinals(engine, source, [5], [source])
+    files = FileRows(engine, [source])
+    # A class-head or section promotion that reads _codes already shows a use (review of D-119).
+    promoted = [Promotion(rows[5], 0.0, "class_head", "x")]
+    assert data_user_promotions(context, promoted, {}, file_rows=files) == []
+
+
 # --- the ref-near-10 shape end to end: D-046 guard, D-119 promotion, D-121 order ----------------
 
 

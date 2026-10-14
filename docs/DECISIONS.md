@@ -2300,6 +2300,8 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Alternatives:** raising the 8-chunk cap (every answer pays); promoting `codes = LookupDict(...)` (line 106,
   not in the ref-near-10 answer key, and it does not use the table); a requests-specific rule (not generic);
   promoting every user (one is enough to bridge, and the caps are shared).
+- **Review follow-up:** a use of the table shown by another promotion (a class head or previous section) also
+  counts as "the context already uses it", so no promotion slot is spent on a second user.
 
 ### D-120 The answer rules and the regeneration feedback ask for every chunk a sentence combines (G3-2, F4)
 - **Finding (G3-2):** in 3 of the 5 ref-near-10 refusals the model cited only the `_codes` table chunk for a
@@ -2327,6 +2329,9 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Alternatives:** completing the model's citations automatically (D-064 forbids it: the model must state its
   support); relaxing layer 5 to accept a name found in any context chunk (weakens grounding); listing every
   possible cover (longer feedback, same effect).
+- **Review follow-up:** a name the cited chunks already hold (the code judge's `absent` names: its evidence lines
+  lacked it) is left out of the feedback, so it never suggests a citation that cannot help; with no other name
+  missing, the reason is "not supported by the cited chunks".
 
 ### D-121 Chunks the agreement guard puts back sit by their fused rank, not last (G3-2, F2)
 - **Finding (G3-2):** the ref-near-10 table part is fused #1 (vector #1, full-text #2) and reranked 32nd of 40

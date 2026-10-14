@@ -311,6 +311,8 @@ def joint_cover(
     texts: ``requests.codes.too_many`` passes on a docstring with ``requests.codes`` plus the
     table with ``too_many``); ``()`` when none do (D-120). For the feedback only."""
     base = [_plain(chunks[label]) for label in cited if label in chunks]
+    if name_in(name, base):
+        return ()  # the cited chunks already hold it: nothing to add
     others = [label for label in chunks if label not in cited]
     for size in (1, 2):
         for group in combinations(others, size):
@@ -326,14 +328,19 @@ def failed_sentences(
 ) -> list[FailedSentence]:
     """The failed sentences of a reply for the regeneration feedback (D-074): for each name or
     literal no cited chunk holds, the other context chunks that hold it (layer 5's test), or,
-    when none holds it alone, the chunks that hold it together with the cited ones (D-120)."""
+    when none holds it alone, the chunks that hold it together with the cited ones (D-120).
+    A name the cited chunks do hold (the code judge's ``absent`` names: its evidence lines lacked
+    it) is left out, so the feedback never asks for a citation that cannot help."""
     failed: list[FailedSentence] = []
     for sentence, check in zip(sentences, checked.checks, strict=True):
         if check.passed:
             continue
         missing: list[tuple[str, tuple[str, ...]]] = []
         combined: list[str] = []
+        cited = [_plain(chunks[label]) for label in sentence.chunk_ids if label in chunks]
         for name in check.missing:
+            if name_in(name, cited):
+                continue
             places = tuple(
                 label
                 for label, chunk in chunks.items()
