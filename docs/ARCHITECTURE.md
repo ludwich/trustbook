@@ -625,7 +625,9 @@ citing code only).
 ### Retrieval agreement guard (D-046)
 After reranking, a chunk ranked in the top 3 of **both** the vector and the full-text lists is kept in the
 context even if the reranker dropped it. It replaces the lowest-ranked kept chunk and still respects the
-token budget. The refusal threshold still uses rerank scores.
+token budget. The refusal threshold still uses rerank scores. Since D-121 a chunk the guard put back is placed by
+its fused rank (`service.by_fused_rank`: right before the first chunk after the top one that the fused list ranks
+below it; the reranker's top chunk stays first; the other chunks keep their rerank order), not appended last.
 
 ### Deterministic ordering (D-059)
 Equal scores never fall back to write order or uuids, so a re-indexed space (or another machine with the

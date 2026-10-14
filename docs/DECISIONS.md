@@ -2327,3 +2327,30 @@ Review of D-068..D-070 found five ways the section context loosened grounding or
 - **Alternatives:** completing the model's citations automatically (D-064 forbids it: the model must state its
   support); relaxing layer 5 to accept a name found in any context chunk (weakens grounding); listing every
   possible cover (longer feedback, same effect).
+
+### D-121 Chunks the agreement guard puts back sit by their fused rank, not last (G3-2, F2)
+- **Finding (G3-2):** the ref-near-10 table part is fused #1 (vector #1, full-text #2) and reranked 32nd of 40
+  (0.017). The D-046 guard kept it, but `keep_agreed` sorted the context by rerank position, so it came **last of
+  8**, far from the docstring it belongs with (fused #2, reranked #1), and outside the first 3 chunks D-077
+  expands.
+- **Decision (`app/retrieval/service.py`):** `keep_agreed(..., fused=…)` (retrieval passes the fused order of
+  the candidates) places each chunk **the guard put back** (in the context, not in the reranker's own top 8 by
+  `select_context`) by its fused rank (`by_fused_rank`): best fused rank first, each goes right before the first
+  chunk after the top one that the fused list ranks below it, else at the end. The reranker's top chunk stays
+  first (c1); every other chunk keeps its rerank order; a chunk the reranker kept itself never moves. For
+  ref-near-10: docstring, table, then the rest.
+  - **Unchanged:** which chunks are in the context, `ranked` and every rerank score, so the layer 2 refusal
+    threshold (top rerank score) and `diagnostics.top_rerank` are exactly as before. Without `fused` (direct
+    callers, tests) the old rerank order is kept.
+  - **Consequences:** the context order (and so `retrieval_fingerprint` and the labels `cN`) changes for
+    questions with a guard-kept chunk. Such a chunk can now be among the first 3 that D-077 expands (a method
+    child gets its class head, a code child its outline block) and is no longer the first chunk a D-032 / D-060
+    extra displaces when the budget is full (`fit_extras` drops from the end). D-119 data-user promotion does
+    not depend on the position (it looks at every context chunk).
+  - Query-time only: no chunker or calibration version bump.
+- **Reason:** G3-2 (retrieval root cause 2): the guard exists because both searches rank such a chunk at the
+  top; its place in the prompt should say so, next to the chunks it belongs with, so a two-citation sentence
+  finds both. No grounding layer reads the order.
+- **Alternatives:** placing the whole context by fused rank (overrides the reranker everywhere, and the top
+  chunk); rescoring the table chunk with a docstring prefix (F3, not approved: the refusal threshold reads those
+  scores); putting guard chunks first (above the reranker's best).
