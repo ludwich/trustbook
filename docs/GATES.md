@@ -665,3 +665,14 @@ Other checks:
   them, and the prompt forbids it.
 - **Not in this phase.** "Suggest ideas" from the sources is out of scope (SPEC §16), and there is no CLI command
   for ideation yet (backlog).
+
+---
+
+## Gate 5 — Hardening
+
+Checklist: to be written at the end of Phase 5.
+
+### Answer key change (Ludwig's decision, 2026-10-14)
+- **ref-near-10:** `src/requests/status_codes.py` line 106 (`codes: LookupDict[int] = LookupDict(name="status_codes")`)
+  is added to the accepted locations, because it is the definition of `requests.codes`. Decided by Ludwig with the
+  G3-2 fixes. No other answer-key change (`eval/smoke/refusal.yaml`, `eval/smoke/refusal-verification.md`).
