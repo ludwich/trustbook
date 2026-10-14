@@ -40,6 +40,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import combinations
 
 from app.chat.citation_choice import choose, upgrade_candidates
 from app.chat.citations import number_citations
@@ -294,8 +295,28 @@ def _upgrade(
     return upgraded
 
 
+def _plain(chunk: RetrievedChunk) -> str:
+    return unescape_markdown(without_location(chunk.text))
+
+
 def _holds(name: str, chunk: RetrievedChunk) -> bool:
-    return name_in(name, [unescape_markdown(without_location(chunk.text))])
+    return name_in(name, [_plain(chunk)])
+
+
+def joint_cover(
+    name: str, cited: Sequence[str], chunks: Mapping[str, RetrievedChunk]
+) -> tuple[str, ...]:
+    """The fewest other context chunks (one, else two; the first in label order) that, cited
+    together with ``cited``, hold ``name`` by layer 5's own test (:func:`name_in` over all their
+    texts: ``requests.codes.too_many`` passes on a docstring with ``requests.codes`` plus the
+    table with ``too_many``); ``()`` when none do (D-120). For the feedback only."""
+    base = [_plain(chunks[label]) for label in cited if label in chunks]
+    others = [label for label in chunks if label not in cited]
+    for size in (1, 2):
+        for group in combinations(others, size):
+            if name_in(name, [*base, *(_plain(chunks[label]) for label in group)]):
+                return group
+    return ()
 
 
 def failed_sentences(
@@ -304,23 +325,30 @@ def failed_sentences(
     chunks: Mapping[str, RetrievedChunk],
 ) -> list[FailedSentence]:
     """The failed sentences of a reply for the regeneration feedback (D-074): for each name or
-    literal no cited chunk holds, the other context chunks that hold it (layer 5's test)."""
+    literal no cited chunk holds, the other context chunks that hold it (layer 5's test), or,
+    when none holds it alone, the chunks that hold it together with the cited ones (D-120)."""
     failed: list[FailedSentence] = []
     for sentence, check in zip(sentences, checked.checks, strict=True):
         if check.passed:
             continue
-        missing = tuple(
-            (
-                name,
-                tuple(
-                    label
-                    for label, chunk in chunks.items()
-                    if label not in sentence.chunk_ids and _holds(name, chunk)
-                ),
+        missing: list[tuple[str, tuple[str, ...]]] = []
+        combined: list[str] = []
+        for name in check.missing:
+            places = tuple(
+                label
+                for label, chunk in chunks.items()
+                if label not in sentence.chunk_ids and _holds(name, chunk)
             )
-            for name in check.missing
+            if not places:
+                places = joint_cover(name, sentence.chunk_ids, chunks)
+                if places:
+                    combined.append(name)
+            missing.append((name, places))
+        failed.append(
+            FailedSentence(
+                sentence.text, tuple(sentence.chunk_ids), tuple(missing), tuple(combined)
+            )
         )
-        failed.append(FailedSentence(sentence.text, tuple(sentence.chunk_ids), missing))
     return failed
 
 

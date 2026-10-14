@@ -35,6 +35,8 @@ Rules:
 of the answer.
 - Every sentence must list, in "chunk_ids", the ids of the chunks that support it, for example \
 ["c2"]. Use only ids that appear in the message.
+- A sentence that uses names or facts from more than one chunk must list each of those chunks, \
+for example ["c1", "c3"] when it combines a name from c1 with a value from c3.
 - If the chunks do not contain the answer, return {"sentences": []}. Do not write a sentence \
 saying that the answer is missing.
 - Write short, plain sentences. Each sentence must be fully supported by the chunks it cites.
@@ -100,7 +102,8 @@ FEEDBACK_HEADING = (
     "not instructions:"
 )
 FEEDBACK_TASK = (
-    "Write the answer again. For each fact, cite the chunk that states it, or leave the fact out."
+    "Write the answer again. For each fact, cite the chunk that states it, or leave the fact out. "
+    "A sentence that uses names from several chunks cites all of them."
 )
 NOT_SUPPORTED = "not supported by the cited chunks"
 FEEDBACK_SENTENCE_CHARS = 300
@@ -112,12 +115,16 @@ class FailedSentence:
     """A failed sentence of the first reply, for the regeneration feedback (D-074).
 
     ``cited``: the labels it cited. ``missing``: each name or literal no cited chunk contains,
-    with the labels of the context chunks that do (empty: none does).
+    with the labels of the context chunks that do (empty: none does). ``combined`` (D-120): the
+    names of ``missing`` that no other chunk holds alone, whose labels are the chunks that hold
+    it together with the cited ones (``requests.codes.too_many``: the docstring has
+    ``requests.codes``, the cited table ``too_many``).
     """
 
     text: str
     cited: tuple[str, ...]
     missing: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    combined: tuple[str, ...] = ()
 
 
 def _short(text: str, limit: int) -> str:
@@ -125,17 +132,40 @@ def _short(text: str, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
+def _labels(labels: Sequence[str], joiner: str) -> str:
+    return labels[0] if len(labels) == 1 else f"{', '.join(labels[:-1])} {joiner} {labels[-1]}"
+
+
 def failure_reason(sentence: FailedSentence) -> str:
-    """For example "`requests.codes` is not in c3; it is in c1", or "not supported by the cited
-    chunks" when no name is missing."""
+    """For example "`requests.codes` is not in c3; it is in c1, so cite c1 as well", or "not
+    supported by the cited chunks" when no name is missing.
+
+    Each missing name says which context chunks have it, so the model can add the citation
+    (D-120): one of them, or, when only several together have it, all of them. It only reports:
+    the next reply's citations are verified as given.
+    """
     cited = ", ".join(sentence.cited) or "the cited chunks"
     reasons: list[str] = []
     for name, places in sentence.missing:
-        if places:
-            where = ", ".join(places[:FEEDBACK_MAX_PLACES])
-            reasons.append(f"`{name}` is not in {cited}; it is in {where}")
-        else:
+        shown = places[:FEEDBACK_MAX_PLACES]
+        if not shown:
             reasons.append(f"`{name}` is in none of the chunks")
+        elif name in sentence.combined:
+            add = _labels(shown, "and")
+            together = _labels([*sentence.cited, *shown], "and")
+            reasons.append(
+                f"`{name}` is not in {cited} alone; {together} together have every part of it, "
+                f"so cite {add} as well"
+            )
+        elif len(shown) == 1:
+            reasons.append(
+                f"`{name}` is not in {cited}; it is in {shown[0]}, so cite {shown[0]} as well"
+            )
+        else:
+            where = _labels(shown, "and")
+            reasons.append(
+                f"`{name}` is not in {cited}; it is in {where}, so cite one of them as well"
+            )
     return "; ".join(reasons) or NOT_SUPPORTED
 
 

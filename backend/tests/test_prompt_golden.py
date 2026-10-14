@@ -70,10 +70,12 @@ FAILED = [
     FailedSentence('Anna said "Friday".', ("c4",), (("Friday", ("c2", "c3")),)),
 ]
 QUESTION = "  How does   HTTPAdapter send a request?\n"
-# SHA-256 of the JSON messages, taken at commit eae63e0 (before D-091).
-FIRST = "1a1e5d07e238ff7029110850d21a13a9317bc0d7eb0c0d88645322ad2ccd35ef"
-WITH_OUTLINE = "a1d4a22a410a2a943ab5cb49bc3c4f42e5a770c77c671fd537892bb650e59395"
-REGENERATION = "f5d93362afa55b1cd1ec2c69377b77cb566017687eb114c9cf1af2c4d41be868"
+# SHA-256 of the JSON messages. Taken at commit eae63e0 (before D-091); retaken for D-120, whose
+# only changes are the two-chunk citation rule in ANSWER_SYSTEM, the last sentence of FEEDBACK_TASK
+# and the "so cite … as well" wording of the feedback (checked by reverting those strings).
+FIRST = "a899c461e7e1968effd856f35a44fe210a070012e88c0026ea0ba818f9a52dd3"
+WITH_OUTLINE = "da66d47001b8de95c825d509e8a9448dfe0e4fc9fe8b1118c1f83f5c79aa0a52"
+REGENERATION = "1f64dc5f4e0fef8b43b9c32ead384eec67b8a03e662735c742004f52b6104b22"
 
 
 def digest(messages: list[ChatMessage]) -> str:
